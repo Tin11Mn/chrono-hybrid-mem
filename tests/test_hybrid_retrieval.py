@@ -82,3 +82,16 @@ def test_neighbor_context_retrieves_pronominal_evidence(tmp_path):
     )
 
     assert any(result.content == "She settles on jasmine tea." for result in results)
+
+
+def test_porter_channel_matches_inflected_content_word(tmp_path):
+    store = MemoryStore(str(tmp_path / "memory.db"))
+    store.initialize()
+    store.add(AddRequest(
+        request_id="porter", user_id="user-a", session_id="session-a",
+        messages=[{"role": "user", "content": "Milo relocated to Qingdao."}],
+    ))
+
+    results = store.search(user_id="user-a", query="Where will Milo relocate?", top_k=1)
+
+    assert results[0].content == "Milo relocated to Qingdao."

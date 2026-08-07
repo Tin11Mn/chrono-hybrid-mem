@@ -81,15 +81,33 @@ class MemoryStore:
                     user_id UNINDEXED,
                     content
                 );
+                CREATE VIRTUAL TABLE IF NOT EXISTS messages_porter_fts USING fts5(
+                    message_id UNINDEXED,
+                    user_id UNINDEXED,
+                    content,
+                    tokenize='porter unicode61'
+                );
                 CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
                     fact_id UNINDEXED,
                     user_id UNINDEXED,
                     content
                 );
+                CREATE VIRTUAL TABLE IF NOT EXISTS facts_porter_fts USING fts5(
+                    fact_id UNINDEXED,
+                    user_id UNINDEXED,
+                    content,
+                    tokenize='porter unicode61'
+                );
                 CREATE VIRTUAL TABLE IF NOT EXISTS context_fts USING fts5(
                     message_id UNINDEXED,
                     user_id UNINDEXED,
                     content
+                );
+                CREATE VIRTUAL TABLE IF NOT EXISTS context_porter_fts USING fts5(
+                    message_id UNINDEXED,
+                    user_id UNINDEXED,
+                    content,
+                    tokenize='porter unicode61'
                 );
                 """
             )
@@ -118,6 +136,10 @@ class MemoryStore:
                     "INSERT INTO messages_fts(message_id, user_id, content) VALUES (?, ?, ?)",
                     (message_id, request.user_id, message.content),
                 )
+                connection.execute(
+                    "INSERT INTO messages_porter_fts(message_id, user_id, content) VALUES (?, ?, ?)",
+                    (message_id, request.user_id, message.content),
+                )
                 inserted_messages.append((message_id, message.content))
                 if self.model:
                     for fact in self.model.extract_facts(message.content):
@@ -133,11 +155,19 @@ class MemoryStore:
                             "INSERT INTO facts_fts(fact_id, user_id, content) VALUES (?, ?, ?)",
                             (fact_cursor.lastrowid, request.user_id, fact),
                         )
+                        connection.execute(
+                            "INSERT INTO facts_porter_fts(fact_id, user_id, content) VALUES (?, ?, ?)",
+                            (fact_cursor.lastrowid, request.user_id, fact),
+                        )
             for index, (message_id, _) in enumerate(inserted_messages):
                 window = inserted_messages[max(0, index - 1):index + 2]
                 context = "\n".join(content for _, content in window)
                 connection.execute(
                     "INSERT INTO context_fts(message_id, user_id, content) VALUES (?, ?, ?)",
+                    (message_id, request.user_id, context),
+                )
+                connection.execute(
+                    "INSERT INTO context_porter_fts(message_id, user_id, content) VALUES (?, ?, ?)",
                     (message_id, request.user_id, context),
                 )
 
@@ -172,6 +202,15 @@ class MemoryStore:
                    LIMIT ?""",
                 (match_query, user_id, candidate_limit),
             ).fetchall()
+            raw_porter_rows = connection.execute(
+                """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                   FROM messages_porter_fts
+                   JOIN raw_messages AS raw ON raw.id = messages_porter_fts.message_id
+                   WHERE messages_porter_fts MATCH ? AND messages_porter_fts.user_id = ?
+                   ORDER BY bm25(messages_porter_fts), raw.id DESC
+                   LIMIT ?""",
+                (match_query, user_id, candidate_limit),
+            ).fetchall()
             fact_rows = connection.execute(
                 """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
                    FROM facts_fts
@@ -179,6 +218,16 @@ class MemoryStore:
                    JOIN raw_messages AS raw ON raw.id = fact.source_message_id
                    WHERE facts_fts MATCH ? AND facts_fts.user_id = ?
                    ORDER BY bm25(facts_fts), raw.id DESC
+                   LIMIT ?""",
+                (match_query, user_id, candidate_limit),
+            ).fetchall()
+            fact_porter_rows = connection.execute(
+                """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                   FROM facts_porter_fts
+                   JOIN facts AS fact ON fact.id = facts_porter_fts.fact_id
+                   JOIN raw_messages AS raw ON raw.id = fact.source_message_id
+                   WHERE facts_porter_fts MATCH ? AND facts_porter_fts.user_id = ?
+                   ORDER BY bm25(facts_porter_fts), raw.id DESC
                    LIMIT ?""",
                 (match_query, user_id, candidate_limit),
             ).fetchall()
@@ -191,9 +240,21 @@ class MemoryStore:
                    LIMIT ?""",
                 (match_query, user_id, candidate_limit),
             ).fetchall()
+            context_porter_rows = connection.execute(
+                """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                   FROM context_porter_fts
+                   JOIN raw_messages AS raw ON raw.id = context_porter_fts.message_id
+                   WHERE context_porter_fts MATCH ? AND context_porter_fts.user_id = ?
+                   ORDER BY bm25(context_porter_fts), raw.id DESC
+                   LIMIT ?""",
+                (match_query, user_id, candidate_limit),
+            ).fetchall()
         candidates = {}
         for rows, channel_weight in (
-            (raw_rows, 1.0), (fact_rows, 1.0), (context_rows, self.CONTEXT_RRF_WEIGHT)
+            (raw_rows, 1.0), (raw_porter_rows, 1.0),
+            (fact_rows, 1.0), (fact_porter_rows, 1.0),
+            (context_rows, self.CONTEXT_RRF_WEIGHT),
+            (context_porter_rows, self.CONTEXT_RRF_WEIGHT),
         ):
             for rank, row in enumerate(rows):
                 candidate_id = "mem_{}".format(row["id"])
