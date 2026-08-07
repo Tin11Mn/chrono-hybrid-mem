@@ -1,8 +1,8 @@
 # Hybrid retrieval diagnostic results
 
-Run: GitHub Actions `31172617528` on 2026-08-07  
-Comparison: immutable `v0.2.0` versus current `main` at commit `491af0b`  
-Data: three fictional, hand-authored diagnostic cases in `examples/release_comparison_diagnostic.json`  
+Run: GitHub Actions `31172617528` on 2026-08-07
+Comparison: immutable `v0.2.0` versus current `main` at commit `491af0b`
+Data: three fictional, hand-authored diagnostic cases in `examples/release_comparison_diagnostic.json`
 Configuration: `top_k=1`, no external model call
 
 | Metric | v0.2.0 | Current hybrid retrieval | Change |
