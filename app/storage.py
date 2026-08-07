@@ -11,6 +11,7 @@ from .schemas import AddRequest, MemoryResult
 
 class MemoryStore:
     RRF_CONSTANT = 60
+    TEMPORAL_BONUS = 0.001
     TEMPORAL_QUERY_PATTERN = re.compile(
         r"\b(current|currently|latest|recent|newest|now|today)\b|现在|目前|当前|最新|最近|如今",
         flags=re.IGNORECASE,
@@ -175,7 +176,8 @@ class MemoryStore:
                     if event_ts is not None:
                         recency = (event_ts - oldest) / (newest - oldest)
                         temporal_score = recency if temporal_direction > 0 else 1.0 - recency
-                        candidate["result"].score += 0.02 * temporal_score
+                        # Time should resolve near-ties, not override strong lexical evidence.
+                        candidate["result"].score += self.TEMPORAL_BONUS * temporal_score
 
         ranked = sorted(
             candidates.values(),
