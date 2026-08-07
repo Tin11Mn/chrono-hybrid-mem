@@ -11,7 +11,7 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [x] Add Docker packaging, README and verify the full build/test path (GitHub Actions passed pytest and Docker build on 2026-08-07).
 - [x] Add release metadata, MIT license and v0.1.0 tag for competition submission (completed).
 - [x] Add offline retrieval-evaluation harness and documentation (GitHub Actions passed on 2026-08-07).
-- [ ] Integrate `gpt-4o-mini` fact extraction and evidence reranking for academic-track compliance (in progress; official documentation checked through fallback).
+- [x] Integrate `gpt-4o-mini` fact extraction and evidence reranking for academic-track compliance (GitHub Actions passed on 2026-08-07).
 
 ## Errors encountered
 
