@@ -37,7 +37,8 @@ def test_add_is_synchronous_and_idempotent(tmp_path):
     }
     assert second.status_code == 200
     results = client.post("/search", json={"query": "tea", "user_id": "user-a", "top_k": 100})
-    assert len(results.json()["data"]) == 1
+    data = results.json()["data"]
+    assert {item["id"] for item in data} == {"mem_1", "mem_2"}
 
 
 def test_search_enforces_user_isolation_and_response_shape(tmp_path):

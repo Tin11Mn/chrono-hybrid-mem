@@ -7,7 +7,7 @@ from app.storage import MemoryStore
 
 class FakeMemoryModel:
     def extract_facts(self, content):
-        return ["Mina prefers tea in the afternoon."] if "Mina" in content else []
+        return ["Mina prefers tea in the afternoon."] if "tea" in content else []
 
     def rank_candidates(self, query, options, candidates):
         return [candidate["id"] for candidate in candidates]
