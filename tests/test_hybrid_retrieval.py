@@ -3,7 +3,7 @@ from app.storage import MemoryStore
 
 
 def test_temporal_query_prefers_newer_event_over_later_ingestion(tmp_path):
-    store = MemoryStore(str(tmp_path / "memory.db"))
+    store = MemoryStore(str(tmp_path / "memory.db"), temporal_bonus=0.001)
     store.initialize()
     store.add(AddRequest(
         request_id="new-event", user_id="user-a", session_id="session-a",
@@ -28,7 +28,7 @@ def test_temporal_query_prefers_newer_event_over_later_ingestion(tmp_path):
 
 
 def test_historical_query_prefers_older_event_over_later_ingestion(tmp_path):
-    store = MemoryStore(str(tmp_path / "memory.db"))
+    store = MemoryStore(str(tmp_path / "memory.db"), temporal_bonus=0.001)
     store.initialize()
     store.add(AddRequest(
         request_id="old-event", user_id="user-a", session_id="session-a",

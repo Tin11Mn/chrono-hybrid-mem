@@ -11,7 +11,6 @@ from .schemas import AddRequest, MemoryResult
 
 class MemoryStore:
     RRF_CONSTANT = 60
-    TEMPORAL_BONUS = 0.001
     TEMPORAL_QUERY_PATTERN = re.compile(
         r"\b(current|currently|latest|recent|newest|now|today)\b|现在|目前|当前|最新|最近|如今",
         flags=re.IGNORECASE,
@@ -20,9 +19,11 @@ class MemoryStore:
         r"\b(previous|earlier|before|former|original|initially|used to)\b|之前|以前|曾经|过去|原来|最初",
         flags=re.IGNORECASE,
     )
-    def __init__(self, database_path: str, model: Optional[MemoryModel] = None) -> None:
+    def __init__(self, database_path: str, model: Optional[MemoryModel] = None,
+                 temporal_bonus: float = 0.0) -> None:
         self.database_path = database_path
         self.model = model
+        self.temporal_bonus = temporal_bonus
         Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
@@ -177,7 +178,7 @@ class MemoryStore:
                         recency = (event_ts - oldest) / (newest - oldest)
                         temporal_score = recency if temporal_direction > 0 else 1.0 - recency
                         # Time should resolve near-ties, not override strong lexical evidence.
-                        candidate["result"].score += self.TEMPORAL_BONUS * temporal_score
+                        candidate["result"].score += self.temporal_bonus * temporal_score
 
         ranked = sorted(
             candidates.values(),

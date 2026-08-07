@@ -7,9 +7,18 @@ from .model import model_from_environment
 from .storage import MemoryStore
 
 
+def temporal_bonus_from_environment() -> float:
+    value = float(os.getenv("MEMORY_TEMPORAL_BONUS", "0"))
+    if value < 0 or value > 0.01:
+        raise RuntimeError("MEMORY_TEMPORAL_BONUS must be between 0 and 0.01")
+    return value
+
+
 def create_app(database_path: str = None) -> FastAPI:
     path = database_path or os.getenv("MEMORY_DB_PATH", "data/chrono_hybrid_mem.db")
-    store = MemoryStore(path, model=model_from_environment())
+    store = MemoryStore(
+        path, model=model_from_environment(), temporal_bonus=temporal_bonus_from_environment()
+    )
     store.initialize()
     app = FastAPI(title="ChronoHybridMem", version="0.2.0")
 

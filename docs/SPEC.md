@@ -59,7 +59,7 @@ Search retrieves through two channels: raw-message FTS5 and source-linked fact F
 ## Success criteria
 
 Historical queries such as `before` and `previous` receive the corresponding older-event bonus. Ordinary queries receive no time bias.
-The temporal bonus is deliberately weak: it resolves close fused-retrieval ties but must not override strong lexical evidence.
+The temporal bonus is disabled by default because external evaluation did not establish a general gain. It may be enabled experimentally with `MEMORY_TEMPORAL_BONUS` (maximum `0.01`) only when validated on a permitted development set.
 
 - `GET /health` returns 200 without authentication.
 - `POST /add` persists each message and echoes the three request identifiers with `success: true`.
