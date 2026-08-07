@@ -1,5 +1,6 @@
 import re
 import sqlite3
+import math
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,10 +31,18 @@ class MemoryStore:
         flags=re.IGNORECASE,
     )
     def __init__(self, database_path: str, model: Optional[MemoryModel] = None,
-                 temporal_bonus: float = 0.0) -> None:
+                 temporal_bonus: float = 0.0, semantic_retriever: object = None,
+                 dense_rrf_weight: float = 1.0,
+                 dense_fusion_alpha: Optional[float] = None,
+                 local_reranker: object = None, rerank_top_n: int = 10) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
+        self.semantic_retriever = semantic_retriever
+        self.dense_rrf_weight = dense_rrf_weight
+        self.dense_fusion_alpha = dense_fusion_alpha
+        self.local_reranker = local_reranker
+        self.rerank_top_n = rerank_top_n
         Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
@@ -221,7 +230,8 @@ class MemoryStore:
                 (match_query, user_id, candidate_limit),
             ).fetchall()
             raw_porter_rows = connection.execute(
-                """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                """SELECT raw.id, raw.content, raw.created_at, raw.event_ts,
+                          bm25(messages_porter_fts) AS bm25_score
                    FROM messages_porter_fts
                    JOIN raw_messages AS raw ON raw.id = messages_porter_fts.message_id
                    WHERE messages_porter_fts MATCH ? AND messages_porter_fts.user_id = ?
@@ -298,6 +308,89 @@ class MemoryStore:
                        LIMIT ?""",
                     (structured_match_query, user_id, candidate_limit),
                 ).fetchall()
+            semantic_source_rows = []
+            if self.semantic_retriever:
+                semantic_source_rows = connection.execute(
+                    """SELECT id, content, created_at, event_ts
+                       FROM raw_messages
+                       WHERE user_id = ?
+                       ORDER BY id""",
+                    (user_id,),
+                ).fetchall()
+        dense_rows = []
+        dense_scores = {}
+        if self.semantic_retriever and semantic_source_rows:
+            semantic_candidates = [
+                {"id": "mem_{}".format(row["id"]), "content": str(row["content"])}
+                for row in semantic_source_rows
+            ]
+            if self.dense_fusion_alpha is not None:
+                dense_scores = self.semantic_retriever.score(
+                    query, options or [], semantic_candidates
+                )
+                dense_ids = sorted(dense_scores, key=dense_scores.get, reverse=True)[:candidate_limit]
+            else:
+                dense_ids = self.semantic_retriever.rank(
+                    query, options or [], semantic_candidates, candidate_limit
+                )
+            semantic_by_id = {
+                "mem_{}".format(row["id"]): row for row in semantic_source_rows
+            }
+            dense_rows = [semantic_by_id[item] for item in dense_ids if item in semantic_by_id]
+        if self.dense_fusion_alpha is not None and semantic_source_rows:
+            lexical_scores = {
+                "mem_{}".format(row["id"]): -float(row["bm25_score"])
+                for row in raw_porter_rows
+            }
+            all_ids = ["mem_{}".format(row["id"]) for row in semantic_source_rows]
+
+            def z_scores(values: List[float]) -> List[float]:
+                mean = sum(values) / len(values)
+                variance = sum((value - mean) ** 2 for value in values) / len(values)
+                deviation = math.sqrt(variance)
+                if deviation <= 1e-12:
+                    return [0.0 for _ in values]
+                return [(value - mean) / deviation for value in values]
+
+            lexical_z = z_scores([lexical_scores.get(item, 0.0) for item in all_ids])
+            dense_z = z_scores([dense_scores.get(item, 0.0) for item in all_ids])
+            alpha = self.dense_fusion_alpha
+            fused = []
+            for index, row in enumerate(semantic_source_rows):
+                score = alpha * lexical_z[index] + (1.0 - alpha) * dense_z[index]
+                fused.append({
+                    "result": MemoryResult(
+                        id=all_ids[index], content=row["content"],
+                        score=round(score, 6), created_at=row["created_at"],
+                    ),
+                    "event_ts": row["event_ts"],
+                })
+            fused.sort(key=lambda candidate: (
+                -candidate["result"].score,
+                -(candidate["event_ts"] or 0),
+                candidate["result"].id,
+            ))
+            if self.local_reranker:
+                rerank_count = min(self.rerank_top_n, len(fused))
+                rerank_candidates = [
+                    {
+                        "id": candidate["result"].id,
+                        "content": candidate["result"].content,
+                    }
+                    for candidate in fused[:rerank_count]
+                ]
+                ordered_ids = self.local_reranker.rank(
+                    query, options or [], rerank_candidates
+                )
+                positions = {candidate_id: index for index, candidate_id in enumerate(ordered_ids)}
+                reranked = sorted(
+                    fused[:rerank_count],
+                    key=lambda candidate: positions.get(
+                        candidate["result"].id, len(positions)
+                    ),
+                )
+                fused = reranked + fused[rerank_count:]
+            return [candidate["result"] for candidate in fused[:top_k]]
         candidates = {}
         for rows, channel_weight in (
             (raw_rows, 1.0), (raw_porter_rows, 1.0),
@@ -307,6 +400,7 @@ class MemoryStore:
             (entity_raw_rows, self.ENTITY_RRF_WEIGHT),
             (entity_porter_rows, self.ENTITY_RRF_WEIGHT),
             (entity_context_rows, self.ENTITY_RRF_WEIGHT * self.CONTEXT_RRF_WEIGHT),
+            (dense_rows, self.dense_rrf_weight),
         ):
             for rank, row in enumerate(rows):
                 candidate_id = "mem_{}".format(row["id"])
