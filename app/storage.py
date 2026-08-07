@@ -12,7 +12,9 @@ from .schemas import AddRequest, MemoryResult
 class MemoryStore:
     RRF_CONSTANT = 60
     CONTEXT_RRF_WEIGHT = 0.5
-    ENTITY_RRF_WEIGHT = 1.0
+    # Kept for controlled ablations; full LoCoMo evaluation showed that
+    # hard entity binding harms adversarial cross-speaker questions overall.
+    ENTITY_RRF_WEIGHT = 0.0
     QUERY_STOP_WORDS = {
         "a", "an", "and", "are", "at", "be", "can", "could", "did", "do", "does", "for",
         "from", "how", "i", "in", "is", "it", "me", "my", "of", "on", "or", "please",
