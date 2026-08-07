@@ -13,3 +13,4 @@
 - Created the public repository `Tin11Mn/chrono-hybrid-mem` and pushed the initial `main` branch.
 - Added GitHub Actions verification; run 31167009857 passed pytest and Docker image build.
 - Received submission metadata: 孟昊轩, 郑州大学, hxmeng@gs.zzu.edu.cn.
+- Added MIT License, pushed tag `v0.1.0`, and published the corresponding GitHub release.
