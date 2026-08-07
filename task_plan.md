@@ -8,7 +8,7 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [x] Implement schemas, SQLite persistence and FTS retrieval.
 - [x] Implement FastAPI routes and configuration.
 - [x] Add contract, isolation and idempotency tests.
-- [ ] Add Docker packaging, README and verify the full build/test path (packaging complete; verification blocked locally).
+- [x] Add Docker packaging, README and verify the full build/test path (GitHub Actions passed pytest and Docker build on 2026-08-07).
 
 ## Errors encountered
 
