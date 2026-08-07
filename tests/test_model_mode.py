@@ -20,7 +20,7 @@ def test_competition_mode_requires_a_secret(monkeypatch):
         model_from_environment()
 
 
-def test_model_facts_are_persisted_and_only_candidate_ids_are_ranked(tmp_path):
+def test_model_facts_retrieve_their_original_source_evidence(tmp_path):
     store = MemoryStore(str(tmp_path / "memory.db"), model=FakeMemoryModel())
     store.initialize()
     store.add(AddRequest(
@@ -28,5 +28,5 @@ def test_model_facts_are_persisted_and_only_candidate_ids_are_ranked(tmp_path):
         messages=[{"role": "user", "content": "Mina says tea is her preferred afternoon drink."}],
     ))
     results = store.search(user_id="user-a", query="Mina tea", options=[], top_k=10)
-    assert any(result.id.startswith("fact_") for result in results)
-    assert any(result.content == "Mina prefers tea in the afternoon." for result in results)
+    assert results[0].id.startswith("mem_")
+    assert results[0].content == "Mina says tea is her preferred afternoon drink."

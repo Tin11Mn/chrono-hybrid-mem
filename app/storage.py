@@ -10,6 +10,11 @@ from .schemas import AddRequest, MemoryResult
 
 
 class MemoryStore:
+    RRF_CONSTANT = 60
+    TEMPORAL_QUERY_PATTERN = re.compile(
+        r"\b(current|currently|latest|recent|newest|now|today)\b|现在|目前|当前|最新|最近|如今",
+        flags=re.IGNORECASE,
+    )
     def __init__(self, database_path: str, model: Optional[MemoryModel] = None) -> None:
         self.database_path = database_path
         self.model = model
@@ -117,7 +122,7 @@ class MemoryStore:
         match_query = " OR ".join('"{}"'.format(term.replace('"', '')) for term in terms)
         with self._connection() as connection:
             raw_rows = connection.execute(
-                """SELECT raw.id, raw.content, raw.created_at, -bm25(messages_fts) AS score
+                """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
                    FROM messages_fts
                    JOIN raw_messages AS raw ON raw.id = messages_fts.message_id
                    WHERE messages_fts MATCH ? AND messages_fts.user_id = ?
@@ -126,30 +131,54 @@ class MemoryStore:
                 (match_query, user_id, top_k),
             ).fetchall()
             fact_rows = connection.execute(
-                """SELECT fact.id, fact.fact_text AS content, fact.created_at, -bm25(facts_fts) AS score
+                """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
                    FROM facts_fts
                    JOIN facts AS fact ON fact.id = facts_fts.fact_id
+                   JOIN raw_messages AS raw ON raw.id = fact.source_message_id
                    WHERE facts_fts MATCH ? AND facts_fts.user_id = ?
-                   ORDER BY bm25(facts_fts), fact.id DESC
+                   ORDER BY bm25(facts_fts), raw.id DESC
                    LIMIT ?""",
                 (match_query, user_id, top_k),
             ).fetchall()
-        results = [
-            MemoryResult(id="mem_{}".format(row["id"]), content=row["content"],
-                         score=round(float(row["score"]), 6), created_at=row["created_at"])
-            for row in raw_rows
-        ] + [
-            MemoryResult(id="fact_{}".format(row["id"]), content=row["content"],
-                         score=round(float(row["score"]), 6), created_at=row["created_at"])
-            for row in fact_rows
-        ]
-        results.sort(key=lambda result: result.score, reverse=True)
+        candidates = {}
+        for rows in (raw_rows, fact_rows):
+            for rank, row in enumerate(rows):
+                candidate_id = "mem_{}".format(row["id"])
+                candidate = candidates.setdefault(candidate_id, {
+                    "result": MemoryResult(
+                        id=candidate_id, content=row["content"], score=0.0,
+                        created_at=row["created_at"],
+                    ),
+                    "event_ts": row["event_ts"],
+                })
+                candidate["result"].score += 1.0 / (self.RRF_CONSTANT + rank + 1)
+
+        if self.TEMPORAL_QUERY_PATTERN.search(query):
+            timestamps = [candidate["event_ts"] for candidate in candidates.values()
+                          if candidate["event_ts"] is not None]
+            if timestamps and max(timestamps) > min(timestamps):
+                oldest, newest = min(timestamps), max(timestamps)
+                for candidate in candidates.values():
+                    event_ts = candidate["event_ts"]
+                    if event_ts is not None:
+                        candidate["result"].score += 0.02 * (event_ts - oldest) / (newest - oldest)
+
+        ranked = sorted(
+            candidates.values(),
+            key=lambda candidate: (
+                -candidate["result"].score,
+                -(candidate["event_ts"] or 0),
+                candidate["result"].id,
+            ),
+        )
         deduplicated = []
         seen_content = set()
-        for result in results:
+        for candidate in ranked:
+            result = candidate["result"]
             normalized = result.content.casefold()
             if normalized not in seen_content:
                 seen_content.add(normalized)
+                result.score = round(result.score, 6)
                 deduplicated.append(result)
         if self.model and deduplicated:
             candidates = [{"id": result.id, "content": result.content} for result in deduplicated]

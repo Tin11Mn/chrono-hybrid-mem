@@ -14,10 +14,12 @@ ChronoHybridMem v0.2.0 is a Docker-deployable textual-memory system for the Agen
 
 ```text
 Add: validate -> persist raw messages -> gpt-4o-mini fact extraction -> FTS5 indexing -> return success
-Search: strict user_id filter -> FTS5/BM25 candidates -> gpt-4o-mini candidate ordering -> return evidence records
+Search: strict user_id filter -> raw/fact FTS5 candidates -> RRF fusion and temporal boost -> gpt-4o-mini candidate ordering -> return evidence records
 ```
 
 Competition mode uses only `gpt-4o-mini` for fact extraction and candidate ordering. It requires a private `OPENAI_API_KEY` at runtime; the key is not in this repository or Docker image. Local development can leave model mode disabled and use the lexical baseline. No evaluation data is stored in the repository.
+
+Raw-message and source-linked-fact results are merged with Reciprocal Rank Fusion rather than comparing their separate BM25 scales. For queries explicitly asking for the latest/current state, event timestamps apply a small recency bonus. Returned content remains the original source message; facts only improve retrieval.
 
 ## Run with Docker
 

@@ -52,6 +52,10 @@ Pytest exercises health, synchronous Add, retry idempotency, strict `user_id` is
 
 Local development may omit `OPENAI_API_KEY` and use lexical retrieval only. Competition deployment must set `MEMORY_REQUIRE_MODEL=true` and inject `OPENAI_API_KEY` through the platform's secret mechanism. In that mode the service refuses to start without the key, uses only `gpt-4o-mini`, stores source-linked extracted facts, and asks the model to return only an ordering of existing candidate IDs. Search never requests or returns a final answer.
 
+## Hybrid ranking
+
+Search retrieves through two channels: raw-message FTS5 and source-linked fact FTS5. It merges the two ordered lists with Reciprocal Rank Fusion (RRF, constant 60) rather than comparing their independent BM25 values. Facts are retrieval aids only: results always return the original source message. When a query explicitly asks for the current, latest, recent, or equivalent Chinese temporal state, a small event-timestamp bonus resolves otherwise similar evidence; no time bias is applied to ordinary queries.
+
 ## Success criteria
 
 - `GET /health` returns 200 without authentication.
@@ -60,6 +64,7 @@ Local development may omit `OPENAI_API_KEY` and use lexical retrieval only. Comp
 - `POST /search` returns `{ "data": [...] }`, bounded by `top_k`, with non-empty IDs and content.
 - Docker builds and launches the service with a persistent mounted data directory.
 - In evaluation mode, Add extracts source-linked facts with `gpt-4o-mini` and Search uses `gpt-4o-mini` only to reorder existing evidence candidates.
+- Hybrid ranking must preserve source evidence, favour relevant multi-channel matches, and use event time only for explicit temporal queries.
 
 ## Open questions
 
