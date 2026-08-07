@@ -50,3 +50,16 @@ def test_historical_query_prefers_older_event_over_later_ingestion(tmp_path):
     )
 
     assert results[0].content == "Ravi's preferred drink is hot coffee."
+
+
+def test_query_stop_words_do_not_hide_content_terms(tmp_path):
+    store = MemoryStore(str(tmp_path / "memory.db"))
+    store.initialize()
+    store.add(AddRequest(
+        request_id="content", user_id="user-a", session_id="session-a",
+        messages=[{"role": "user", "content": "Milo prefers jasmine tea."}],
+    ))
+
+    results = store.search(user_id="user-a", query="What does Milo prefer?", top_k=1)
+
+    assert results[0].content == "Milo prefers jasmine tea."

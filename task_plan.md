@@ -18,6 +18,7 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [x] Add a local-only LoCoMo evidence-retrieval evaluator and run a public-data retrieval baseline. The dataset and its detailed results are not stored in this repository.
 - [x] Compare current retrieval against v0.2.0 over the same full LoCoMo evidence set; broad retrieval regression detected and retained only as an external run result.
 - [x] Calibrate temporal ranking against the full LoCoMo comparison; disable it by default because it did not demonstrate a general gain.
+- [ ] Evaluate content-term query normalization against the full LoCoMo comparison (in progress).
 
 ## Errors encountered
 

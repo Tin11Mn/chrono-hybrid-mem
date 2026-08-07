@@ -11,6 +11,12 @@ from .schemas import AddRequest, MemoryResult
 
 class MemoryStore:
     RRF_CONSTANT = 60
+    QUERY_STOP_WORDS = {
+        "a", "an", "and", "are", "at", "be", "can", "could", "did", "do", "does", "for",
+        "from", "how", "i", "in", "is", "it", "me", "my", "of", "on", "or", "please",
+        "tell", "that", "the", "this", "to", "was", "we", "were", "what", "when", "where",
+        "which", "who", "why", "with", "would", "you", "your",
+    }
     TEMPORAL_QUERY_PATTERN = re.compile(
         r"\b(current|currently|latest|recent|newest|now|today)\b|现在|目前|当前|最新|最近|如今",
         flags=re.IGNORECASE,
@@ -122,7 +128,9 @@ class MemoryStore:
 
     def search(self, *, user_id: str, query: str, options: Optional[List[str]] = None,
                top_k: int) -> List[MemoryResult]:
-        terms = re.findall(r"[\w]+", query, flags=re.UNICODE)
+        raw_terms = re.findall(r"[\w]+", query, flags=re.UNICODE)
+        terms = [term for term in raw_terms if term.casefold() not in self.QUERY_STOP_WORDS]
+        terms = terms or raw_terms
         if not terms:
             return []
         match_query = " OR ".join('"{}"'.format(term.replace('"', '')) for term in terms)
