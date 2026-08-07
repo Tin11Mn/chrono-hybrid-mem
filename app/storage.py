@@ -131,6 +131,16 @@ class MemoryStore:
         raw_terms = re.findall(r"[\w]+", query, flags=re.UNICODE)
         terms = [term for term in raw_terms if term.casefold() not in self.QUERY_STOP_WORDS]
         terms = terms or raw_terms
+        if self.model:
+            terms.extend(self.model.plan_query(query, options or []))
+        unique_terms = []
+        seen_terms = set()
+        for term in terms:
+            normalized = term.casefold()
+            if normalized and normalized not in seen_terms:
+                seen_terms.add(normalized)
+                unique_terms.append(term)
+        terms = unique_terms
         if not terms:
             return []
         match_query = " OR ".join('"{}"'.format(term.replace('"', '')) for term in terms)

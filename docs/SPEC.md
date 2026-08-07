@@ -67,7 +67,7 @@ For English natural-language questions, common function words are removed from t
 - Repeating an Add `request_id` is safe and does not duplicate records.
 - `POST /search` returns `{ "data": [...] }`, bounded by `top_k`, with non-empty IDs and content.
 - Docker builds and launches the service with a persistent mounted data directory.
-- In evaluation mode, Add extracts source-linked facts with `gpt-4o-mini` and Search uses `gpt-4o-mini` only to reorder existing evidence candidates.
+- In evaluation mode, Add extracts source-linked facts with `gpt-4o-mini`; Search uses `gpt-4o-mini` to derive safe retrieval terms from the query/options and to reorder existing evidence candidates. It never receives permission to return an answer.
 - Hybrid ranking must preserve source evidence, favour relevant multi-channel matches, and use event time only for explicit temporal queries.
 
 ## Open questions

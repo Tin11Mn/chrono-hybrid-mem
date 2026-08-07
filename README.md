@@ -14,7 +14,7 @@ ChronoHybridMem v0.2.0 is a Docker-deployable textual-memory system for the Agen
 
 ```text
 Add: validate -> persist raw messages -> gpt-4o-mini fact extraction -> FTS5 indexing -> return success
-Search: strict user_id filter -> raw/fact FTS5 candidates -> RRF fusion and temporal boost -> gpt-4o-mini candidate ordering -> return evidence records
+Search: gpt-4o-mini query term planning -> strict user_id filter -> raw/fact FTS5 candidates -> RRF fusion -> gpt-4o-mini candidate ordering -> return evidence records
 ```
 
 Competition mode uses only `gpt-4o-mini` for fact extraction and candidate ordering. It requires a private `OPENAI_API_KEY` at runtime; the key is not in this repository or Docker image. Local development can leave model mode disabled and use the lexical baseline. No evaluation data is stored in the repository.
@@ -86,7 +86,7 @@ For a larger, external retrieval evaluation, see [the LoCoMo protocol](docs/EXTE
 
 - `MEMORY_DB_PATH` controls the SQLite location; Docker defaults to `/data/chrono_hybrid_mem.db`.
 - Competition deployment must set `MEMORY_REQUIRE_MODEL=true` and inject `OPENAI_API_KEY` through a secret manager. The service fails fast if model mode is required but no key is available.
-- `gpt-4o-mini` extracts concise source-linked facts during Add and returns only an ordering of existing evidence IDs during Search. It never produces a benchmark answer.
+- `gpt-4o-mini` extracts concise source-linked facts during Add. During Search it derives retrieval terms from the query/options and returns only an ordering of existing evidence IDs; it never produces a benchmark answer.
 - The service is safe for retried Add calls using `request_id`; SQLite WAL supports concurrent readers and serialized writers.
 - Evaluation data must not be used for training or analytics and should be removed within the competition's required retention period. The deployment operator is responsible for deleting the mounted data volume.
 - No credentials belong in this repository. The file `.env.example` contains names only.
