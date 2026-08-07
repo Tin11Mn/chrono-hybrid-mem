@@ -78,6 +78,8 @@ The report includes evidence-level `Recall@K`, per-case evidence coverage, MRR, 
 
 `examples/release_comparison_diagnostic.json` is a small fictional regression diagnostic. CI compares its `Recall@1` and MRR against the immutable `v0.2.0` release using `scripts/compare_release_v020.py`. It measures this implementation change only; it is not an official leaderboard score or a proxy for the challenge's hidden test set.
 
+The latest recorded comparison improved Recall@1 and MRR from 0.50 to 1.00 on the two-case temporal diagnostic, with average Search latency increasing from 0.586 ms to 0.616 ms. See [the diagnostic report](docs/DIAGNOSTIC_RESULTS.md) for scope and limitations.
+
 ## Operational notes
 
 - `MEMORY_DB_PATH` controls the SQLite location; Docker defaults to `/data/chrono_hybrid_mem.db`.

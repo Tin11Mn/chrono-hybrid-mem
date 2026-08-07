@@ -20,3 +20,4 @@
 - Submitted the academic Docker-deployment application for ChronoHybridMem v0.2.0. The platform confirmed receipt and will deploy, validate the API contract, and initiate evaluation without issuing a leaderboard key.
 - Diagnosed the first hybrid-retrieval CI failure: each channel had been truncated at the final response size before temporal ranking. Expanded the candidate pool before fusion; verification is in progress.
 - Completed hybrid retrieval verification: GitHub Actions run 31170561376 passed API tests and the Docker image build. The implementation now gathers a wider per-channel candidate pool before RRF fusion and temporal ranking.
+- Added a reproducible comparison against v0.2.0 using two fictional temporal diagnostics. GitHub Actions run 31171050875 measured Recall@1 and MRR increasing from 0.50 to 1.00, with average Search latency increasing by 0.030 ms; this is mechanism-level evidence, not a leaderboard score.
