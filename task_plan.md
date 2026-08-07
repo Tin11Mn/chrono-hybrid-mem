@@ -22,6 +22,7 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [ ] Add `gpt-4o-mini` query-term planning and verify its API contract; model-backed external evaluation requires a runtime secret (in progress).
 - [x] Add neighbor-context indexing as a lower-weight RRF channel and retain it after a positive full LoCoMo result.
 - [ ] Add parallel Porter-tokenized FTS channels and evaluate them on full LoCoMo (in progress).
+- [ ] Run a bounded 100-question Search-only `gpt-4o-mini` LoCoMo ablation; requires the GitHub `OPENAI_API_KEY` secret (in progress).
 
 ## Errors encountered
 

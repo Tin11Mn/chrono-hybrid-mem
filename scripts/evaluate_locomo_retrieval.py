@@ -6,6 +6,7 @@ repository. Use only where the dataset licence and competition rules permit.
 
 import argparse
 import json
+import os
 import re
 import tempfile
 from collections import defaultdict
@@ -17,7 +18,24 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.schemas import AddRequest
+from app.model import MemoryModel
 from app.storage import MemoryStore
+
+
+class SearchOnlyModel:
+    """Use the configured model for query planning/ranking without Add-time calls."""
+
+    def __init__(self, api_key: str) -> None:
+        self.model = MemoryModel(api_key)
+
+    def extract_facts(self, content: str) -> List[str]:
+        return []
+
+    def plan_query(self, query: str, options: List[str]) -> List[str]:
+        return self.model.plan_query(query, options)
+
+    def rank_candidates(self, query: str, options: List[str], candidates: List[Dict[str, str]]) -> List[str]:
+        return self.model.rank_candidates(query, options, candidates)
 
 
 def session_number(key: str) -> int:
@@ -63,7 +81,7 @@ def released_v020_search(store: MemoryStore, user_id: str, query: str, top_k: in
 
 
 def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questions: int | None,
-             retriever: str = "current") -> Dict[str, object]:
+             retriever: str = "current", model: object = None) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -79,7 +97,9 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
             messages, evidence_text = messages_and_evidence(sample)
             if not messages:
                 continue
-            store = MemoryStore(str(Path(temporary_directory) / "sample_{}.db".format(sample_index)))
+            store = MemoryStore(
+                str(Path(temporary_directory) / "sample_{}.db".format(sample_index)), model=model
+            )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
             store.add(AddRequest(
@@ -139,6 +159,10 @@ def main() -> None:
     parser.add_argument("--top-k", default="1,3,10", help="Comma-separated retrieval depths")
     parser.add_argument("--max-questions", type=int, help="Optional cap for a smoke test")
     parser.add_argument("--compare-v020", action="store_true", help="Also reproduce v0.2.0 no-model retrieval")
+    parser.add_argument(
+        "--search-model", action="store_true",
+        help="Use OPENAI_API_KEY for query planning/ranking, but skip Add-time fact calls",
+    )
     args = parser.parse_args()
     top_ks = sorted({int(value) for value in args.top_k.split(",")})
     if not top_ks or min(top_ks) < 1 or max(top_ks) > 100:
@@ -146,7 +170,13 @@ def main() -> None:
     data = json.loads(Path(args.dataset).read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError("LoCoMo dataset must be a JSON array")
-    current = evaluate(data, top_ks, args.max_questions)
+    model = None
+    if args.search_model:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("--search-model requires OPENAI_API_KEY")
+        model = SearchOnlyModel(api_key)
+    current = evaluate(data, top_ks, args.max_questions, model=model)
     if not args.compare_v020:
         print(json.dumps(current, ensure_ascii=False, indent=2))
         return

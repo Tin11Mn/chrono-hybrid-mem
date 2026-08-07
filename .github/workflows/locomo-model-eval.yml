@@ -1,0 +1,31 @@
+name: LoCoMo gpt-4o-mini Search Evaluation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/locomo-model-eval.yml"
+      - "app/model.py"
+
+permissions:
+  contents: read
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
+      - name: Download LoCoMo to runner temporary storage
+        run: curl --fail --location --silent --show-error https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json --output "$RUNNER_TEMP/locomo10.json"
+      - name: Evaluate 100 questions with gpt-4o-mini Search
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python scripts/evaluate_locomo_retrieval.py --dataset "$RUNNER_TEMP/locomo10.json" --max-questions 100 --search-model

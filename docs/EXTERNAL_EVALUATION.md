@@ -14,4 +14,6 @@ Remove-Item C:\tmp\locomo10.json
 
 The report gives question hit rate and evidence recall at K, MRR, and category-level Hit@1. With `--compare-v020`, it also runs the v0.2.0 no-model raw-message retrieval logic over exactly the same conversations and prints deltas. It does not call an answer model and does not reproduce LoCoMo's end-to-end QA score.
 
+For a bounded Search-only model ablation, set `OPENAI_API_KEY` through a secret manager and add `--search-model --max-questions 100`. This sends the public questions and retrieved candidate evidence to `gpt-4o-mini` for query planning and candidate ordering. It deliberately skips Add-time fact extraction to bound calls and isolate Search behavior.
+
 LoCoMo is licensed CC BY-NC 4.0. It may be used only for non-commercial evaluation with required attribution; do not add its content or derived records to this repository. See the [upstream repository](https://github.com/snap-research/locomo) and its [license](https://raw.githubusercontent.com/snap-research/locomo/main/LICENSE.txt).
