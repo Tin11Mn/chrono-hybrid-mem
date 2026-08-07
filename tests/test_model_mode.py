@@ -1,5 +1,6 @@
 import pytest
 
+from app.main import dense_fusion_alpha_from_environment, rerank_top_n_from_environment
 from app.model import model_from_environment
 from app.schemas import AddRequest
 from app.storage import MemoryStore
@@ -21,6 +22,18 @@ def test_competition_mode_requires_a_secret(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         model_from_environment()
+
+
+def test_local_score_fusion_rejects_an_invalid_alpha(monkeypatch):
+    monkeypatch.setenv("MEMORY_DENSE_FUSION_ALPHA", "1.1")
+    with pytest.raises(RuntimeError, match="between 0 and 1"):
+        dense_fusion_alpha_from_environment()
+
+
+def test_local_reranker_rejects_an_unbounded_pool(monkeypatch):
+    monkeypatch.setenv("MEMORY_LOCAL_RERANK_TOP_N", "101")
+    with pytest.raises(RuntimeError, match="between 1 and 100"):
+        rerank_top_n_from_environment()
 
 
 def test_model_facts_retrieve_their_original_source_evidence(tmp_path):

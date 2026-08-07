@@ -2,3 +2,44 @@
 
 - The current parent directory is a public evaluation-pipeline snapshot, so the implementation is isolated in this repository.
 - Competition-facing v0.1.0 should return ranked memory evidence only and maintain exact `user_id` isolation.
+- The current repository already supports a no-model fallback and a `gpt-4o-mini` query-planning/reranking path; the local-model work must remain a swappable experimental backend rather than changing the public API contract.
+- The last recorded full LoCoMo no-model result is Hit@1 0.3359 over 1,977 questions. This is the baseline to reproduce before accepting local-model changes.
+- Local model files and LoCoMo data must stay outside Git; only code, dependency declarations, configuration, and aggregate metrics may be committed.
+- Retrieval currently fuses six active FTS5 rank lists (raw, Porter raw, fact, Porter fact, neighbor context, Porter context) with RRF; entity-bound channels are present but weighted to zero.
+- `MemoryStore` accepts a model-like object with `extract_facts`, `plan_query`, and `rank_candidates`, so a local experimental backend can reuse the existing interface while keeping HTTP schemas unchanged.
+- The LoCoMo evaluator already creates one isolated SQLite database per conversation and compares exact annotated evidence text; it needs a local-model selector and model lifecycle reuse rather than a new evaluator.
+- The production Docker image is intentionally small. Local embedding dependencies should be optional so the competition image does not silently change until the method is validated and authorized.
+- The workstation has an NVIDIA RTX 4060 Laptop GPU with 8 GB VRAM, while the default `python` is 3.9.0a4 with no ML packages. The Codex bundled Python runtime is the safer environment for local experiments.
+- `C:\tmp\locomo10.json` is still available locally (2,805,274 bytes); it remains outside the repository.
+- The bundled runtime is Python 3.12.13 and already has NumPy, but not PyTorch, Transformers, SentenceTransformers, pytest, or FastAPI.
+- Local semantic mode can be enabled through a separate environment/configuration path in `create_app`; the current `.env.example` has no local-model settings.
+- The existing `.gitignore` excludes datasets and databases but needs to exclude the experiment virtual environment/model cache if either is placed under the repository.
+- All 16 repository tests pass in `.venv-local` when pytest uses a repository-local ignored temporary directory.
+- The machine already has several Conda environments, including `pytorch` and `retriever`; these may avoid downloading the PyTorch stack again.
+- None of the inspected Conda environments (`pytorch`, `retriever`, `llmServer`, base) contains PyTorch or Transformers.
+- FastEmbed 0.8.0 installed successfully with ONNX Runtime. Its local catalog includes BGE small/base/large and multilingual-E5-large; model sizes range from about 0.067 GB to 2.24 GB.
+- Start with `BAAI/bge-small-en-v1.5` to validate the dense-fusion mechanism, then promote to base/large only if measured gains justify the larger download/runtime cost.
+- The 20-question BGE-small smoke test at dense RRF weight 1.0 completed locally with no API call: current Hit@1 0.30 vs v0.2.0 0.20, current MRR 0.3954 vs 0.2958. This subset is too small for parameter selection.
+- The model download completed in about 18 seconds and the full 20-question command in about 41 seconds; local ONNX inference is practical on this workstation even without CUDA.
+- On a fixed 200-question prefix, the current lexical baseline scored Hit@1 0.330. BGE-small dense RRF weights 0.25/0.5/1/2/4 scored 0.330/0.325/0.330/0.345/0.335; weight 2 was best but the gain was only +0.015.
+- The referenced lexical-dense paper z-normalizes BM25 and dense scores within each candidate set and computes `alpha*z(BM25) + (1-alpha)*z(dense)`. It reports RRF only as an alternative, not the headline method.
+- The paper's LoCoMo numbers are session-level retrieval, while this project's evaluator requires the exact annotated evidence turn. Its 0.752 result is therefore evidence for the method direction, not a directly comparable target value.
+- The paper reports an off-the-shelf MS MARCO cross-encoder reduced Hit@1 by 6.9 percentage points in its tested configuration, so adding a generic reranker is not the next experiment.
+- Turn-level z-score fusion passed all 17 repository tests.
+- On the fixed 200-question prefix, BGE-small score fusion at alpha 0/0.2/0.4/0.6/0.8/1.0 scored Hit@1 0.255/0.360/0.360/0.380/0.375/0.345. Alpha 0.6 is the best bounded candidate, +0.050 over the current lexical baseline.
+- BGE-small dense-only Hit@1 0.255 is the main bottleneck; larger encoders and/or a local generative query/candidate stage are warranted rather than further fine-grained alpha tuning on this encoder.
+- Ollama is not installed and no existing local generative model runtime was found through the checked command path.
+- BGE-large-v1.5 at alpha 0.6 completed a 20-question CPU smoke test with Hit@1 0.40, Hit@10 0.75, and MRR 0.5114. The same BGE-small smoke had Hit@1 0.30 and Hit@10 0.60, so the larger encoder is promising.
+- BGE-large CPU execution is too slow for repeated full-set sweeps; use the RTX 4060 through ONNX Runtime GPU if the CUDA provider can be installed and initialized.
+- The ONNX Runtime GPU wheel could not be installed within the bounded 15-minute attempt. CPU ONNX Runtime 1.28.0 was restored successfully; the same GPU installation path should not be repeated in this session.
+- BGE-large shared-cache sweep on the fixed 200-question prefix scored Hit@1 0.395/0.395/0.390/0.385/0.380 for alpha 0.3/0.4/0.5/0.6/0.7. Alpha 0.3 is best, with Hit@10 0.775; most remaining loss is top-10 ordering rather than candidate recall.
+- FastEmbed supports `answerdotai/answerai-colbert-small-v1` (about 0.13 GB), `colbert-ir/colbertv2.0` (0.44 GB), and `jina-colbert-v2` (2.24 GB) for token-level late interaction, plus SPLADE/BM42/minicoil sparse models.
+- Start with answerai-colbert-small as a bounded reranker over the fused top candidates; it is a different token-level interaction method from the MS MARCO cross-encoder that hurt in the cited paper.
+- BGE-large alpha 0.3 plus answerai-colbert-small top-10 reranking scored Hit@1 0.55, Hit@3 0.75, Hit@10 0.80, and MRR 0.6333 on the 20-question smoke subset. The same BGE-large fusion without reranking scored Hit@1 0.40 and MRR 0.5114 there.
+- At 2026-08-07 23:34 UTC+8, GitHub connector verification showed `Tin11Mn/chrono-hybrid-mem` is public. Remote Release `v0.2.0` is published, non-draft, non-prerelease, and remote tag `v0.2.0` resolves to `d38d95663780d896b94721762cac87194ce376ec`.
+- On the fixed 200-question prefix, answerai-colbert-small rerank pools 5/10/20 scored Hit@1 0.440/0.430/0.420. Top-5 is best and improves BGE-large fusion from 0.395 by +0.045, but the 20-question 0.55 result did not generalize.
+- Reranking 20 candidates raised Hit@10 from 0.775 to 0.800 while lowering Hit@1, confirming that the small ColBERT model's ordering quality, not pool coverage, is the limiting factor.
+- ColBERTv2 top-5 scored Hit@1 0.55 on 20 questions but only 0.425 on the fixed 200-question prefix, below answerai-colbert-small's 0.440. The heavier model is rejected for this pipeline.
+- Full 1,977-question exact-evidence-turn evaluation of BGE-large alpha 0.3 plus answerai-colbert-small top-5 completed in 2,619 seconds with Hit@1 0.4355, Hit@3 0.6186, Hit@10 0.7577, evidence recall@1 0.3068, MRR 0.5183.
+- The same full run reproduced v0.2.0 Hit@1 0.2671 and MRR 0.3567. Against the latest no-model full baseline Hit@1 0.3359, the local method gains +0.0996; against v0.2.0 it gains +0.1684.
+- Category Hit@1 for the selected full configuration: category 1 0.2420, category 2 0.5250, category 3 0.2247, category 4 0.4804, category 5 0.3229. Categories 1/3/5 remain the largest route to the 0.70 target.

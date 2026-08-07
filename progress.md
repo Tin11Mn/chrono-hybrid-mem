@@ -22,3 +22,40 @@
 - Completed hybrid retrieval verification: GitHub Actions run 31170561376 passed API tests and the Docker image build. The implementation now gathers a wider per-channel candidate pool before RRF fusion and temporal ranking.
 - Added a reproducible comparison against v0.2.0 using two fictional temporal diagnostics. GitHub Actions run 31171050875 measured Recall@1 and MRR increasing from 0.50 to 1.00, with average Search latency increasing by 0.030 ms; this is mechanism-level evidence, not a leaderboard score.
 - Extended time-aware ranking to explicit historical queries and expanded the diagnostic to three cases. GitHub Actions run 31172617528 measured Recall@1 and MRR increasing from 0.3333 to 1.0000 against v0.2.0, with average Search latency increasing by 0.044 ms; this remains mechanism-level evidence only.
+- User authorized a local-model-first improvement phase, with later migration of the validated method to `gpt-4o-mini`.
+- Restored the repository's persistent planning context and added phases for local dense retrieval, LoCoMo ablation/full evaluation, API/Docker verification, and GPT migration documentation.
+- Inspected the retrieval, model abstraction, LoCoMo evaluator, tests, dependencies, and Docker packaging. Identified the existing model-like interface as the clean extension point for local dense retrieval.
+- Confirmed an RTX 4060 Laptop GPU with 8 GB VRAM, selected the bundled stable Python runtime for experiments, and verified the local LoCoMo file remains outside Git.
+- Confirmed the bundled runtime is Python 3.12.13 with NumPy only; reviewed application wiring, schemas, model tests, environment template, and external-evaluation documentation.
+- Implemented an optional local SentenceTransformers backend, dense RRF channel, environment/CLI configuration, isolated dependency file, and a semantic no-lexical-overlap regression test. Static compilation passed.
+- The first pytest invocation used the system Python and failed because pytest is absent; it will not be retried with that interpreter.
+- Created `.venv-local` from Python 3.12.13. The bulk ML dependency install stalled for ten minutes without installing packages; verified and stopped only its two child processes, then moved to staged installation.
+- Installed the base project/test dependencies successfully. Pytest collection works, but two external temp locations were denied by the sandbox; switched to a repository-local ignored temp root.
+- Repository-local pytest run passed all 16 tests.
+- SentenceTransformers/PyTorch installation did not finish within 20 minutes and installed no ML packages. Stopped only its two task-owned child processes and discovered existing `pytorch` and `retriever` Conda environments for reuse checks.
+- Existing Conda environments did not contain a reusable PyTorch stack. Installed FastEmbed 0.8.0/ONNX successfully and selected BGE-small-v1.5 for the first bounded experiment.
+- Reworked the local semantic backend to use FastEmbed's query/passage encoders with explicit vector normalization; pinned the optional local dependency.
+- Re-ran the repository suite after the FastEmbed refactor: all 16 tests passed and static compilation succeeded.
+- Added an explicit ignored model-cache option to the LoCoMo evaluator and documented the bounded local-model command.
+- Downloaded BGE-small-v1.5 into the ignored local cache and completed a 20-question end-to-end LoCoMo smoke test. Dense fusion improved this tiny subset's Hit@1 from 0.20 to 0.30 and MRR from 0.2958 to 0.3954; no conclusion will be drawn until a larger ablation.
+- Completed a fixed 200-question dense-RRF ablation. Best Hit@1 was 0.345 at dense weight 2 versus lexical 0.330; this is insufficient, so RRF-only tuning was stopped.
+- Re-read the primary fusion paper and selected its candidate-set z-score fusion formula for the next turn-level implementation, while documenting that the paper's reported results are session-level rather than exact-evidence-turn metrics.
+- Implemented turn-level candidate-set z-normalization and configurable BM25/dense score fusion; added environment/CLI controls and a dense-only endpoint test. All 17 tests passed.
+- Completed the 200-question alpha sweep. Best BGE-small result was Hit@1 0.380 at alpha 0.6 versus the current lexical baseline 0.330; model capacity is now the next variable.
+- Confirmed no existing Ollama runtime. Downloaded BGE-large-v1.5 and completed a 20-question CPU smoke test at alpha 0.6: Hit@1 0.40, Hit@10 0.75, MRR 0.5114. Selected GPU ONNX acceleration before larger evaluations.
+- The bounded ONNX GPU installation did not complete. Stopped only its task-owned processes and restored CPU ONNX Runtime 1.28.0 successfully; further work will optimize caching and evaluation reuse rather than repeat the failed installation.
+- Verified restored ONNX Runtime 1.28.0 with CPU/Azure providers and a normalized BGE-small query vector.
+- Added reusable document/query embedding caches and a single-process multi-alpha LoCoMo sweep to make BGE-large CPU ablations practical.
+- Completed the BGE-large 200-question shared-cache alpha sweep in about four minutes. Best Hit@1 was 0.395 at alpha 0.3, with Hit@10 0.775; selected top-candidate ordering as the next bottleneck.
+- Inspected FastEmbed's installed late-interaction/sparse model catalogs and selected answerai-colbert-small-v1 for the first token-level reranking experiment.
+- Implemented optional cached ColBERT-style MaxSim reranking over a bounded fused pool; added API environment and evaluation CLI controls. All 18 tests passed.
+- Downloaded answerai-colbert-small-v1 and completed a 20-question smoke test: Hit@1 improved from the corresponding BGE-large fusion's 0.40 to 0.55; added a shared-cache rerank-pool sweep for larger validation.
+- User alerted that the submission window closes at 23:59. Stopped the running 200-question experiment to prioritize submission verification.
+- Verified before the deadline that the GitHub repository is public and the remote v0.2.0 Release/tag is published and fixed at commit d38d956. Kept all uncommitted local-model experiments out of the official submitted version.
+- Resumed and completed the interrupted 200-question ColBERT-small rerank-pool sweep. Top-5 was best at Hit@1 0.440 (versus BGE-large fusion 0.395); selected the stronger colbertv2.0 model as the next controlled variable.
+- Evaluated ColBERTv2 at the same top-5 setting. It tied the 20-question Hit@1 0.55 but fell to 0.425 on 200 questions, below the small model's 0.440; rejected it and selected the small model for full-set validation.
+- Completed full 1,977-question evaluation of BGE-large alpha 0.3 + answerai-colbert-small top-5: Hit@1 0.4355, Hit@3 0.6186, Hit@10 0.7577, MRR 0.5183. This improves the latest no-model Hit@1 0.3359 by +0.0996 and v0.2.0 by +0.1684, but does not satisfy the 0.70 goal.
+- User authorized publishing a milestone version when it is better. Began the isolated v0.3.0 draft-PR/release workflow while keeping v0.2.0 immutable and the main goal active.
+- Prepared v0.3.0 metadata, validated defaults, local Docker packaging, CI build coverage, configuration tests, and reproducibility documentation. GitHub authentication must be revalidated before pushing the draft-PR branch.
+- Passed the v0.3.0 pre-publish verification: 20 tests passed, Python static compilation passed, and `git diff --check` found no whitespace errors. Local Docker is unavailable, so the added CI build remains the Docker verifier.
+- Created local branch `agent/local-memory-v0-3` and commit `f2d3d40`. The connected GitHub App can read the repository but returned 403 for both tree and branch creation, confirming that CLI reauthentication is the remaining push prerequisite.

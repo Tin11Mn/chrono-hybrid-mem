@@ -6,3 +6,8 @@ data/
 .locomo/
 locomo*.json
 *.db
+.venv-local/
+.model-cache/
+.pytest-tmp/
+.eval-tmp/
+.local-models/

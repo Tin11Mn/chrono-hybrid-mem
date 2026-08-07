@@ -28,3 +28,5 @@ jobs:
         run: python scripts/compare_release_v020.py --cases examples/release_comparison_diagnostic.json
       - name: Build Docker image
         run: docker build --tag chrono-hybrid-mem:${{ github.sha }} .
+      - name: Build optional local-model Docker image
+        run: docker build --file Dockerfile.local --tag chrono-hybrid-mem-local:${{ github.sha }} .
