@@ -58,6 +58,7 @@ Search retrieves through two channels: raw-message FTS5 and source-linked fact F
 
 Search also indexes a narrow three-message context window around each source message. This lower-weight RRF channel helps retrieve pronouns and elliptical turns while still returning only the original source message as evidence.
 For English morphology, parallel Porter-tokenized raw, fact, and context FTS channels recover inflection variants while the original Unicode channels preserve multilingual lexical behavior.
+When a question contains capitalized entity cues, an additional structured channel requires both an entity and a content-term match. Broad OR channels remain active for cross-speaker and indirect evidence.
 
 ## Success criteria
 

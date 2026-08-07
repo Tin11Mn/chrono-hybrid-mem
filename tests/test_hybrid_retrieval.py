@@ -95,3 +95,19 @@ def test_porter_channel_matches_inflected_content_word(tmp_path):
     results = store.search(user_id="user-a", query="Where will Milo relocate?", top_k=1)
 
     assert results[0].content == "Milo relocated to Qingdao."
+
+
+def test_entity_channel_prefers_the_named_person(tmp_path):
+    store = MemoryStore(str(tmp_path / "memory.db"))
+    store.initialize()
+    store.add(AddRequest(
+        request_id="entities", user_id="user-a", session_id="session-a",
+        messages=[
+            {"role": "user", "content": "Caroline researched adoption agencies."},
+            {"role": "user", "content": "Melanie researched travel agencies."},
+        ],
+    ))
+
+    results = store.search(user_id="user-a", query="What did Caroline research?", top_k=1)
+
+    assert results[0].content == "Caroline researched adoption agencies."

@@ -21,7 +21,8 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [x] Evaluate content-term query normalization against the full LoCoMo comparison; retain it after a positive external retrieval result. Detailed third-party evaluation output is not stored in this repository.
 - [ ] Add `gpt-4o-mini` query-term planning and verify its API contract; model-backed external evaluation requires a runtime secret (in progress).
 - [x] Add neighbor-context indexing as a lower-weight RRF channel and retain it after a positive full LoCoMo result.
-- [ ] Add parallel Porter-tokenized FTS channels and evaluate them on full LoCoMo (in progress).
+- [x] Add parallel Porter-tokenized FTS channels and retain them after a positive full LoCoMo result.
+- [ ] Add an entity-bound structured retrieval channel and evaluate it on full LoCoMo (in progress).
 - [ ] Run a bounded 100-question Search-only `gpt-4o-mini` LoCoMo ablation; requires the GitHub `OPENAI_API_KEY` secret (in progress).
 
 ## Errors encountered

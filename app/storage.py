@@ -12,6 +12,7 @@ from .schemas import AddRequest, MemoryResult
 class MemoryStore:
     RRF_CONSTANT = 60
     CONTEXT_RRF_WEIGHT = 0.5
+    ENTITY_RRF_WEIGHT = 1.0
     QUERY_STOP_WORDS = {
         "a", "an", "and", "are", "at", "be", "can", "could", "did", "do", "does", "for",
         "from", "how", "i", "in", "is", "it", "me", "my", "of", "on", "or", "please",
@@ -189,6 +190,21 @@ class MemoryStore:
         if not terms:
             return []
         match_query = " OR ".join('"{}"'.format(term.replace('"', '')) for term in terms)
+        entity_terms = [
+            term for index, term in enumerate(raw_terms)
+            if index > 0 and len(term) > 1 and term[0].isupper()
+        ][:2]
+        entity_keys = {term.casefold() for term in entity_terms}
+        content_terms = [term for term in terms if term.casefold() not in entity_keys]
+        structured_match_query = None
+        if entity_terms and content_terms:
+            entity_clause = " OR ".join(
+                '"{}"'.format(term.replace('"', '')) for term in entity_terms
+            )
+            content_clause = " OR ".join(
+                '"{}"'.format(term.replace('"', '')) for term in content_terms
+            )
+            structured_match_query = "({}) AND ({})".format(entity_clause, content_clause)
         # Retrieve a broader pool than the response size so fusion and temporal
         # ranking can compare candidates that would otherwise be cut off early.
         candidate_limit = min(max(top_k * 4, 50), 200)
@@ -249,12 +265,46 @@ class MemoryStore:
                    LIMIT ?""",
                 (match_query, user_id, candidate_limit),
             ).fetchall()
+            entity_raw_rows = []
+            entity_porter_rows = []
+            entity_context_rows = []
+            if structured_match_query:
+                entity_raw_rows = connection.execute(
+                    """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                       FROM messages_fts
+                       JOIN raw_messages AS raw ON raw.id = messages_fts.message_id
+                       WHERE messages_fts MATCH ? AND messages_fts.user_id = ?
+                       ORDER BY bm25(messages_fts), raw.id DESC
+                       LIMIT ?""",
+                    (structured_match_query, user_id, candidate_limit),
+                ).fetchall()
+                entity_porter_rows = connection.execute(
+                    """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                       FROM messages_porter_fts
+                       JOIN raw_messages AS raw ON raw.id = messages_porter_fts.message_id
+                       WHERE messages_porter_fts MATCH ? AND messages_porter_fts.user_id = ?
+                       ORDER BY bm25(messages_porter_fts), raw.id DESC
+                       LIMIT ?""",
+                    (structured_match_query, user_id, candidate_limit),
+                ).fetchall()
+                entity_context_rows = connection.execute(
+                    """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                       FROM context_porter_fts
+                       JOIN raw_messages AS raw ON raw.id = context_porter_fts.message_id
+                       WHERE context_porter_fts MATCH ? AND context_porter_fts.user_id = ?
+                       ORDER BY bm25(context_porter_fts), raw.id DESC
+                       LIMIT ?""",
+                    (structured_match_query, user_id, candidate_limit),
+                ).fetchall()
         candidates = {}
         for rows, channel_weight in (
             (raw_rows, 1.0), (raw_porter_rows, 1.0),
             (fact_rows, 1.0), (fact_porter_rows, 1.0),
             (context_rows, self.CONTEXT_RRF_WEIGHT),
             (context_porter_rows, self.CONTEXT_RRF_WEIGHT),
+            (entity_raw_rows, self.ENTITY_RRF_WEIGHT),
+            (entity_porter_rows, self.ENTITY_RRF_WEIGHT),
+            (entity_context_rows, self.ENTITY_RRF_WEIGHT * self.CONTEXT_RRF_WEIGHT),
         ):
             for rank, row in enumerate(rows):
                 candidate_id = "mem_{}".format(row["id"])
