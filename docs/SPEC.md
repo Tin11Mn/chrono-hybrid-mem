@@ -9,6 +9,7 @@ Build a reproducible, Docker-deployable textual-memory service for the Agent Mem
 - Python 3.11 target runtime
 - FastAPI and Uvicorn for HTTP
 - SQLite with FTS5 for persistent lexical retrieval
+- OpenAI Python SDK using `gpt-4o-mini` for source-linked fact extraction and candidate-only reranking in evaluation mode
 - Pytest and HTTPX for contract and isolation tests
 
 ## Commands
@@ -47,6 +48,10 @@ Pytest exercises health, synchronous Add, retry idempotency, strict `user_id` is
 - Ask first: add external models/services, change API contract, publish or push to GitHub.
 - Never: commit secrets or evaluation data; generate answers in Search; mix users' memories.
 
+## Model deployment mode
+
+Local development may omit `OPENAI_API_KEY` and use lexical retrieval only. Competition deployment must set `MEMORY_REQUIRE_MODEL=true` and inject `OPENAI_API_KEY` through the platform's secret mechanism. In that mode the service refuses to start without the key, uses only `gpt-4o-mini`, stores source-linked extracted facts, and asks the model to return only an ordering of existing candidate IDs. Search never requests or returns a final answer.
+
 ## Success criteria
 
 - `GET /health` returns 200 without authentication.
@@ -54,7 +59,8 @@ Pytest exercises health, synchronous Add, retry idempotency, strict `user_id` is
 - Repeating an Add `request_id` is safe and does not duplicate records.
 - `POST /search` returns `{ "data": [...] }`, bounded by `top_k`, with non-empty IDs and content.
 - Docker builds and launches the service with a persistent mounted data directory.
+- In evaluation mode, Add extracts source-linked facts with `gpt-4o-mini` and Search uses `gpt-4o-mini` only to reorder existing evidence candidates.
 
 ## Open questions
 
-- A future version may add `gpt-4o-mini` fact extraction after written confirmation of the competition's model-use rules.
+- The deployment operator must provide the OpenAI API key as a runtime secret; it must never be stored in the repository or submission text.

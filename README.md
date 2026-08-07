@@ -1,6 +1,6 @@
 # ChronoHybridMem
 
-ChronoHybridMem v0.1.0 is a Docker-deployable textual-memory baseline for the Agent Memory Challenge academic track. It synchronously stores raw conversation evidence, retrieves lexical matches through SQLite FTS5, and returns ranked memory records only. It does not generate benchmark answers.
+ChronoHybridMem v0.2.0 is a Docker-deployable textual-memory system for the Agent Memory Challenge academic track. It synchronously stores raw conversation evidence, derives source-linked facts with `gpt-4o-mini` in competition mode, retrieves candidates through SQLite FTS5, and returns ranked memory records only. It does not generate benchmark answers.
 
 ## System metadata
 
@@ -13,17 +13,19 @@ ChronoHybridMem v0.1.0 is a Docker-deployable textual-memory baseline for the Ag
 ## Method
 
 ```text
-Add: validate -> persist raw messages -> index in SQLite FTS5 -> return success
-Search: strict user_id filter -> FTS5/BM25 ranking -> return evidence records
+Add: validate -> persist raw messages -> gpt-4o-mini fact extraction -> FTS5 indexing -> return success
+Search: strict user_id filter -> FTS5/BM25 candidates -> gpt-4o-mini candidate ordering -> return evidence records
 ```
 
-The v0.1.0 baseline deliberately uses no external model, API key, embedding service, or evaluation data. A future source-linked fact layer can be added only after the competition's model rules are confirmed in writing.
+Competition mode uses only `gpt-4o-mini` for fact extraction and candidate ordering. It requires a private `OPENAI_API_KEY` at runtime; the key is not in this repository or Docker image. Local development can leave model mode disabled and use the lexical baseline. No evaluation data is stored in the repository.
 
 ## Run with Docker
 
 ```bash
-docker build -t chrono-hybrid-mem:0.1.0 .
-docker run --rm -p 8000:8000 -v chrono-memory-data:/data chrono-hybrid-mem:0.1.0
+docker build -t chrono-hybrid-mem:0.2.0 .
+docker run --rm -p 8000:8000 -v chrono-memory-data:/data \
+  -e MEMORY_REQUIRE_MODEL=true -e OPENAI_API_KEY=your_runtime_secret \
+  chrono-hybrid-mem:0.2.0
 ```
 
 Health check: `GET http://localhost:8000/health`
@@ -75,13 +77,15 @@ The report includes evidence-level `Recall@K`, per-case evidence coverage, MRR, 
 ## Operational notes
 
 - `MEMORY_DB_PATH` controls the SQLite location; Docker defaults to `/data/chrono_hybrid_mem.db`.
+- Competition deployment must set `MEMORY_REQUIRE_MODEL=true` and inject `OPENAI_API_KEY` through a secret manager. The service fails fast if model mode is required but no key is available.
+- `gpt-4o-mini` extracts concise source-linked facts during Add and returns only an ordering of existing evidence IDs during Search. It never produces a benchmark answer.
 - The service is safe for retried Add calls using `request_id`; SQLite WAL supports concurrent readers and serialized writers.
 - Evaluation data must not be used for training or analytics and should be removed within the competition's required retention period. The deployment operator is responsible for deleting the mounted data volume.
 - No credentials belong in this repository. The file `.env.example` contains names only.
 
 ## Attribution and versioning
 
-This initial implementation is original project code using FastAPI, Uvicorn and SQLite FTS5. Before submission, create a release tag and include its commit SHA, license, and any added upstream attribution in this README.
+This implementation is original project code using FastAPI, Uvicorn, SQLite FTS5, and the OpenAI Python SDK with `gpt-4o-mini`. Before submission, create a release tag and include its commit SHA, license, and any added upstream attribution in this README.
 
 ## License
 

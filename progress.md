@@ -15,3 +15,4 @@
 - Received submission metadata: 孟昊轩, 郑州大学, hxmeng@gs.zzu.edu.cn.
 - Added MIT License, pushed tag `v0.1.0`, and published the corresponding GitHub release.
 - Added offline retrieval evaluation with fictional examples; GitHub Actions run 31168359021 passed tests and Docker build.
+- Began `gpt-4o-mini` integration planning; paused because the required official-docs MCP connector cannot be installed from this Codex session.

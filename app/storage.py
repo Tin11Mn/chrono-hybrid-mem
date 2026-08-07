@@ -3,14 +3,16 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator, List
+from typing import Iterator, List, Optional
 
+from .model import MemoryModel
 from .schemas import AddRequest, MemoryResult
 
 
 class MemoryStore:
-    def __init__(self, database_path: str) -> None:
+    def __init__(self, database_path: str, model: Optional[MemoryModel] = None) -> None:
         self.database_path = database_path
+        self.model = model
         Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
@@ -48,8 +50,21 @@ class MemoryStore:
                     created_at TEXT NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS raw_messages_user_idx ON raw_messages(user_id);
+                CREATE TABLE IF NOT EXISTS facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    source_message_id INTEGER NOT NULL,
+                    fact_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(source_message_id, fact_text)
+                );
                 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
                     message_id UNINDEXED,
+                    user_id UNINDEXED,
+                    content
+                );
+                CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+                    fact_id UNINDEXED,
                     user_id UNINDEXED,
                     content
                 );
@@ -79,14 +94,29 @@ class MemoryStore:
                     "INSERT INTO messages_fts(message_id, user_id, content) VALUES (?, ?, ?)",
                     (message_id, request.user_id, message.content),
                 )
+                if self.model:
+                    for fact in self.model.extract_facts(message.content):
+                        try:
+                            fact_cursor = connection.execute(
+                                """INSERT INTO facts(user_id, source_message_id, fact_text, created_at)
+                                   VALUES (?, ?, ?, ?)""",
+                                (request.user_id, message_id, fact, now),
+                            )
+                        except sqlite3.IntegrityError:
+                            continue
+                        connection.execute(
+                            "INSERT INTO facts_fts(fact_id, user_id, content) VALUES (?, ?, ?)",
+                            (fact_cursor.lastrowid, request.user_id, fact),
+                        )
 
-    def search(self, *, user_id: str, query: str, top_k: int) -> List[MemoryResult]:
+    def search(self, *, user_id: str, query: str, options: Optional[List[str]] = None,
+               top_k: int) -> List[MemoryResult]:
         terms = re.findall(r"[\w]+", query, flags=re.UNICODE)
         if not terms:
             return []
         match_query = " OR ".join('"{}"'.format(term.replace('"', '')) for term in terms)
         with self._connection() as connection:
-            rows = connection.execute(
+            raw_rows = connection.execute(
                 """SELECT raw.id, raw.content, raw.created_at, -bm25(messages_fts) AS score
                    FROM messages_fts
                    JOIN raw_messages AS raw ON raw.id = messages_fts.message_id
@@ -95,10 +125,35 @@ class MemoryStore:
                    LIMIT ?""",
                 (match_query, user_id, top_k),
             ).fetchall()
-        return [
-            MemoryResult(
-                id="mem_{}".format(row["id"]), content=row["content"],
-                score=round(float(row["score"]), 6), created_at=row["created_at"],
-            )
-            for row in rows
+            fact_rows = connection.execute(
+                """SELECT fact.id, fact.fact_text AS content, fact.created_at, -bm25(facts_fts) AS score
+                   FROM facts_fts
+                   JOIN facts AS fact ON fact.id = facts_fts.fact_id
+                   WHERE facts_fts MATCH ? AND facts_fts.user_id = ?
+                   ORDER BY bm25(facts_fts), fact.id DESC
+                   LIMIT ?""",
+                (match_query, user_id, top_k),
+            ).fetchall()
+        results = [
+            MemoryResult(id="mem_{}".format(row["id"]), content=row["content"],
+                         score=round(float(row["score"]), 6), created_at=row["created_at"])
+            for row in raw_rows
+        ] + [
+            MemoryResult(id="fact_{}".format(row["id"]), content=row["content"],
+                         score=round(float(row["score"]), 6), created_at=row["created_at"])
+            for row in fact_rows
         ]
+        results.sort(key=lambda result: result.score, reverse=True)
+        deduplicated = []
+        seen_content = set()
+        for result in results:
+            normalized = result.content.casefold()
+            if normalized not in seen_content:
+                seen_content.add(normalized)
+                deduplicated.append(result)
+        if self.model and deduplicated:
+            candidates = [{"id": result.id, "content": result.content} for result in deduplicated]
+            ordered_ids = self.model.rank_candidates(query, options or [], candidates)
+            positions = {candidate_id: index for index, candidate_id in enumerate(ordered_ids)}
+            deduplicated.sort(key=lambda result: positions.get(result.id, len(positions)))
+        return deduplicated[:top_k]
