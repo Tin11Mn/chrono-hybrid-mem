@@ -31,7 +31,7 @@ jobs:
         run: curl --fail --location --silent --show-error https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json --output "$RUNNER_TEMP/locomo10.json"
       - name: Evaluate evidence retrieval
         env:
-          MAX_QUESTIONS: ${{ inputs.max_questions }}
+          MAX_QUESTIONS: ${{ inputs.max_questions || '100' }}
         run: |
           if [ -n "$MAX_QUESTIONS" ]; then
             python scripts/evaluate_locomo_retrieval.py --dataset "$RUNNER_TEMP/locomo10.json" --max-questions "$MAX_QUESTIONS"
