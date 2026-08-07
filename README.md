@@ -72,3 +72,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 ## Attribution and versioning
 
 This initial implementation is original project code using FastAPI, Uvicorn and SQLite FTS5. Before submission, create a release tag and include its commit SHA, license, and any added upstream attribution in this README.
+
+## License
+
+Released under the [MIT License](LICENSE).
