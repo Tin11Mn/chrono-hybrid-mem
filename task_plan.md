@@ -9,6 +9,7 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [x] Implement FastAPI routes and configuration.
 - [x] Add contract, isolation and idempotency tests.
 - [x] Add Docker packaging, README and verify the full build/test path (GitHub Actions passed pytest and Docker build on 2026-08-07).
+- [ ] Add release metadata, license and v0.1.0 tag for competition submission (in progress).
 
 ## Errors encountered
 

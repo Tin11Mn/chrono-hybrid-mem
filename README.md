@@ -2,6 +2,14 @@
 
 ChronoHybridMem v0.1.0 is a Docker-deployable textual-memory baseline for the Agent Memory Challenge academic track. It synchronously stores raw conversation evidence, retrieves lexical matches through SQLite FTS5, and returns ranked memory records only. It does not generate benchmark answers.
 
+## System metadata
+
+- Author: 孟昊轩 (Haoxuan Meng)
+- Institution: Zhengzhou University (郑州大学)
+- Contact: hxmeng@gs.zzu.edu.cn
+- Track / Division: Textual Memory / Academic Methods
+- Submission route: Public GitHub repository with maintainer Docker deployment
+
 ## Method
 
 ```text
@@ -63,4 +71,4 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ## Attribution and versioning
 
-This initial implementation is original project code using FastAPI, Uvicorn and SQLite FTS5. Before submission, create a release tag and include its commit SHA, author/team details, and any added upstream attribution in this README.
+This initial implementation is original project code using FastAPI, Uvicorn and SQLite FTS5. Before submission, create a release tag and include its commit SHA, license, and any added upstream attribution in this README.
