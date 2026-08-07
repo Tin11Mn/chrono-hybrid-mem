@@ -10,3 +10,4 @@
 - Python static compilation passed for all application and test modules.
 - Docker CLI is not installed on this workstation; Docker image verification is pending elsewhere.
 - Removed the failed `.venv` created during dependency setup.
+- Created the public repository `Tin11Mn/chrono-hybrid-mem` and pushed the initial `main` branch.
