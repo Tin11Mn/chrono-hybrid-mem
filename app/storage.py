@@ -11,6 +11,7 @@ from .schemas import AddRequest, MemoryResult
 
 class MemoryStore:
     RRF_CONSTANT = 60
+    CONTEXT_RRF_WEIGHT = 0.5
     QUERY_STOP_WORDS = {
         "a", "an", "and", "are", "at", "be", "can", "could", "did", "do", "does", "for",
         "from", "how", "i", "in", "is", "it", "me", "my", "of", "on", "or", "please",
@@ -85,6 +86,11 @@ class MemoryStore:
                     user_id UNINDEXED,
                     content
                 );
+                CREATE VIRTUAL TABLE IF NOT EXISTS context_fts USING fts5(
+                    message_id UNINDEXED,
+                    user_id UNINDEXED,
+                    content
+                );
                 """
             )
 
@@ -99,6 +105,7 @@ class MemoryStore:
             except sqlite3.IntegrityError:
                 # The unique constraint makes a retried request safe even if two Adds race.
                 return
+            inserted_messages = []
             for sequence, message in enumerate(request.messages):
                 cursor = connection.execute(
                     """INSERT INTO raw_messages(user_id, session_id, role, content, event_ts, sequence, created_at)
@@ -111,6 +118,7 @@ class MemoryStore:
                     "INSERT INTO messages_fts(message_id, user_id, content) VALUES (?, ?, ?)",
                     (message_id, request.user_id, message.content),
                 )
+                inserted_messages.append((message_id, message.content))
                 if self.model:
                     for fact in self.model.extract_facts(message.content):
                         try:
@@ -125,6 +133,13 @@ class MemoryStore:
                             "INSERT INTO facts_fts(fact_id, user_id, content) VALUES (?, ?, ?)",
                             (fact_cursor.lastrowid, request.user_id, fact),
                         )
+            for index, (message_id, _) in enumerate(inserted_messages):
+                window = inserted_messages[max(0, index - 1):index + 2]
+                context = "\n".join(content for _, content in window)
+                connection.execute(
+                    "INSERT INTO context_fts(message_id, user_id, content) VALUES (?, ?, ?)",
+                    (message_id, request.user_id, context),
+                )
 
     def search(self, *, user_id: str, query: str, options: Optional[List[str]] = None,
                top_k: int) -> List[MemoryResult]:
@@ -167,8 +182,19 @@ class MemoryStore:
                    LIMIT ?""",
                 (match_query, user_id, candidate_limit),
             ).fetchall()
+            context_rows = connection.execute(
+                """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                   FROM context_fts
+                   JOIN raw_messages AS raw ON raw.id = context_fts.message_id
+                   WHERE context_fts MATCH ? AND context_fts.user_id = ?
+                   ORDER BY bm25(context_fts), raw.id DESC
+                   LIMIT ?""",
+                (match_query, user_id, candidate_limit),
+            ).fetchall()
         candidates = {}
-        for rows in (raw_rows, fact_rows):
+        for rows, channel_weight in (
+            (raw_rows, 1.0), (fact_rows, 1.0), (context_rows, self.CONTEXT_RRF_WEIGHT)
+        ):
             for rank, row in enumerate(rows):
                 candidate_id = "mem_{}".format(row["id"])
                 candidate = candidates.setdefault(candidate_id, {
@@ -178,7 +204,7 @@ class MemoryStore:
                     ),
                     "event_ts": row["event_ts"],
                 })
-                candidate["result"].score += 1.0 / (self.RRF_CONSTANT + rank + 1)
+                candidate["result"].score += channel_weight / (self.RRF_CONSTANT + rank + 1)
 
         temporal_direction = 0
         if self.TEMPORAL_QUERY_PATTERN.search(query):

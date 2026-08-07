@@ -56,6 +56,8 @@ Local development may omit `OPENAI_API_KEY` and use lexical retrieval only. Comp
 
 Search retrieves through two channels: raw-message FTS5 and source-linked fact FTS5. It merges the two ordered lists with Reciprocal Rank Fusion (RRF, constant 60) rather than comparing their independent BM25 values. Facts are retrieval aids only: results always return the original source message. When a query explicitly asks for the current, latest, recent, or equivalent Chinese temporal state, a small event-timestamp bonus resolves otherwise similar evidence; no time bias is applied to ordinary queries.
 
+Search also indexes a narrow three-message context window around each source message. This lower-weight RRF channel helps retrieve pronouns and elliptical turns while still returning only the original source message as evidence.
+
 ## Success criteria
 
 Historical queries such as `before` and `previous` receive the corresponding older-event bonus. Ordinary queries receive no time bias.
