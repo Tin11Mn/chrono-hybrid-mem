@@ -25,3 +25,28 @@ def test_temporal_query_prefers_newer_event_over_later_ingestion(tmp_path):
     )
 
     assert results[0].content == "Ravi's preferred drink is tea."
+
+
+def test_historical_query_prefers_older_event_over_later_ingestion(tmp_path):
+    store = MemoryStore(str(tmp_path / "memory.db"))
+    store.initialize()
+    store.add(AddRequest(
+        request_id="old-event", user_id="user-a", session_id="session-a",
+        messages=[{
+            "role": "user", "timestamp": 100,
+            "content": "Ravi's preferred drink is hot coffee.",
+        }],
+    ))
+    store.add(AddRequest(
+        request_id="new-event", user_id="user-a", session_id="session-a",
+        messages=[{
+            "role": "user", "timestamp": 200,
+            "content": "Ravi's preferred drink is black tea.",
+        }],
+    ))
+
+    results = store.search(
+        user_id="user-a", query="What did Ravi prefer before?", top_k=1
+    )
+
+    assert results[0].content == "Ravi's preferred drink is hot coffee."

@@ -15,6 +15,10 @@ class MemoryStore:
         r"\b(current|currently|latest|recent|newest|now|today)\b|现在|目前|当前|最新|最近|如今",
         flags=re.IGNORECASE,
     )
+    HISTORICAL_QUERY_PATTERN = re.compile(
+        r"\b(previous|earlier|before|former|original|initially|used to)\b|之前|以前|曾经|过去|原来|最初",
+        flags=re.IGNORECASE,
+    )
     def __init__(self, database_path: str, model: Optional[MemoryModel] = None) -> None:
         self.database_path = database_path
         self.model = model
@@ -156,7 +160,12 @@ class MemoryStore:
                 })
                 candidate["result"].score += 1.0 / (self.RRF_CONSTANT + rank + 1)
 
+        temporal_direction = 0
         if self.TEMPORAL_QUERY_PATTERN.search(query):
+            temporal_direction = 1
+        elif self.HISTORICAL_QUERY_PATTERN.search(query):
+            temporal_direction = -1
+        if temporal_direction:
             timestamps = [candidate["event_ts"] for candidate in candidates.values()
                           if candidate["event_ts"] is not None]
             if timestamps and max(timestamps) > min(timestamps):
@@ -164,7 +173,9 @@ class MemoryStore:
                 for candidate in candidates.values():
                     event_ts = candidate["event_ts"]
                     if event_ts is not None:
-                        candidate["result"].score += 0.02 * (event_ts - oldest) / (newest - oldest)
+                        recency = (event_ts - oldest) / (newest - oldest)
+                        temporal_score = recency if temporal_direction > 0 else 1.0 - recency
+                        candidate["result"].score += 0.02 * temporal_score
 
         ranked = sorted(
             candidates.values(),
