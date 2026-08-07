@@ -120,6 +120,9 @@ class MemoryStore:
         if not terms:
             return []
         match_query = " OR ".join('"{}"'.format(term.replace('"', '')) for term in terms)
+        # Retrieve a broader pool than the response size so fusion and temporal
+        # ranking can compare candidates that would otherwise be cut off early.
+        candidate_limit = min(max(top_k * 4, 50), 200)
         with self._connection() as connection:
             raw_rows = connection.execute(
                 """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
@@ -128,7 +131,7 @@ class MemoryStore:
                    WHERE messages_fts MATCH ? AND messages_fts.user_id = ?
                    ORDER BY bm25(messages_fts), raw.id DESC
                    LIMIT ?""",
-                (match_query, user_id, top_k),
+                (match_query, user_id, candidate_limit),
             ).fetchall()
             fact_rows = connection.execute(
                 """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
@@ -138,7 +141,7 @@ class MemoryStore:
                    WHERE facts_fts MATCH ? AND facts_fts.user_id = ?
                    ORDER BY bm25(facts_fts), raw.id DESC
                    LIMIT ?""",
-                (match_query, user_id, top_k),
+                (match_query, user_id, candidate_limit),
             ).fetchall()
         candidates = {}
         for rows in (raw_rows, fact_rows):

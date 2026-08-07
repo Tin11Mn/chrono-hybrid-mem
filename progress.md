@@ -18,3 +18,4 @@
 - Began `gpt-4o-mini` integration planning; paused because the required official-docs MCP connector cannot be installed from this Codex session.
 - Implemented `gpt-4o-mini` source-linked fact extraction and candidate-only reranking; GitHub Actions run 31169046309 passed all tests and Docker build without an API call.
 - Submitted the academic Docker-deployment application for ChronoHybridMem v0.2.0. The platform confirmed receipt and will deploy, validate the API contract, and initiate evaluation without issuing a leaderboard key.
+- Diagnosed the first hybrid-retrieval CI failure: each channel had been truncated at the final response size before temporal ranking. Expanded the candidate pool before fusion; verification is in progress.

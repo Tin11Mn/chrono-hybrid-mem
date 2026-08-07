@@ -23,3 +23,4 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 | Docker CLI unavailable | 1 | Dockerfile is complete; image build must run on a machine with Docker installed. |
 | PowerShell parsed `v0.1.0^{commit}` incorrectly while reading the tag target | 1 | Tag creation and push succeeded; verified the release through GitHub CLI instead. |
 | Official OpenAI documentation connector could not be installed because `codex.exe` is access-denied | 2 | User must run the documented MCP installation command and restart Codex; then implementation can safely continue. |
+| Temporal-ranking test returned a later-ingested, older event | 1 | Expanded each retrieval channel's candidate pool before RRF fusion, so temporal reranking can compare evidence beyond the final `top_k`. |
