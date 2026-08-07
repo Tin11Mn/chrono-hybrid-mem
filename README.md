@@ -76,6 +76,8 @@ python scripts/evaluate_retrieval.py --cases examples/demo_eval.json
 
 The report includes evidence-level `Recall@K`, per-case evidence coverage, MRR, and average Search latency. Add local cases with `case_id`, `user_id`, `session_id`, `messages`, `query`, and `expected_evidence`; every expected-evidence string is matched against returned memory content.
 
+`examples/release_comparison_diagnostic.json` is a small fictional regression diagnostic. CI compares its `Recall@1` and MRR against the immutable `v0.2.0` release using `scripts/compare_release_v020.py`. It measures this implementation change only; it is not an official leaderboard score or a proxy for the challenge's hidden test set.
+
 ## Operational notes
 
 - `MEMORY_DB_PATH` controls the SQLite location; Docker defaults to `/data/chrono_hybrid_mem.db`.
