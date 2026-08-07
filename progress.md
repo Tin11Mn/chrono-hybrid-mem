@@ -14,3 +14,4 @@
 - Added GitHub Actions verification; run 31167009857 passed pytest and Docker image build.
 - Received submission metadata: 孟昊轩, 郑州大学, hxmeng@gs.zzu.edu.cn.
 - Added MIT License, pushed tag `v0.1.0`, and published the corresponding GitHub release.
+- Added offline retrieval evaluation with fictional examples; GitHub Actions run 31168359021 passed tests and Docker build.

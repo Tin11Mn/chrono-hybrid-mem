@@ -10,7 +10,7 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [x] Add contract, isolation and idempotency tests.
 - [x] Add Docker packaging, README and verify the full build/test path (GitHub Actions passed pytest and Docker build on 2026-08-07).
 - [x] Add release metadata, MIT license and v0.1.0 tag for competition submission (completed).
-- [ ] Add offline retrieval-evaluation harness and documentation (in progress).
+- [x] Add offline retrieval-evaluation harness and documentation (GitHub Actions passed on 2026-08-07).
 
 ## Errors encountered
 
