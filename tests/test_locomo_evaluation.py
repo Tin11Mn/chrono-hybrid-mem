@@ -35,3 +35,15 @@ def test_locomo_evaluator_uses_annotated_dialog_evidence():
     assert report["hit_at_k"] == {"1": 1.0, "3": 1.0}
     assert report["evidence_recall_at_k"] == {"1": 1.0, "3": 1.0}
     assert report["mrr"] == 1.0
+
+
+def test_locomo_released_baseline_is_available_for_comparison():
+    sample = [{
+        "sample_id": "sample-2",
+        "conversation": {"session_1": [{"speaker": "Ari", "dia_id": "D1:1", "text": "Milo prefers tea."}]},
+        "qa": [{"question": "What does Milo prefer?", "evidence": ["D1:1"], "category": 1}],
+    }]
+
+    report = locomo_evaluation.evaluate(sample, [1], None, retriever="v0.2.0")
+
+    assert report["hit_at_k"] == {"1": 1.0}

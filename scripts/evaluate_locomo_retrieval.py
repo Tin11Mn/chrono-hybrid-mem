@@ -43,7 +43,29 @@ def messages_and_evidence(sample: Dict[str, object]) -> Tuple[List[Dict[str, obj
     return messages, evidence_text
 
 
-def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questions: int | None) -> Dict[str, object]:
+def released_v020_search(store: MemoryStore, user_id: str, query: str, top_k: int) -> List[str]:
+    """Faithfully reproduce v0.2.0's no-model raw-message retrieval path."""
+    terms = re.findall(r"[\w]+", query, flags=re.UNICODE)
+    if not terms:
+        return []
+    match_query = " OR ".join('"{}"'.format(term.replace('"', '')) for term in terms)
+    with store._connection() as connection:
+        rows = connection.execute(
+            """SELECT raw.content
+               FROM messages_fts
+               JOIN raw_messages AS raw ON raw.id = messages_fts.message_id
+               WHERE messages_fts MATCH ? AND messages_fts.user_id = ?
+               ORDER BY bm25(messages_fts), raw.id DESC
+               LIMIT ?""",
+            (match_query, user_id, top_k),
+        ).fetchall()
+    return [str(row["content"]) for row in rows]
+
+
+def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questions: int | None,
+             retriever: str = "current") -> Dict[str, object]:
+    if retriever not in {"current", "v0.2.0"}:
+        raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
     evidence_hits = {top_k: 0 for top_k in top_ks}
     category_counts = defaultdict(lambda: {"questions": 0, "hit_at_1": 0})
@@ -74,8 +96,13 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                     continue
                 question_count += 1
                 evidence_total += len(expected)
-                results = store.search(user_id=user_id, query=str(qa["question"]), top_k=max(top_ks))
-                contents = [result.content.casefold() for result in results]
+                if retriever == "current":
+                    results = store.search(user_id=user_id, query=str(qa["question"]), top_k=max(top_ks))
+                    contents = [result.content.casefold() for result in results]
+                else:
+                    contents = [content.casefold() for content in released_v020_search(
+                        store, user_id, str(qa["question"]), max(top_ks)
+                    )]
                 ranks = [
                     next((index + 1 for index, content in enumerate(contents) if item.casefold() == content), None)
                     for item in expected
@@ -111,6 +138,7 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, help="Local path to LoCoMo locomo10.json")
     parser.add_argument("--top-k", default="1,3,10", help="Comma-separated retrieval depths")
     parser.add_argument("--max-questions", type=int, help="Optional cap for a smoke test")
+    parser.add_argument("--compare-v020", action="store_true", help="Also reproduce v0.2.0 no-model retrieval")
     args = parser.parse_args()
     top_ks = sorted({int(value) for value in args.top_k.split(",")})
     if not top_ks or min(top_ks) < 1 or max(top_ks) > 100:
@@ -118,7 +146,18 @@ def main() -> None:
     data = json.loads(Path(args.dataset).read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError("LoCoMo dataset must be a JSON array")
-    print(json.dumps(evaluate(data, top_ks, args.max_questions), ensure_ascii=False, indent=2))
+    current = evaluate(data, top_ks, args.max_questions)
+    if not args.compare_v020:
+        print(json.dumps(current, ensure_ascii=False, indent=2))
+        return
+    baseline = evaluate(data, top_ks, args.max_questions, retriever="v0.2.0")
+    print(json.dumps({
+        "scope": "retrieval-only, no external model call",
+        "v0.2.0": baseline,
+        "current": current,
+        "delta_hit_at_1": round(current["hit_at_k"]["1"] - baseline["hit_at_k"]["1"], 4),
+        "delta_mrr": round(current["mrr"] - baseline["mrr"], 4),
+    }, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

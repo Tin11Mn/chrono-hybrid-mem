@@ -8,10 +8,10 @@ LoCoMo is a public long-term conversation benchmark with question-level evidence
 
 ```powershell
 Invoke-WebRequest https://raw.githubusercontent.com/snap-research/locomo/main/data/locomo10.json -OutFile C:\tmp\locomo10.json
-python scripts/evaluate_locomo_retrieval.py --dataset C:\tmp\locomo10.json
+python scripts/evaluate_locomo_retrieval.py --dataset C:\tmp\locomo10.json --compare-v020
 Remove-Item C:\tmp\locomo10.json
 ```
 
-The report gives question hit rate and evidence recall at K, MRR, and category-level Hit@1. It does not call an answer model and does not reproduce LoCoMo's end-to-end QA score.
+The report gives question hit rate and evidence recall at K, MRR, and category-level Hit@1. With `--compare-v020`, it also runs the v0.2.0 no-model raw-message retrieval logic over exactly the same conversations and prints deltas. It does not call an answer model and does not reproduce LoCoMo's end-to-end QA score.
 
 LoCoMo is licensed CC BY-NC 4.0. It may be used only for non-commercial evaluation with required attribution; do not add its content or derived records to this repository. See the [upstream repository](https://github.com/snap-research/locomo) and its [license](https://raw.githubusercontent.com/snap-research/locomo/main/LICENSE.txt).
