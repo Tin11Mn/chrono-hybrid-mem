@@ -80,6 +80,8 @@ The report includes evidence-level `Recall@K`, per-case evidence coverage, MRR, 
 
 The latest recorded comparison improved Recall@1 and MRR from 0.3333 to 1.0000 on a three-case temporal diagnostic, with average Search latency increasing from 0.723 ms to 0.767 ms. See [the diagnostic report](docs/DIAGNOSTIC_RESULTS.md) for scope and limitations.
 
+For a larger, external retrieval evaluation, see [the LoCoMo protocol](docs/EXTERNAL_EVALUATION.md). The data is supplied by a local path, excluded from Git, and must be deleted according to the competition rules and LoCoMo's CC BY-NC 4.0 license.
+
 ## Operational notes
 
 - `MEMORY_DB_PATH` controls the SQLite location; Docker defaults to `/data/chrono_hybrid_mem.db`.
