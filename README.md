@@ -62,6 +62,16 @@ python -m pytest
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+## Offline retrieval evaluation
+
+Use only your own or otherwise permitted, non-official data. The included fictional examples are not competition data.
+
+```bash
+python scripts/evaluate_retrieval.py --cases examples/demo_eval.json
+```
+
+The report includes evidence-level `Recall@K`, per-case evidence coverage, MRR, and average Search latency. Add local cases with `case_id`, `user_id`, `session_id`, `messages`, `query`, and `expected_evidence`; every expected-evidence string is matched against returned memory content.
+
 ## Operational notes
 
 - `MEMORY_DB_PATH` controls the SQLite location; Docker defaults to `/data/chrono_hybrid_mem.db`.

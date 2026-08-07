@@ -1,0 +1,23 @@
+[
+  {
+    "case_id": "fictional-preference",
+    "user_id": "offline:user-a",
+    "session_id": "offline:session-a",
+    "messages": [
+      {"role": "user", "content": "Ari prefers jasmine tea after breakfast."},
+      {"role": "assistant", "content": "Ari plans a hiking trip in October."}
+    ],
+    "query": "What tea does Ari prefer?",
+    "expected_evidence": ["Ari prefers jasmine tea"]
+  },
+  {
+    "case_id": "fictional-location",
+    "user_id": "offline:user-b",
+    "session_id": "offline:session-b",
+    "messages": [
+      {"role": "user", "content": "Bela moved to Qingdao last spring."}
+    ],
+    "query": "Where did Bela move?",
+    "expected_evidence": ["Bela moved to Qingdao"]
+  }
+]
