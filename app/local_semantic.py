@@ -141,8 +141,14 @@ class LocalLateInteractionReranker:
     def rank(
         self, query: str, options: List[str], candidates: List[Dict[str, str]]
     ) -> List[str]:
+        scores = self.score(query, options, candidates)
+        return sorted(scores, key=scores.get, reverse=True)
+
+    def score(
+        self, query: str, options: List[str], candidates: List[Dict[str, str]]
+    ) -> Dict[str, float]:
         if not candidates:
-            return []
+            return {}
         missing = [
             item for item in candidates if item["content"] not in self._passage_cache
         ]
@@ -165,18 +171,87 @@ class LocalLateInteractionReranker:
             passage = self._passage_cache[candidate["content"]]
             similarities = query_embedding @ passage.T
             scores[candidate["id"]] = float(similarities.max(axis=1).sum())
+        return scores
+
+
+class LocalCrossEncoderReranker:
+    """Joint query-passage scoring over a bounded candidate pool."""
+
+    def __init__(
+        self,
+        model_name: str,
+        device: Optional[str] = None,
+        batch_size: int = 32,
+        cache_dir: Optional[str] = None,
+    ) -> None:
+        try:
+            from fastembed.rerank.cross_encoder import TextCrossEncoder
+        except ImportError as error:
+            raise RuntimeError(
+                "Install requirements-local.txt to enable local cross-encoder reranking"
+            ) from error
+        if device not in {None, "auto", "cpu", "cuda"}:
+            raise RuntimeError("Local reranker device must be auto, cpu, or cuda")
+        model_options = {"model_name": model_name, "cache_dir": cache_dir}
+        if device == "cpu":
+            model_options["cuda"] = False
+        elif device == "cuda":
+            model_options["cuda"] = True
+        self.model_name = model_name
+        self.batch_size = batch_size
+        self.model = TextCrossEncoder(**model_options)
+        self._score_cache = {}
+
+    def score(
+        self, query: str, options: List[str], candidates: List[Dict[str, str]]
+    ) -> Dict[str, float]:
+        option_text = " ".join(option for option in options if option.strip())
+        query_text = "{} {}".format(query, option_text).strip()
+        cache_key = (
+            query_text,
+            tuple((item["id"], item["content"]) for item in candidates),
+        )
+        cached = self._score_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+        values = list(self.model.rerank(
+            query_text,
+            [item["content"] for item in candidates],
+            batch_size=self.batch_size,
+        ))
+        scores = {
+            candidate["id"]: float(values[index])
+            for index, candidate in enumerate(candidates)
+        }
+        self._score_cache[cache_key] = scores
+        return dict(scores)
+
+    def rank(
+        self, query: str, options: List[str], candidates: List[Dict[str, str]]
+    ) -> List[str]:
+        scores = self.score(query, options, candidates)
         return sorted(scores, key=scores.get, reverse=True)
 
 
-def local_reranker_from_environment() -> Optional[LocalLateInteractionReranker]:
+def local_reranker_from_environment() -> Optional[object]:
     model_name = os.getenv("MEMORY_LOCAL_RERANK_MODEL", "").strip()
-    if not model_name:
+    cross_encoder_name = os.getenv("MEMORY_LOCAL_CROSS_ENCODER_MODEL", "").strip()
+    if model_name and cross_encoder_name:
+        raise RuntimeError(
+            "Use either MEMORY_LOCAL_RERANK_MODEL or "
+            "MEMORY_LOCAL_CROSS_ENCODER_MODEL, not both"
+        )
+    selected_model = model_name or cross_encoder_name
+    if not selected_model:
         return None
     device = os.getenv("MEMORY_LOCAL_EMBEDDING_DEVICE") or None
     batch_size = int(os.getenv("MEMORY_LOCAL_RERANK_BATCH_SIZE", "32"))
     cache_dir = os.getenv("MEMORY_LOCAL_MODEL_CACHE") or None
     if batch_size < 1:
         raise RuntimeError("MEMORY_LOCAL_RERANK_BATCH_SIZE must be positive")
-    return LocalLateInteractionReranker(
-        model_name, device=device, batch_size=batch_size, cache_dir=cache_dir
+    reranker_class = (
+        LocalCrossEncoderReranker if cross_encoder_name else LocalLateInteractionReranker
+    )
+    return reranker_class(
+        selected_model, device=device, batch_size=batch_size, cache_dir=cache_dir
     )

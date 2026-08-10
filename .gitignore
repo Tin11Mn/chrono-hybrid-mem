@@ -11,3 +11,4 @@ locomo*.json
 .pytest-tmp/
 .eval-tmp/
 .local-models/
+.local-tools/

@@ -47,3 +47,22 @@ def test_locomo_released_baseline_is_available_for_comparison():
     report = locomo_evaluation.evaluate(sample, [1], None, retriever="v0.2.0")
 
     assert report["hit_at_k"] == {"1": 1.0}
+
+
+def test_locomo_evaluator_preserves_original_session_boundaries():
+    sessions, evidence = locomo_evaluation.sessions_and_evidence({
+        "conversation": {
+            "session_2_date_time": "2:30 pm on 9 May, 2023",
+            "session_2": [
+                {"speaker": "Ari", "dia_id": "D2:1", "text": "Second session."},
+            ],
+            "session_1_date_time": "1:15 pm on 8 May, 2023",
+            "session_1": [
+                {"speaker": "Ari", "dia_id": "D1:1", "text": "First session."},
+            ],
+        },
+    })
+
+    assert [session_id for session_id, _ in sessions] == ["session_1", "session_2"]
+    assert [messages[0]["timestamp"] for _, messages in sessions] == [1683551700, 1683642600]
+    assert set(evidence) == {"D1:1", "D2:1"}

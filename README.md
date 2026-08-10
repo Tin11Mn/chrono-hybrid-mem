@@ -4,6 +4,7 @@ ChronoHybridMem is a Docker-deployable textual-memory system for the Agent Memor
 
 - **v0.2.0** is the immutable competition submission using only `gpt-4o-mini` in model-backed mode.
 - **v0.3.0** is a local-method research milestone that adds lexical-dense score fusion and bounded late-interaction reranking. It does not replace the submitted tag.
+- **v0.4.0-local** adds an optional purpose-trained Qwen yes/no reranker and time-aware dense keys for local research. It does not replace the submitted tag and requires a separately launched loopback model server; model weights are never committed or bundled into Docker.
 
 ## System metadata
 
@@ -40,6 +41,7 @@ The selected v0.3 configuration was evaluated on all 1,977 LoCoMo questions usin
 | Immutable v0.2.0 retrieval | 0.2671 | 0.4355 | 0.5695 | 0.3567 |
 | Latest no-model lexical baseline | 0.3359 | 0.5169 | 0.6591 | 0.4328 |
 | v0.3 local hybrid | **0.4355** | **0.6186** | **0.7577** | **0.5183** |
+| v0.4 local Qwen + time key | **0.5225** | **0.6808** | **0.7653** | **0.5856** |
 
 This is a retrieval-only external result, not an official leaderboard score. The cited paper reports session-level retrieval, whereas this repository uses the stricter exact evidence-turn criterion, so its numbers are not directly comparable. The project target remains Hit@1 ≥ 0.70.
 
@@ -66,6 +68,21 @@ docker run --rm -p 8000:8000 \
 The first start downloads the configured BGE and ColBERT weights into the persistent `/models` volume. The default is CPU inference; set `MEMORY_LOCAL_EMBEDDING_DEVICE` only when the container has a compatible runtime.
 
 Health check: `GET http://localhost:8000/health`
+
+## Run the optional v0.4 local reranker
+
+Start a compatible Qwen3-Reranker model through a loopback-only OpenAI-compatible server, then set these optional variables before launching the same API service:
+
+```text
+MEMORY_LOCAL_EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
+MEMORY_DENSE_FUSION_ALPHA=0.3
+MEMORY_DENSE_TIME_WEIGHT=0.5
+MEMORY_LOCAL_YES_NO_RERANK_BASE_URL=http://127.0.0.1:8081/v1
+MEMORY_LOCAL_YES_NO_RERANK_MODEL=local
+MEMORY_LOCAL_RERANK_TOP_N=10
+```
+
+The reranker compares only supplied query–evidence pairs through the Qwen yes/no logprob protocol and returns the original records; it never produces a benchmark answer. This local research path is intentionally opt-in because the model server and weights are not part of the Docker image.
 
 ## API
 

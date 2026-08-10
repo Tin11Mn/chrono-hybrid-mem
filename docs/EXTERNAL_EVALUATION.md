@@ -36,6 +36,18 @@ python scripts/evaluate_locomo_retrieval.py --dataset C:\tmp\locomo10.json `
   --rerank-top-n 5 --compare-v020
 ```
 
+The v0.4 local research milestone uses a purpose-trained loopback Qwen reranker. After starting a compatible local server at `http://127.0.0.1:8081/v1`, run:
+
+```powershell
+python scripts/evaluate_locomo_retrieval.py --dataset C:\path\to\locomo10.json `
+  --top-k 1,3,10 --local-embedding-model BAAI/bge-large-en-v1.5 `
+  --local-device cpu --local-cache-dir .model-cache --fusion-alpha 0.3 `
+  --dense-time-weight 0.5 --local-yes-no-reranker-url http://127.0.0.1:8081/v1 `
+  --local-yes-no-reranker-model local --rerank-top-n 10
+```
+
+On the local full 1,977-question exact-evidence protocol, this configuration reached Hit@1 0.5225, Hit@3 0.6808, Hit@10 0.7653, and MRR 0.5856. These are local research measurements, not a platform leaderboard result. Do not commit model weights, LoCoMo data, or generated evaluation artifacts.
+
 On all 1,977 questions, this run produced Hit@1/3/10 of 0.4355/0.6186/0.7577 and MRR 0.5183. The immutable v0.2.0 comparison produced Hit@1 0.2671 and MRR 0.3567. These are aggregate retrieval-only results with strict exact evidence-turn matching, not official leaderboard results. The referenced fusion paper reports a different session-level retrieval metric, so its values are not directly comparable.
 
 Use `--fusion-alphas 0.3,0.4,0.5,0.6,0.7` for a bounded sweep that reuses document and query embeddings inside one process. This avoids recomputing the model for every fusion weight.
