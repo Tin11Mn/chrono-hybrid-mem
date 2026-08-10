@@ -59,6 +59,7 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [x] Gate Qwen hard reranking with the previously high-recall context-aware dense key (weight 0.5) on fixed 200 questions; tie Hit@1=0.505, reject alone.
 - [x] Gate the combined time-aware + context-aware dense keys with hard Qwen on fixed 200 questions; reject Hit@1=0.500.
 - [ ] Select a new non-overlapping retrieval mechanism and gate it against the current full-set best Hit@1=0.5225.
+- [x] Publish the verified v0.4 local research milestone to an isolated GitHub branch and draft PR.
 
 ## Errors encountered
 
