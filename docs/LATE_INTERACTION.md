@@ -17,3 +17,5 @@ The `0.4` value is a starting point motivated by the recent LoCoMo late-interact
 Initial local smoke testing with cached `colbert-ir/colbertv2.0` on 20 LoCoMo questions reached Hit@1=0.50 at the best tested fusion weight (`alpha=0.2`). This is below the existing Qwen3-Reranker smoke gate (0.60), so this candidate is not promoted to a 200-question run without a stronger model or revised turn/session aggregation.
 
 The cached `answerdotai/answerai-colbert-small-v1` variant improved the same smoke gate to Hit@1=0.55, Hit@3=0.75, Hit@10=0.85, and MRR=0.6431 at `alpha=0.2`, but it still does not clear the predeclared 0.60 Hit@1 promotion threshold.
+
+Combining that first stage with Qwen3-Reranker-4B on the fixed 200-question gate produced Hit@1=0.505, Hit@3=0.705, Hit@10=0.800, and MRR=0.5954. It ties, but does not exceed, the existing 200-question gate, so it is not promoted to full-set evaluation.
