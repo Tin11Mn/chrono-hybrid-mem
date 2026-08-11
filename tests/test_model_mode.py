@@ -1,6 +1,19 @@
 import pytest
 
+from app.main import (
+    create_app,
+    dense_fusion_alpha_from_environment,
+    dense_context_weight_from_environment,
+    dense_time_weight_from_environment,
+    rerank_top_n_from_environment,
+    rerank_fusion_weight_from_environment,
+    session_fusion_weight_from_environment,
+    session_top_n_from_environment,
+    instruction_rerank_top_n_from_environment,
+    instruction_refine_top_n_from_environment,
+)
 from app.model import model_from_environment
+from app.local_semantic import local_reranker_from_environment
 from app.schemas import AddRequest
 from app.storage import MemoryStore
 
@@ -21,6 +34,75 @@ def test_competition_mode_requires_a_secret(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         model_from_environment()
+
+
+def test_local_score_fusion_rejects_an_invalid_alpha(monkeypatch):
+    monkeypatch.setenv("MEMORY_DENSE_FUSION_ALPHA", "1.1")
+    with pytest.raises(RuntimeError, match="between 0 and 1"):
+        dense_fusion_alpha_from_environment()
+
+
+def test_dense_context_rejects_an_invalid_weight(monkeypatch):
+    monkeypatch.setenv("MEMORY_DENSE_CONTEXT_WEIGHT", "1.1")
+    with pytest.raises(RuntimeError, match="between 0 and 1"):
+        dense_context_weight_from_environment()
+
+
+def test_dense_time_rejects_an_invalid_weight(monkeypatch):
+    monkeypatch.setenv("MEMORY_DENSE_TIME_WEIGHT", "-0.1")
+    with pytest.raises(RuntimeError, match="between 0 and 1"):
+        dense_time_weight_from_environment()
+
+
+def test_local_reranker_rejects_an_unbounded_pool(monkeypatch):
+    monkeypatch.setenv("MEMORY_LOCAL_RERANK_TOP_N", "101")
+    with pytest.raises(RuntimeError, match="between 1 and 100"):
+        rerank_top_n_from_environment()
+
+
+def test_local_reranker_modes_are_mutually_exclusive(monkeypatch):
+    monkeypatch.setenv("MEMORY_LOCAL_RERANK_MODEL", "answerai/colbert")
+    monkeypatch.setenv("MEMORY_LOCAL_CROSS_ENCODER_MODEL", "BAAI/cross-encoder")
+    with pytest.raises(RuntimeError, match="either"):
+        local_reranker_from_environment()
+
+
+def test_yes_no_reranker_cannot_be_combined_with_fastembed_reranking(monkeypatch, tmp_path):
+    monkeypatch.setenv("MEMORY_LOCAL_RERANK_MODEL", "answerai/colbert")
+    monkeypatch.setenv("MEMORY_LOCAL_YES_NO_RERANK_BASE_URL", "http://127.0.0.1:8081/v1")
+    with pytest.raises(RuntimeError, match="not both"):
+        create_app(str(tmp_path / "memory.db"))
+
+
+def test_session_fusion_rejects_an_unbounded_weight(monkeypatch):
+    monkeypatch.setenv("MEMORY_SESSION_FUSION_WEIGHT", "11")
+    with pytest.raises(RuntimeError, match="between 0 and 10"):
+        session_fusion_weight_from_environment()
+
+
+def test_session_filter_rejects_an_unbounded_pool(monkeypatch):
+    monkeypatch.setenv("MEMORY_SESSION_TOP_N", "101")
+    with pytest.raises(RuntimeError, match="between 0 and 100"):
+        session_top_n_from_environment()
+
+
+def test_rerank_fusion_rejects_an_invalid_weight(monkeypatch):
+    monkeypatch.setenv("MEMORY_LOCAL_RERANK_FUSION_WEIGHT", "-0.1")
+    with pytest.raises(RuntimeError, match="between 0 and 1"):
+        rerank_fusion_weight_from_environment()
+
+
+def test_instruction_rerank_rejects_an_unbounded_pool(monkeypatch):
+    monkeypatch.setenv("MEMORY_LOCAL_INSTRUCTION_TOP_N", "0")
+    with pytest.raises(RuntimeError, match="between 1 and 100"):
+        instruction_rerank_top_n_from_environment()
+
+
+def test_instruction_refine_pool_cannot_exceed_first_pass(monkeypatch):
+    monkeypatch.setenv("MEMORY_LOCAL_INSTRUCTION_TOP_N", "3")
+    monkeypatch.setenv("MEMORY_LOCAL_INSTRUCTION_REFINE_TOP_N", "4")
+    with pytest.raises(RuntimeError, match="cannot exceed"):
+        instruction_refine_top_n_from_environment()
 
 
 def test_model_facts_retrieve_their_original_source_evidence(tmp_path):
