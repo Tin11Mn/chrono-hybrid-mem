@@ -237,6 +237,10 @@ def main() -> None:
         "--local-embedding-model",
         help="Use a local FastEmbed model for dense retrieval, for example BAAI/bge-small-en-v1.5",
     )
+    parser.add_argument(
+        "--local-late-interaction-model",
+        help="Use a local FastEmbed late-interaction model as the first-stage retriever",
+    )
     parser.add_argument("--local-device", choices=["auto", "cpu", "cuda"], help="FastEmbed device")
     parser.add_argument(
         "--local-cache-dir",
@@ -311,6 +315,15 @@ def main() -> None:
         "--instruction-strategy", choices=["direct", "chain_of_note"], default="direct"
     )
     args = parser.parse_args()
+    if args.local_late_interaction_model and args.local_embedding_model:
+        raise ValueError(
+            "Use either --local-embedding-model or --local-late-interaction-model, not both"
+        )
+    late_interaction_first_stage = bool(args.local_late_interaction_model)
+    if late_interaction_first_stage:
+        # Reuse the existing validation and reporting paths while selecting the
+        # late-interaction implementation at construction time below.
+        args.local_embedding_model = args.local_late_interaction_model
     top_ks = sorted({int(value) for value in args.top_k.split(",")})
     if not top_ks or min(top_ks) < 1 or max(top_ks) > 100:
         raise ValueError("--top-k values must be between 1 and 100")
@@ -475,10 +488,18 @@ def main() -> None:
         model = SearchOnlyModel(api_key)
     semantic_retriever = None
     if args.local_embedding_model:
-        semantic_retriever = LocalSemanticRetriever(
-            args.local_embedding_model,
-            device=args.local_device,
-            cache_dir=args.local_cache_dir,
+        semantic_retriever = (
+            LocalLateInteractionReranker(
+                args.local_embedding_model,
+                device=args.local_device,
+                cache_dir=args.local_cache_dir,
+            )
+            if late_interaction_first_stage
+            else LocalSemanticRetriever(
+                args.local_embedding_model,
+                device=args.local_device,
+                cache_dir=args.local_cache_dir,
+            )
         )
     local_reranker = None
     if args.local_reranker_model:
