@@ -89,7 +89,24 @@ class LocalSemanticRetriever:
 
 
 def local_semantic_retriever_from_environment() -> Optional[LocalSemanticRetriever]:
+    late_model = os.getenv("MEMORY_LOCAL_LATE_INTERACTION_MODEL", "").strip()
     model_name = os.getenv("MEMORY_LOCAL_EMBEDDING_MODEL", "").strip()
+    if late_model and model_name:
+        raise RuntimeError(
+            "Use either MEMORY_LOCAL_EMBEDDING_MODEL or "
+            "MEMORY_LOCAL_LATE_INTERACTION_MODEL, not both"
+        )
+    if late_model:
+        device = os.getenv("MEMORY_LOCAL_EMBEDDING_DEVICE") or None
+        batch_size = int(os.getenv("MEMORY_LOCAL_EMBEDDING_BATCH_SIZE", "32"))
+        if batch_size < 1:
+            raise RuntimeError("MEMORY_LOCAL_EMBEDDING_BATCH_SIZE must be positive")
+        return LocalLateInteractionReranker(
+            late_model,
+            device=device,
+            batch_size=batch_size,
+            cache_dir=os.getenv("MEMORY_LOCAL_MODEL_CACHE") or None,
+        )
     if not model_name:
         return None
     device = os.getenv("MEMORY_LOCAL_EMBEDDING_DEVICE") or None
@@ -139,10 +156,15 @@ class LocalLateInteractionReranker:
         return values / self._np.maximum(norms, 1e-12)
 
     def rank(
-        self, query: str, options: List[str], candidates: List[Dict[str, str]]
+        self,
+        query: str,
+        options: List[str],
+        candidates: List[Dict[str, str]],
+        limit: Optional[int] = None,
     ) -> List[str]:
         scores = self.score(query, options, candidates)
-        return sorted(scores, key=scores.get, reverse=True)
+        ranked = sorted(scores, key=scores.get, reverse=True)
+        return ranked if limit is None else ranked[:limit]
 
     def score(
         self, query: str, options: List[str], candidates: List[Dict[str, str]]

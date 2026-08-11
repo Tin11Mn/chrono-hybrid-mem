@@ -13,7 +13,10 @@ from app.main import (
     instruction_refine_top_n_from_environment,
 )
 from app.model import model_from_environment
-from app.local_semantic import local_reranker_from_environment
+from app.local_semantic import (
+    local_reranker_from_environment,
+    local_semantic_retriever_from_environment,
+)
 from app.schemas import AddRequest
 from app.storage import MemoryStore
 
@@ -46,6 +49,13 @@ def test_dense_context_rejects_an_invalid_weight(monkeypatch):
     monkeypatch.setenv("MEMORY_DENSE_CONTEXT_WEIGHT", "1.1")
     with pytest.raises(RuntimeError, match="between 0 and 1"):
         dense_context_weight_from_environment()
+
+
+def test_late_interaction_and_dense_embedding_modes_are_mutually_exclusive(monkeypatch):
+    monkeypatch.setenv("MEMORY_LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    monkeypatch.setenv("MEMORY_LOCAL_LATE_INTERACTION_MODEL", "answerai/colbert")
+    with pytest.raises(RuntimeError, match="either"):
+        local_semantic_retriever_from_environment()
 
 
 def test_dense_time_rejects_an_invalid_weight(monkeypatch):
