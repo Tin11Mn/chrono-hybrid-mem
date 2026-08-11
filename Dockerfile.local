@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+
+WORKDIR /service
+COPY requirements.txt requirements-local.txt ./
+RUN pip install --no-cache-dir -r requirements-local.txt
+COPY app ./app
+
+ENV MEMORY_DB_PATH=/data/chrono_hybrid_mem.db \
+    MEMORY_LOCAL_EMBEDDING_MODEL=BAAI/bge-large-en-v1.5 \
+    MEMORY_LOCAL_EMBEDDING_DEVICE=cpu \
+    MEMORY_LOCAL_MODEL_CACHE=/models \
+    MEMORY_DENSE_FUSION_ALPHA=0.3 \
+    MEMORY_LOCAL_RERANK_MODEL=answerdotai/answerai-colbert-small-v1 \
+    MEMORY_LOCAL_RERANK_TOP_N=5
+RUN mkdir -p /data /models
+EXPOSE 8000
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
