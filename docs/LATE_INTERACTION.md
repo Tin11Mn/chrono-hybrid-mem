@@ -15,3 +15,5 @@ MEMORY_LOCAL_EMBEDDING_DEVICE=cpu
 The `0.4` value is a starting point motivated by the recent LoCoMo late-interaction/BM25 study, not a result measured by this repository. Run the fixed smoke and 200-question gates before any full-set claim. The published study reports Hit@1=0.752 for its own e5-large-v2/session-level protocol; that number is not copied into this project's metrics.
 
 Initial local smoke testing with cached `colbert-ir/colbertv2.0` on 20 LoCoMo questions reached Hit@1=0.50 at the best tested fusion weight (`alpha=0.2`). This is below the existing Qwen3-Reranker smoke gate (0.60), so this candidate is not promoted to a 200-question run without a stronger model or revised turn/session aggregation.
+
+The cached `answerdotai/answerai-colbert-small-v1` variant improved the same smoke gate to Hit@1=0.55, Hit@3=0.75, Hit@10=0.85, and MRR=0.6431 at `alpha=0.2`, but it still does not clear the predeclared 0.60 Hit@1 promotion threshold.
