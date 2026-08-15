@@ -11,8 +11,9 @@ from app.main import (
     session_top_n_from_environment,
     instruction_rerank_top_n_from_environment,
     instruction_refine_top_n_from_environment,
+    structured_query_plan_from_environment,
 )
-from app.model import model_from_environment
+from app.model import MemoryModel, model_from_environment
 from app.local_semantic import local_reranker_from_environment
 from app.schemas import AddRequest
 from app.storage import MemoryStore
@@ -29,11 +30,63 @@ class FakeMemoryModel:
         return ["Mina", "prefers tea"]
 
 
+class FakeStructuredMemoryModel(FakeMemoryModel):
+    def __init__(self):
+        self.flat_plan_calls = 0
+        self.structured_plan_calls = 0
+
+    def plan_query(self, query, options):
+        self.flat_plan_calls += 1
+        return ["stamps"]
+
+    def plan_query_structured(self, query, options):
+        self.structured_plan_calls += 1
+        return {
+            "intent": "fact",
+            "core_terms": ["Mina", "tea"],
+            "expansion_terms": ["beverage"],
+            "entities": ["Mina"],
+            "temporal_cues": [],
+            "evidence_needs": [],
+        }
+
+
 def test_competition_mode_requires_a_secret(monkeypatch):
     monkeypatch.setenv("MEMORY_REQUIRE_MODEL", "true")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         model_from_environment()
+
+
+def test_structured_query_plan_defaults_on_and_reads_false(monkeypatch):
+    monkeypatch.delenv("MEMORY_STRUCTURED_QUERY_PLAN", raising=False)
+    assert structured_query_plan_from_environment() is True
+    monkeypatch.setenv("MEMORY_STRUCTURED_QUERY_PLAN", "FaLsE")
+    assert structured_query_plan_from_environment() is False
+
+
+def test_structured_query_plan_is_bounded_and_sanitized():
+    model = MemoryModel.__new__(MemoryModel)
+    model._json_response = lambda system_prompt, user_payload: {
+        "intent": "unsupported",
+        "core_terms": [" Tea ", "tea", None] + [f"term-{index}" for index in range(10)],
+        "expansion_terms": "not-a-list",
+        "entities": ["Mina"],
+        "temporal_cues": ["latest"],
+        "evidence_needs": [f"need-{index}" for index in range(6)],
+    }
+
+    plan = model.plan_query_structured("query", [])
+
+    assert plan["intent"] == "other"
+    assert plan["core_terms"] == ["Tea"] + [f"term-{index}" for index in range(7)]
+    assert plan["expansion_terms"] == []
+    assert plan["entities"] == ["Mina"]
+    assert plan["evidence_needs"] == [f"need-{index}" for index in range(4)]
+    assert set(plan) == {
+        "intent", "core_terms", "expansion_terms", "entities",
+        "temporal_cues", "evidence_needs",
+    }
 
 
 def test_local_score_fusion_rejects_an_invalid_alpha(monkeypatch):
@@ -133,3 +186,40 @@ def test_model_query_plan_expands_retrieval_terms(tmp_path):
     )
 
     assert results[0].content == "Mina prefers tea."
+
+
+def test_structured_plan_changes_retrieval_without_an_extra_planner_call(tmp_path):
+    messages = [
+        {"role": "user", "content": "Mina prefers tea."},
+        {"role": "user", "content": "Mina likes collecting stamps."},
+    ]
+    flat_model = FakeStructuredMemoryModel()
+    flat_store = MemoryStore(str(tmp_path / "flat.db"), model=flat_model)
+    flat_store.initialize()
+    flat_store.add(AddRequest(
+        request_id="flat", user_id="user-a", session_id="session-a", messages=messages,
+    ))
+
+    structured_model = FakeStructuredMemoryModel()
+    structured_store = MemoryStore(
+        str(tmp_path / "structured.db"),
+        model=structured_model,
+        structured_query_plan=True,
+    )
+    structured_store.initialize()
+    structured_store.add(AddRequest(
+        request_id="structured", user_id="user-a", session_id="session-a", messages=messages,
+    ))
+
+    flat = flat_store.search(
+        user_id="user-a", query="Which beverage does she favor?", options=[], top_k=1
+    )
+    structured = structured_store.search(
+        user_id="user-a", query="Which beverage does she favor?", options=[], top_k=1
+    )
+
+    assert flat[0].content == "Mina likes collecting stamps."
+    assert structured[0].content == "Mina prefers tea."
+    assert (flat_model.flat_plan_calls, flat_model.structured_plan_calls) == (1, 0)
+    assert (structured_model.flat_plan_calls, structured_model.structured_plan_calls) == (0, 1)
+    assert MemoryStore.STRUCTURED_SUPPORT_RRF_WEIGHT == 0.01

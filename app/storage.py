@@ -13,6 +13,8 @@ from .schemas import AddRequest, MemoryResult
 class MemoryStore:
     RRF_CONSTANT = 60
     CONTEXT_RRF_WEIGHT = 0.5
+    # Recall-only support must not displace core-intent evidence.
+    STRUCTURED_SUPPORT_RRF_WEIGHT = 0.01
     # Kept for controlled ablations; full LoCoMo evaluation showed that
     # hard entity binding harms adversarial cross-speaker questions overall.
     ENTITY_RRF_WEIGHT = 0.0
@@ -43,7 +45,8 @@ class MemoryStore:
                  local_instruction_reranker: object = None,
                  local_query_expander: object = None,
                  instruction_rerank_top_n: int = 10,
-                 instruction_refine_top_n: int = 0) -> None:
+                 instruction_refine_top_n: int = 0,
+                 structured_query_plan: bool = False) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -61,6 +64,7 @@ class MemoryStore:
         self.local_query_expander = local_query_expander
         self.instruction_rerank_top_n = instruction_rerank_top_n
         self.instruction_refine_top_n = instruction_refine_top_n
+        self.structured_query_plan = structured_query_plan
         Path(database_path).parent.mkdir(parents=True, exist_ok=True)
 
     @contextmanager
@@ -232,8 +236,22 @@ class MemoryStore:
         raw_terms = re.findall(r"[\w]+", query, flags=re.UNICODE)
         terms = [term for term in raw_terms if term.casefold() not in self.QUERY_STOP_WORDS]
         terms = terms or raw_terms
+        support_terms = []
         if self.model:
-            terms.extend(self.model.plan_query(query, options or []))
+            if self.structured_query_plan:
+                plan = self.model.plan_query_structured(query, options or [])
+                for key in ("core_terms", "entities", "temporal_cues"):
+                    values = plan.get(key, [])
+                    if isinstance(values, list):
+                        terms.extend(value for value in values if isinstance(value, str))
+                for key in ("expansion_terms", "evidence_needs"):
+                    values = plan.get(key, [])
+                    if isinstance(values, list):
+                        support_terms.extend(
+                            value for value in values if isinstance(value, str)
+                        )
+            else:
+                terms.extend(self.model.plan_query(query, options or []))
         unique_terms = []
         seen_terms = set()
         for term in terms:
@@ -245,6 +263,19 @@ class MemoryStore:
         if not terms:
             return []
         match_query = " OR ".join('"{}"'.format(term.replace('"', '')) for term in terms)
+        unique_support_terms = []
+        seen_support_terms = set()
+        for term in support_terms:
+            normalized = term.casefold().strip()
+            if normalized and normalized not in seen_terms and normalized not in seen_support_terms:
+                seen_support_terms.add(normalized)
+                unique_support_terms.append(term)
+        support_match_query = (
+            " OR ".join(
+                '"{}"'.format(term.replace('"', '')) for term in unique_support_terms
+            )
+            if unique_support_terms else None
+        )
         entity_terms = [
             term for index, term in enumerate(raw_terms)
             if index > 0 and len(term) > 1 and term[0].isupper()
@@ -321,6 +352,28 @@ class MemoryStore:
                    LIMIT ?""",
                 (match_query, user_id, candidate_limit),
             ).fetchall()
+            support_raw_rows = []
+            support_fact_rows = []
+            if support_match_query:
+                support_raw_rows = connection.execute(
+                    """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                       FROM messages_porter_fts
+                       JOIN raw_messages AS raw ON raw.id = messages_porter_fts.message_id
+                       WHERE messages_porter_fts MATCH ? AND messages_porter_fts.user_id = ?
+                       ORDER BY bm25(messages_porter_fts), raw.id DESC
+                       LIMIT ?""",
+                    (support_match_query, user_id, candidate_limit),
+                ).fetchall()
+                support_fact_rows = connection.execute(
+                    """SELECT raw.id, raw.content, raw.created_at, raw.event_ts
+                       FROM facts_porter_fts
+                       JOIN facts AS fact ON fact.id = facts_porter_fts.fact_id
+                       JOIN raw_messages AS raw ON raw.id = fact.source_message_id
+                       WHERE facts_porter_fts MATCH ? AND facts_porter_fts.user_id = ?
+                       ORDER BY bm25(facts_porter_fts), raw.id DESC
+                       LIMIT ?""",
+                    (support_match_query, user_id, candidate_limit),
+                ).fetchall()
             entity_raw_rows = []
             entity_porter_rows = []
             entity_context_rows = []
@@ -628,6 +681,8 @@ class MemoryStore:
             (fact_rows, 1.0), (fact_porter_rows, 1.0),
             (context_rows, self.CONTEXT_RRF_WEIGHT),
             (context_porter_rows, self.CONTEXT_RRF_WEIGHT),
+            (support_raw_rows, self.STRUCTURED_SUPPORT_RRF_WEIGHT),
+            (support_fact_rows, self.STRUCTURED_SUPPORT_RRF_WEIGHT),
             (entity_raw_rows, self.ENTITY_RRF_WEIGHT),
             (entity_porter_rows, self.ENTITY_RRF_WEIGHT),
             (entity_context_rows, self.ENTITY_RRF_WEIGHT * self.CONTEXT_RRF_WEIGHT),

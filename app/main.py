@@ -23,6 +23,10 @@ def temporal_bonus_from_environment() -> float:
     return value
 
 
+def structured_query_plan_from_environment() -> bool:
+    return os.getenv("MEMORY_STRUCTURED_QUERY_PLAN", "true").lower() == "true"
+
+
 def dense_rrf_weight_from_environment() -> float:
     value = float(os.getenv("MEMORY_DENSE_RRF_WEIGHT", "1"))
     if value < 0 or value > 10:
@@ -138,6 +142,7 @@ def create_app(database_path: str = None) -> FastAPI:
         local_query_expander=local_query_expander_from_environment(),
         instruction_rerank_top_n=instruction_rerank_top_n_from_environment(),
         instruction_refine_top_n=instruction_refine_top_n_from_environment(),
+        structured_query_plan=structured_query_plan_from_environment(),
     )
     store.initialize()
     app = FastAPI(title="ChronoHybridMem", version="0.4.0-local")

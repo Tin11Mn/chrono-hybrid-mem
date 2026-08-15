@@ -42,6 +42,17 @@ ChronoHybridMem 面向“文本记忆”场景，目标是从长期对话中检�
 
 平台不会提供 gpt-4o-mini 预评测环境，因此本仓库不宣称本地代理实验结果等于官方排行榜成绩。最终成绩以平台部署和评测结果为准。
 
+#### P1 结构化查询规划
+
+P1 将现有 `gpt-4o-mini` 查询规划调用改为有界的结构化结果，把核心词、实体和
+时间线索送入主要检索通道，把扩展词和证据需求送入低权重辅助通道。它不增加模型
+调用次数，不改变 Add/Search API，也不生成评测答案。竞赛路径默认启用；设置
+`MEMORY_STRUCTURED_QUERY_PLAN=false` 可回退到扁平规划器进行消融。
+
+在固定 20 题 LoCoMo 开发切片上，以 Qwen3-4B 作为 `gpt-4o-mini` 本地代理时，
+Hit@1 从 0.55 提升至 0.60，MRR 从 0.5917 提升至 0.6125，Hit@10 保持 0.65；
+exact evidence recall@10 从 0.4839 降至 0.4194。该结果仅用于方法筛选，不是官方成绩。
+
 ### 本地研究方法
 
 仓库还保留可选的本地研究后端，用于离线方法筛选：
@@ -223,6 +234,20 @@ The main deployment path uses the platform-provided `gpt-4o-mini`. The current c
 6. return only original evidence IDs supplied in the request.
 
 The platform does not expose a gpt-4o-mini evaluation environment to participants. Local proxy metrics must therefore not be presented as official leaderboard results. The platform deployment is the source of truth for the final score.
+
+#### P1 structured query planning
+
+P1 changes the existing `gpt-4o-mini` query-planning call to return a bounded structured
+plan. Core terms, entities, and temporal cues use the primary retrieval channels, while
+expansion terms and evidence needs use low-weight support channels. It adds no model call,
+does not change the Add/Search API, and never generates benchmark answers. The competition
+path enables P1 by default; set `MEMORY_STRUCTURED_QUERY_PLAN=false` for a flat-planner
+ablation.
+
+On a fixed 20-question LoCoMo development slice using Qwen3-4B only as a local
+`gpt-4o-mini` proxy, Hit@1 improved from 0.55 to 0.60 and MRR from 0.5917 to 0.6125,
+while Hit@10 remained 0.65. Exact evidence recall@10 decreased from 0.4839 to 0.4194.
+These measurements are method-selection evidence, not an official leaderboard result.
 
 ### Optional local research path
 
