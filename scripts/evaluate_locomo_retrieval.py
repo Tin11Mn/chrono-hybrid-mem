@@ -22,10 +22,12 @@ from app.schemas import AddRequest
 from app.model import MemoryModel
 from app.local_semantic import (
     LocalCrossEncoderReranker,
+    LocalHTTPEmbeddingRetriever,
     LocalLateInteractionReranker,
     LocalSemanticRetriever,
 )
 from app.local_instruction import (
+    LocalDualStrategyReranker,
     LocalInstructionReranker,
     LocalQueryExpander,
     LocalYesNoReranker,
@@ -36,14 +38,25 @@ from app.storage import MemoryStore
 class SearchOnlyModel:
     """Use the configured model for query planning/ranking without Add-time calls."""
 
-    def __init__(self, api_key: str) -> None:
-        self.model = MemoryModel(api_key)
+    def __init__(
+        self, api_key: str, model_name: str = "gpt-4o-mini",
+        base_url: str | None = None, disable_thinking: bool = False,
+    ) -> None:
+        self.model = MemoryModel(
+            api_key, model_name=model_name, base_url=base_url,
+            disable_thinking=disable_thinking,
+        )
 
-    def extract_facts(self, content: str) -> List[str]:
+    def extract_facts(
+        self, content: str, speaker: str = "", timestamp: int | None = None
+    ) -> List[str]:
         return []
 
     def plan_query(self, query: str, options: List[str]) -> List[str]:
         return self.model.plan_query(query, options)
+
+    def plan_query_structured(self, query: str, options: List[str]) -> Dict[str, object]:
+        return self.model.plan_query_structured(query, options)
 
     def rank_candidates(self, query: str, options: List[str], candidates: List[Dict[str, str]]) -> List[str]:
         return self.model.rank_candidates(query, options, candidates)
@@ -82,6 +95,13 @@ def sessions_and_evidence(
             if not isinstance(turn, dict) or not all(field in turn for field in ("dia_id", "speaker", "text")):
                 continue
             content = "{}: {}".format(turn["speaker"], turn["text"])
+            # LoCoMo's official dialog-RAG path treats the released BLIP image
+            # caption as part of the source turn. Preserve that public source
+            # content here too; the image-search `query` is generation metadata
+            # and is intentionally not indexed.
+            caption = str(turn.get("blip_caption", "")).strip()
+            if caption:
+                content += " Shared image: {}".format(caption)
             messages.append({
                 "role": str(turn["speaker"]),
                 "content": content,
@@ -113,25 +133,46 @@ def released_v020_search(store: MemoryStore, user_id: str, query: str, top_k: in
 
 
 def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questions: int | None,
+             question_offset: int = 0,
              retriever: str = "current", model: object = None,
              semantic_retriever: object = None, dense_rrf_weight: float = 1.0,
              dense_fusion_alpha: float | None = None, local_reranker: object = None,
              dense_context_weight: float = 0.0,
              dense_time_weight: float = 0.0,
+             dense_speaker_mask_max: bool = False,
+             dense_speaker_conflict_margin: float | None = None,
+             dense_speaker_conflict_gate_only: bool = False,
+             dense_sentence_weight: float = 0.0,
+             dense_image_carry_weight: float = 0.0,
+             dense_speaker_coref_weight: float = 0.0,
+             dense_speaker_swap_max: bool = False,
              rerank_top_n: int = 10, session_fusion_weight: float = 0.0,
+             rerank_image_followups: int = 0,
              session_top_n: int = 0,
              rerank_fusion_weight: float | None = None,
+             rerank_near_tie_epsilon: float = 0.0,
              local_instruction_reranker: object = None,
+             instruction_speaker_conflict_only: bool = False,
              local_query_expander: object = None,
              instruction_rerank_top_n: int = 10,
-             instruction_refine_top_n: int = 0) -> Dict[str, object]:
+             instruction_refine_top_n: int = 0,
+             include_hit_bitmap: bool = False,
+             structured_query_plan: bool = False) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
     evidence_hits = {top_k: 0 for top_k in top_ks}
-    category_counts = defaultdict(lambda: {"questions": 0, "hit_at_1": 0})
-    question_count = evidence_total = 0
+    category_counts = defaultdict(
+        lambda: {
+            "questions": 0,
+            "hit_at_1": 0,
+            "hit_counts": {top_k: 0 for top_k in top_ks},
+        }
+    )
+    question_count = evidence_total = eligible_question_count = 0
     reciprocal_rank_sum = 0.0
+    speaker_conflict_triggers = 0
+    hit_at_1_bitmap = []
     instruction_failures_before = getattr(
         local_instruction_reranker, "invalid_response_count", 0
     )
@@ -151,15 +192,26 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 dense_fusion_alpha=dense_fusion_alpha,
                 dense_context_weight=dense_context_weight,
                 dense_time_weight=dense_time_weight,
+                dense_speaker_mask_max=dense_speaker_mask_max,
+                dense_speaker_conflict_margin=dense_speaker_conflict_margin,
+                dense_speaker_conflict_gate_only=dense_speaker_conflict_gate_only,
+                dense_sentence_weight=dense_sentence_weight,
+                dense_image_carry_weight=dense_image_carry_weight,
+                dense_speaker_coref_weight=dense_speaker_coref_weight,
+                dense_speaker_swap_max=dense_speaker_swap_max,
                 local_reranker=local_reranker,
                 rerank_top_n=rerank_top_n,
+                rerank_image_followups=rerank_image_followups,
                 session_fusion_weight=session_fusion_weight,
                 session_top_n=session_top_n,
                 rerank_fusion_weight=rerank_fusion_weight,
+                rerank_near_tie_epsilon=rerank_near_tie_epsilon,
                 local_instruction_reranker=local_instruction_reranker,
+                instruction_speaker_conflict_only=instruction_speaker_conflict_only,
                 local_query_expander=local_query_expander,
                 instruction_rerank_top_n=instruction_rerank_top_n,
                 instruction_refine_top_n=instruction_refine_top_n,
+                structured_query_plan=structured_query_plan,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -178,6 +230,10 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 expected = [evidence_text[item] for item in qa.get("evidence", []) if item in evidence_text]
                 if not expected or not qa.get("question"):
                     continue
+                if eligible_question_count < question_offset:
+                    eligible_question_count += 1
+                    continue
+                eligible_question_count += 1
                 question_count += 1
                 evidence_total += len(expected)
                 if retriever == "current":
@@ -191,11 +247,14 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                     next((index + 1 for index, content in enumerate(contents) if item.casefold() == content), None)
                     for item in expected
                 ]
-                first_rank = next((rank for rank in ranks if rank is not None), None)
+                present_ranks = [rank for rank in ranks if rank is not None]
+                first_rank = min(present_ranks) if present_ranks else None
                 category = str(qa.get("category", "unknown"))
                 category_counts[category]["questions"] += 1
                 if first_rank == 1:
                     category_counts[category]["hit_at_1"] += 1
+                if include_hit_bitmap:
+                    hit_at_1_bitmap.append(1 if first_rank == 1 else 0)
                 if first_rank is not None:
                     reciprocal_rank_sum += 1.0 / first_rank
                 for top_k in top_ks:
@@ -203,6 +262,8 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                     evidence_hits[top_k] += len(matches)
                     if matches:
                         hit_counts[top_k] += 1
+                        category_counts[category]["hit_counts"][top_k] += 1
+            speaker_conflict_triggers += store.speaker_conflict_trigger_count
 
     result = {
         "questions": question_count,
@@ -214,12 +275,43 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
             category: round(values["hit_at_1"] / values["questions"], 4)
             for category, values in sorted(category_counts.items())
         },
+        "category_hit_at_k": {
+            category: {
+                str(top_k): round(
+                    values["hit_counts"][top_k] / values["questions"], 4
+                )
+                for top_k in top_ks
+            }
+            for category, values in sorted(category_counts.items())
+        },
+        "question_offset": question_offset,
+        "next_question_offset": question_offset + question_count,
+        "raw_counts": {
+            "hit_counts": {str(k): hit_counts[k] for k in top_ks},
+            "evidence_hit_counts": {str(k): evidence_hits[k] for k in top_ks},
+            "reciprocal_rank_sum": reciprocal_rank_sum,
+            "category_counts": {
+                category: {
+                    "questions": values["questions"],
+                    "hit_at_1": values["hit_at_1"],
+                    "hit_counts": {
+                        str(top_k): values["hit_counts"][top_k]
+                        for top_k in top_ks
+                    },
+                }
+                for category, values in sorted(category_counts.items())
+            },
+        },
     }
     if local_instruction_reranker is not None:
         result["instruction_format_fallbacks"] = (
             getattr(local_instruction_reranker, "invalid_response_count", 0)
             - instruction_failures_before
         )
+    if dense_speaker_conflict_margin is not None:
+        result["speaker_conflict_triggers"] = speaker_conflict_triggers
+    if include_hit_bitmap:
+        result["hit_at_1_bitmap"] = hit_at_1_bitmap
     return result
 
 
@@ -228,14 +320,46 @@ def main() -> None:
     parser.add_argument("--dataset", required=True, help="Local path to LoCoMo locomo10.json")
     parser.add_argument("--top-k", default="1,3,10", help="Comma-separated retrieval depths")
     parser.add_argument("--max-questions", type=int, help="Optional cap for a smoke test")
+    parser.add_argument(
+        "--question-offset", type=int, default=0,
+        help="Skip eligible questions before evaluating a resumable chunk",
+    )
+    parser.add_argument(
+        "--output", help="Optional local JSON path for the aggregate-only result",
+    )
+    parser.add_argument(
+        "--include-hit-bitmap", action="store_true",
+        help="Include only per-question Hit@1 bits for local complementarity analysis",
+    )
     parser.add_argument("--compare-v020", action="store_true", help="Also reproduce v0.2.0 no-model retrieval")
     parser.add_argument(
         "--search-model", action="store_true",
         help="Use OPENAI_API_KEY for query planning/ranking, but skip Add-time fact calls",
     )
     parser.add_argument(
+        "--local-search-model-url",
+        help="Use a loopback OpenAI-compatible model for Search planning/ranking only",
+    )
+    parser.add_argument("--local-search-model-name", default="local")
+    parser.add_argument(
+        "--structured-query-plan", action="store_true",
+        help="Enable P1 structured planning on the selected Search model",
+    )
+    parser.add_argument(
         "--local-embedding-model",
         help="Use a local FastEmbed model for dense retrieval, for example BAAI/bge-small-en-v1.5",
+    )
+    parser.add_argument(
+        "--local-embedding-url",
+        help="Loopback OpenAI-compatible embedding base URL",
+    )
+    parser.add_argument("--local-embedding-http-model", default="local")
+    parser.add_argument(
+        "--local-embedding-instruction",
+        help=(
+            "Optional one-sentence Qwen3 query instruction; applied to queries only "
+            "using the model-card Instruct/Query format"
+        ),
     )
     parser.add_argument(
         "--local-late-interaction-model",
@@ -268,6 +392,35 @@ def main() -> None:
         "--dense-time-weights",
         help="Comma-separated timestamp-augmented dense-key weights for a shared-cache sweep",
     )
+    parser.add_argument(
+        "--dense-speaker-mask-max", action="store_true",
+        help="Max-fuse exact and speaker-anonymized dense scores",
+    )
+    parser.add_argument("--dense-speaker-conflict-margin", type=float)
+    parser.add_argument("--dense-speaker-conflict-gate-only", action="store_true")
+    parser.add_argument(
+        "--dense-speaker-conflict-margins",
+        help="Comma-separated conditional speaker-conflict margins for a shared-cache sweep",
+    )
+    parser.add_argument("--dense-sentence-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--dense-sentence-weights",
+        help="Comma-separated latent sentence-key weights for a shared-cache sweep",
+    )
+    parser.add_argument("--dense-image-carry-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--dense-image-carry-weights",
+        help="Comma-separated prior-image carry weights for a shared-cache sweep",
+    )
+    parser.add_argument("--dense-speaker-coref-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--dense-speaker-coref-weights",
+        help="Comma-separated speaker-coreference weights for a shared-cache sweep",
+    )
+    parser.add_argument(
+        "--dense-speaker-swap-max", action="store_true",
+        help="Max-fuse the original query with a two-speaker name-swapped latent query",
+    )
     parser.add_argument("--local-reranker-model", help="FastEmbed late-interaction model")
     parser.add_argument("--local-cross-encoder-model", help="FastEmbed cross-encoder reranker")
     parser.add_argument(
@@ -275,7 +428,15 @@ def main() -> None:
         help="Loopback URL for a Qwen-style yes/no logprob reranker",
     )
     parser.add_argument("--local-yes-no-reranker-model", default="local")
+    parser.add_argument(
+        "--local-yes-no-reranker-instruction",
+        choices=["web", "memory", "evidence_audit"], default="web",
+    )
+    parser.add_argument("--local-yes-no-reranker-batch-size", type=int, default=1)
+    parser.add_argument("--local-yes-no-mask-speakers", action="store_true")
+    parser.add_argument("--local-yes-no-max-masked-score", action="store_true")
     parser.add_argument("--rerank-top-n", type=int, default=10)
+    parser.add_argument("--rerank-image-followups", type=int, default=0)
     parser.add_argument(
         "--rerank-top-ns",
         help="Comma-separated rerank-pool sweep evaluated with shared embedding caches",
@@ -287,6 +448,11 @@ def main() -> None:
     parser.add_argument(
         "--rerank-fusion-weights",
         help="Comma-separated reranker-fusion sweep evaluated with shared caches",
+    )
+    parser.add_argument("--rerank-near-tie-epsilon", type=float, default=0.0)
+    parser.add_argument(
+        "--rerank-near-tie-epsilons",
+        help="Comma-separated reranker near-tie thresholds for a shared-cache sweep",
     )
     parser.add_argument(
         "--session-weight", type=float, default=0.0,
@@ -310,14 +476,28 @@ def main() -> None:
     parser.add_argument("--local-instruction-model", default="local")
     parser.add_argument("--instruction-rerank-top-n", type=int, default=10)
     parser.add_argument("--instruction-refine-top-n", type=int, default=0)
+    parser.add_argument("--instruction-speaker-conflict-only", action="store_true")
     parser.add_argument("--instruction-thinking", action="store_true")
     parser.add_argument(
-        "--instruction-strategy", choices=["direct", "chain_of_note"], default="direct"
+        "--instruction-strategy",
+        choices=[
+            "direct", "chain_of_note", "comparative_audit", "comparative_top1",
+            "conservative_verify_top1", "constraint_first_top1", "answer_first_top1",
+            "dual_arbitrate_top1",
+        ],
+        default="direct",
     )
     args = parser.parse_args()
-    if args.local_late_interaction_model and args.local_embedding_model:
+    if args.question_offset < 0:
+        raise ValueError("--question-offset must be non-negative")
+    if sum(bool(value) for value in (
+        args.local_late_interaction_model,
+        args.local_embedding_model,
+        args.local_embedding_url,
+    )) > 1:
         raise ValueError(
-            "Use either --local-embedding-model or --local-late-interaction-model, not both"
+            "Use only one of --local-embedding-model, --local-late-interaction-model, "
+            "or --local-embedding-url"
         )
     late_interaction_first_stage = bool(args.local_late_interaction_model)
     if late_interaction_first_stage:
@@ -336,17 +516,33 @@ def main() -> None:
     if sum(bool(value) for value in (
         args.fusion_alphas, args.rerank_top_ns, args.session_weights,
         args.rerank_fusion_weights, args.dense_context_weights, args.dense_time_weights,
-        args.session_top_ns,
+        args.session_top_ns, args.dense_speaker_conflict_margins,
+        args.dense_sentence_weights,
+        args.rerank_near_tie_epsilons,
+        args.dense_image_carry_weights,
+        args.dense_speaker_coref_weights,
     )) > 1:
         raise ValueError("Use only one shared-cache sweep at a time")
+    if args.question_offset and any((
+        args.fusion_alphas, args.rerank_top_ns, args.session_weights,
+        args.rerank_fusion_weights, args.dense_context_weights,
+        args.dense_time_weights, args.session_top_ns,
+        args.dense_speaker_conflict_margins,
+        args.dense_sentence_weights,
+        args.rerank_near_tie_epsilons,
+        args.dense_image_carry_weights,
+        args.dense_speaker_coref_weights,
+    )):
+        raise ValueError("--question-offset is supported for one configuration, not sweeps")
     fusion_alphas = None
     if args.fusion_alphas:
         fusion_alphas = [float(value) for value in args.fusion_alphas.split(",")]
         if not fusion_alphas or any(value < 0 or value > 1 for value in fusion_alphas):
             raise ValueError("--fusion-alphas values must be between 0 and 1")
-    if args.fusion_alpha is not None and not args.local_embedding_model:
+    has_embedding = bool(args.local_embedding_model or args.local_embedding_url)
+    if args.fusion_alpha is not None and not has_embedding:
         raise ValueError("--fusion-alpha requires --local-embedding-model")
-    if fusion_alphas is not None and not args.local_embedding_model:
+    if fusion_alphas is not None and not has_embedding:
         raise ValueError("--fusion-alphas requires --local-embedding-model")
     if not 0 <= args.dense_context_weight <= 1:
         raise ValueError("--dense-context-weight must be between 0 and 1")
@@ -378,6 +574,94 @@ def main() -> None:
             )
     if args.local_reranker_model and not args.local_embedding_model:
         raise ValueError("--local-reranker-model requires --local-embedding-model")
+    if args.dense_speaker_mask_max and (
+        not args.local_embedding_model or args.fusion_alpha is None
+    ):
+        raise ValueError(
+            "--dense-speaker-mask-max requires --local-embedding-model and --fusion-alpha"
+        )
+    if args.dense_speaker_conflict_margin is not None and (
+        args.dense_speaker_conflict_margin < 0
+        or not args.local_embedding_model
+        or args.fusion_alpha is None
+    ):
+        raise ValueError(
+            "--dense-speaker-conflict-margin must be non-negative and requires "
+            "--local-embedding-model and --fusion-alpha"
+        )
+    if args.dense_speaker_conflict_gate_only and (
+        args.dense_speaker_conflict_margin is None
+    ):
+        raise ValueError(
+            "--dense-speaker-conflict-gate-only requires "
+            "--dense-speaker-conflict-margin"
+        )
+    dense_speaker_conflict_margins = None
+    if args.dense_speaker_conflict_margins:
+        dense_speaker_conflict_margins = [
+            float(value) for value in args.dense_speaker_conflict_margins.split(",")
+        ]
+        if (
+            not dense_speaker_conflict_margins
+            or any(value < 0 for value in dense_speaker_conflict_margins)
+            or not args.local_embedding_model
+            or args.fusion_alpha is None
+        ):
+            raise ValueError(
+                "--dense-speaker-conflict-margins must be non-negative and requires "
+                "--local-embedding-model and --fusion-alpha"
+            )
+    if not 0 <= args.dense_sentence_weight <= 1:
+        raise ValueError("--dense-sentence-weight must be between 0 and 1")
+    dense_sentence_weights = None
+    if args.dense_sentence_weights:
+        dense_sentence_weights = [
+            float(value) for value in args.dense_sentence_weights.split(",")
+        ]
+        if (
+            not dense_sentence_weights
+            or any(value < 0 or value > 1 for value in dense_sentence_weights)
+            or not args.local_embedding_model
+            or args.fusion_alpha is None
+        ):
+            raise ValueError(
+                "--dense-sentence-weights must be between 0 and 1 and requires "
+                "--local-embedding-model and --fusion-alpha"
+            )
+    if not 0 <= args.dense_image_carry_weight <= 1:
+        raise ValueError("--dense-image-carry-weight must be between 0 and 1")
+    dense_image_carry_weights = None
+    if args.dense_image_carry_weights:
+        dense_image_carry_weights = [
+            float(value) for value in args.dense_image_carry_weights.split(",")
+        ]
+        if (
+            not dense_image_carry_weights
+            or any(value < 0 or value > 1 for value in dense_image_carry_weights)
+            or not args.local_embedding_model
+            or args.fusion_alpha is None
+        ):
+            raise ValueError(
+                "--dense-image-carry-weights must be between 0 and 1 and requires "
+                "--local-embedding-model and --fusion-alpha"
+            )
+    if not 0 <= args.dense_speaker_coref_weight <= 1:
+        raise ValueError("--dense-speaker-coref-weight must be between 0 and 1")
+    dense_speaker_coref_weights = None
+    if args.dense_speaker_coref_weights:
+        dense_speaker_coref_weights = [
+            float(value) for value in args.dense_speaker_coref_weights.split(",")
+        ]
+        if (
+            not dense_speaker_coref_weights
+            or any(value < 0 or value > 1 for value in dense_speaker_coref_weights)
+            or not args.local_embedding_model
+            or args.fusion_alpha is None
+        ):
+            raise ValueError(
+                "--dense-speaker-coref-weights must be between 0 and 1 and requires "
+                "--local-embedding-model and --fusion-alpha"
+            )
     if args.local_cross_encoder_model and not args.local_embedding_model:
         raise ValueError("--local-cross-encoder-model requires --local-embedding-model")
     if args.local_cross_encoder_model and args.local_reranker_model:
@@ -397,8 +681,17 @@ def main() -> None:
             "--local-yes-no-reranker-url requires --local-embedding-model and "
             "--fusion-alpha"
         )
+    if not 1 <= args.local_yes_no_reranker_batch_size <= 32:
+        raise ValueError("--local-yes-no-reranker-batch-size must be between 1 and 32")
+    if args.local_yes_no_mask_speakers and args.local_yes_no_max_masked_score:
+        raise ValueError(
+            "Use either --local-yes-no-mask-speakers or "
+            "--local-yes-no-max-masked-score, not both"
+        )
     if args.rerank_top_n < 1 or args.rerank_top_n > 100:
         raise ValueError("--rerank-top-n must be between 1 and 100")
+    if args.rerank_image_followups < 0 or args.rerank_image_followups > 4:
+        raise ValueError("--rerank-image-followups must be between 0 and 4")
     if args.rerank_fusion_weight is not None and not 0 <= args.rerank_fusion_weight <= 1:
         raise ValueError("--rerank-fusion-weight must be between 0 and 1")
     if args.rerank_fusion_weight is not None and not (
@@ -408,6 +701,22 @@ def main() -> None:
             "--rerank-fusion-weight requires --local-reranker-model or "
             "--local-yes-no-reranker-url"
         )
+    if not 0 <= args.rerank_near_tie_epsilon <= 1:
+        raise ValueError("--rerank-near-tie-epsilon must be between 0 and 1")
+    rerank_near_tie_epsilons = None
+    if args.rerank_near_tie_epsilons:
+        rerank_near_tie_epsilons = [
+            float(value) for value in args.rerank_near_tie_epsilons.split(",")
+        ]
+        if (
+            not rerank_near_tie_epsilons
+            or any(value <= 0 or value > 1 for value in rerank_near_tie_epsilons)
+            or not args.local_yes_no_reranker_url
+        ):
+            raise ValueError(
+                "--rerank-near-tie-epsilons must be in (0, 1] and requires "
+                "--local-yes-no-reranker-url"
+            )
     if args.session_weight < 0 or args.session_weight > 10:
         raise ValueError("--session-weight must be between 0 and 10")
     if args.session_weight > 0 and (
@@ -481,13 +790,28 @@ def main() -> None:
     if not isinstance(data, list):
         raise ValueError("LoCoMo dataset must be a JSON array")
     model = None
+    if args.search_model and args.local_search_model_url:
+        raise ValueError("Use either --search-model or --local-search-model-url")
+    if args.structured_query_plan and not (args.search_model or args.local_search_model_url):
+        raise ValueError("--structured-query-plan requires a Search model")
     if args.search_model:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("--search-model requires OPENAI_API_KEY")
         model = SearchOnlyModel(api_key)
+    elif args.local_search_model_url:
+        model = SearchOnlyModel(
+            "local-only", model_name=args.local_search_model_name,
+            base_url=args.local_search_model_url, disable_thinking=True,
+        )
     semantic_retriever = None
-    if args.local_embedding_model:
+    if args.local_embedding_url:
+        semantic_retriever = LocalHTTPEmbeddingRetriever(
+            args.local_embedding_url,
+            model_name=args.local_embedding_http_model,
+            query_instruction=args.local_embedding_instruction,
+        )
+    elif args.local_embedding_model:
         semantic_retriever = (
             LocalLateInteractionReranker(
                 args.local_embedding_model,
@@ -500,6 +824,15 @@ def main() -> None:
                 device=args.local_device,
                 cache_dir=args.local_cache_dir,
             )
+        )
+    if args.instruction_speaker_conflict_only and (
+        not args.local_instruction_url
+        or args.dense_speaker_conflict_margin is None
+        or not args.dense_speaker_conflict_gate_only
+    ):
+        raise ValueError(
+            "--instruction-speaker-conflict-only requires --local-instruction-url, "
+            "--dense-speaker-conflict-margin, and --dense-speaker-conflict-gate-only"
         )
     local_reranker = None
     if args.local_reranker_model:
@@ -518,14 +851,25 @@ def main() -> None:
         local_reranker = LocalYesNoReranker(
             args.local_yes_no_reranker_url,
             model_name=args.local_yes_no_reranker_model,
+            instruction=args.local_yes_no_reranker_instruction,
+            batch_size=args.local_yes_no_reranker_batch_size,
+            mask_speakers=args.local_yes_no_mask_speakers,
+            max_masked_score=args.local_yes_no_max_masked_score,
         )
     local_instruction_reranker = None
     if args.local_instruction_url:
-        local_instruction_reranker = LocalInstructionReranker(
-            args.local_instruction_url,
-            model_name=args.local_instruction_model,
-            thinking=args.instruction_thinking,
-            strategy=args.instruction_strategy,
+        local_instruction_reranker = (
+            LocalDualStrategyReranker(
+                args.local_instruction_url,
+                model_name=args.local_instruction_model,
+            )
+            if args.instruction_strategy == "dual_arbitrate_top1"
+            else LocalInstructionReranker(
+                args.local_instruction_url,
+                model_name=args.local_instruction_model,
+                thinking=args.instruction_thinking,
+                strategy=args.instruction_strategy,
+            )
         )
     local_query_expander = None
     if args.local_query_expansion_url:
@@ -549,6 +893,7 @@ def main() -> None:
                 dense_context_weight=weight,
                 local_reranker=local_reranker,
                 rerank_top_n=args.rerank_top_n,
+                rerank_image_followups=args.rerank_image_followups,
                 session_fusion_weight=args.session_weight,
                 rerank_fusion_weight=args.rerank_fusion_weight,
                 local_instruction_reranker=local_instruction_reranker,
@@ -565,6 +910,94 @@ def main() -> None:
             "dense_context_weight_sweep": sweep,
         }, ensure_ascii=False, indent=2))
         return
+    if dense_sentence_weights is not None:
+        sweep = {
+            str(weight): evaluate(
+                data,
+                top_ks,
+                args.max_questions,
+                model=model,
+                semantic_retriever=semantic_retriever,
+                dense_fusion_alpha=args.fusion_alpha,
+                dense_time_weight=args.dense_time_weight,
+                dense_sentence_weight=weight,
+            )
+            for weight in dense_sentence_weights
+        }
+        print(json.dumps({
+            "scope": "retrieval-only latent sentence-key sweep; shared caches",
+            "local_embedding_model": args.local_embedding_model,
+            "dense_fusion_alpha": args.fusion_alpha,
+            "dense_time_weight": args.dense_time_weight,
+            "dense_sentence_weight_sweep": sweep,
+        }, ensure_ascii=False, indent=2))
+        return
+    if dense_image_carry_weights is not None:
+        sweep = {
+            str(weight): evaluate(
+                data,
+                top_ks,
+                args.max_questions,
+                model=model,
+                semantic_retriever=semantic_retriever,
+                dense_fusion_alpha=args.fusion_alpha,
+                dense_time_weight=args.dense_time_weight,
+                dense_image_carry_weight=weight,
+            )
+            for weight in dense_image_carry_weights
+        }
+        print(json.dumps({
+            "scope": "retrieval-only prior-image carry dense-key sweep; shared caches",
+            "local_embedding_model": args.local_embedding_model,
+            "dense_fusion_alpha": args.fusion_alpha,
+            "dense_time_weight": args.dense_time_weight,
+            "dense_image_carry_weight_sweep": sweep,
+        }, ensure_ascii=False, indent=2))
+        return
+    if dense_speaker_coref_weights is not None:
+        sweep = {
+            str(weight): evaluate(
+                data,
+                top_ks,
+                args.max_questions,
+                model=model,
+                semantic_retriever=semantic_retriever,
+                dense_fusion_alpha=args.fusion_alpha,
+                dense_time_weight=args.dense_time_weight,
+                dense_speaker_coref_weight=weight,
+            )
+            for weight in dense_speaker_coref_weights
+        }
+        print(json.dumps({
+            "scope": "retrieval-only speaker-coreference dense-key sweep; shared caches",
+            "local_embedding_model": args.local_embedding_model,
+            "dense_fusion_alpha": args.fusion_alpha,
+            "dense_time_weight": args.dense_time_weight,
+            "dense_speaker_coref_weight_sweep": sweep,
+        }, ensure_ascii=False, indent=2))
+        return
+    if dense_speaker_conflict_margins is not None:
+        sweep = {
+            str(margin): evaluate(
+                data,
+                top_ks,
+                args.max_questions,
+                model=model,
+                semantic_retriever=semantic_retriever,
+                dense_fusion_alpha=args.fusion_alpha,
+                dense_time_weight=args.dense_time_weight,
+                dense_speaker_conflict_margin=margin,
+            )
+            for margin in dense_speaker_conflict_margins
+        }
+        print(json.dumps({
+            "scope": "retrieval-only conditional speaker-conflict sweep; shared caches",
+            "local_embedding_model": args.local_embedding_model,
+            "dense_fusion_alpha": args.fusion_alpha,
+            "dense_time_weight": args.dense_time_weight,
+            "speaker_conflict_margin_sweep": sweep,
+        }, ensure_ascii=False, indent=2))
+        return
     if session_top_ns is not None:
         sweep = {
             str(top_n): evaluate(
@@ -576,6 +1009,7 @@ def main() -> None:
                 dense_fusion_alpha=args.fusion_alpha,
                 local_reranker=local_reranker,
                 rerank_top_n=args.rerank_top_n,
+                rerank_image_followups=args.rerank_image_followups,
                 session_fusion_weight=args.session_weight,
                 session_top_n=top_n,
             )
@@ -602,6 +1036,7 @@ def main() -> None:
                 dense_time_weight=weight,
                 local_reranker=local_reranker,
                 rerank_top_n=args.rerank_top_n,
+                rerank_image_followups=args.rerank_image_followups,
                 session_fusion_weight=args.session_weight,
                 rerank_fusion_weight=args.rerank_fusion_weight,
             )
@@ -627,6 +1062,7 @@ def main() -> None:
                 dense_context_weight=args.dense_context_weight,
                 local_reranker=local_reranker,
                 rerank_top_n=top_n,
+                rerank_image_followups=args.rerank_image_followups,
                 session_fusion_weight=args.session_weight,
                 rerank_fusion_weight=args.rerank_fusion_weight,
                 local_instruction_reranker=local_instruction_reranker,
@@ -655,6 +1091,7 @@ def main() -> None:
                 dense_context_weight=args.dense_context_weight,
                 local_reranker=local_reranker,
                 rerank_top_n=args.rerank_top_n,
+                rerank_image_followups=args.rerank_image_followups,
                 session_fusion_weight=args.session_weight,
                 rerank_fusion_weight=weight,
                 local_instruction_reranker=local_instruction_reranker,
@@ -673,6 +1110,32 @@ def main() -> None:
             "rerank_fusion_weight_sweep": sweep,
         }, ensure_ascii=False, indent=2))
         return
+    if rerank_near_tie_epsilons is not None:
+        sweep = {
+            str(epsilon): evaluate(
+                data,
+                top_ks,
+                args.max_questions,
+                model=model,
+                semantic_retriever=semantic_retriever,
+                dense_fusion_alpha=args.fusion_alpha,
+                dense_context_weight=args.dense_context_weight,
+                dense_time_weight=args.dense_time_weight,
+                local_reranker=local_reranker,
+                rerank_top_n=args.rerank_top_n,
+                rerank_near_tie_epsilon=epsilon,
+            )
+            for epsilon in rerank_near_tie_epsilons
+        }
+        print(json.dumps({
+            "scope": "retrieval-only reranker near-tie sweep; shared caches",
+            "local_embedding_model": args.local_embedding_model,
+            "dense_fusion_alpha": args.fusion_alpha,
+            "dense_time_weight": args.dense_time_weight,
+            "rerank_top_n": args.rerank_top_n,
+            "rerank_near_tie_epsilon_sweep": sweep,
+        }, ensure_ascii=False, indent=2))
+        return
     if session_weights is not None:
         sweep = {
             str(weight): evaluate(
@@ -685,6 +1148,7 @@ def main() -> None:
                 dense_context_weight=args.dense_context_weight,
                 local_reranker=local_reranker,
                 rerank_top_n=args.rerank_top_n,
+                rerank_image_followups=args.rerank_image_followups,
                 session_fusion_weight=weight,
                 rerank_fusion_weight=args.rerank_fusion_weight,
                 local_instruction_reranker=local_instruction_reranker,
@@ -714,6 +1178,7 @@ def main() -> None:
                 dense_context_weight=args.dense_context_weight,
                 local_reranker=local_reranker,
                 rerank_top_n=args.rerank_top_n,
+                rerank_image_followups=args.rerank_image_followups,
                 session_fusion_weight=args.session_weight,
                 rerank_fusion_weight=args.rerank_fusion_weight,
                 local_instruction_reranker=local_instruction_reranker,
@@ -734,32 +1199,53 @@ def main() -> None:
         data,
         top_ks,
         args.max_questions,
+        question_offset=args.question_offset,
         model=model,
         semantic_retriever=semantic_retriever,
         dense_rrf_weight=args.dense_weight,
         dense_fusion_alpha=args.fusion_alpha,
         dense_context_weight=args.dense_context_weight,
         dense_time_weight=args.dense_time_weight,
+        dense_speaker_mask_max=args.dense_speaker_mask_max,
+        dense_speaker_conflict_margin=args.dense_speaker_conflict_margin,
+        dense_speaker_conflict_gate_only=args.dense_speaker_conflict_gate_only,
+        dense_sentence_weight=args.dense_sentence_weight,
+        dense_image_carry_weight=args.dense_image_carry_weight,
+        dense_speaker_coref_weight=args.dense_speaker_coref_weight,
+        dense_speaker_swap_max=args.dense_speaker_swap_max,
         local_reranker=local_reranker,
         rerank_top_n=args.rerank_top_n,
+        rerank_image_followups=args.rerank_image_followups,
         session_fusion_weight=args.session_weight,
         session_top_n=args.session_top_n,
         rerank_fusion_weight=args.rerank_fusion_weight,
+        rerank_near_tie_epsilon=args.rerank_near_tie_epsilon,
         local_instruction_reranker=local_instruction_reranker,
+        instruction_speaker_conflict_only=args.instruction_speaker_conflict_only,
         local_query_expander=local_query_expander,
         instruction_rerank_top_n=args.instruction_rerank_top_n,
         instruction_refine_top_n=args.instruction_refine_top_n,
+        include_hit_bitmap=args.include_hit_bitmap,
+        structured_query_plan=args.structured_query_plan,
     )
     if not args.compare_v020:
-        print(json.dumps(current, ensure_ascii=False, indent=2))
+        rendered = json.dumps(current, ensure_ascii=False, indent=2)
+        if args.output:
+            Path(args.output).write_text(rendered + "\n", encoding="utf-8")
+        print(rendered)
         return
-    baseline = evaluate(data, top_ks, args.max_questions, retriever="v0.2.0")
-    print(json.dumps({
+    baseline = evaluate(
+        data, top_ks, args.max_questions,
+        question_offset=args.question_offset, retriever="v0.2.0",
+    )
+    comparison = {
         "scope": "retrieval-only, no external API call",
         "local_embedding_model": args.local_embedding_model,
         "dense_rrf_weight": args.dense_weight if args.local_embedding_model else None,
         "dense_fusion_alpha": args.fusion_alpha,
         "dense_context_weight": args.dense_context_weight,
+        "dense_time_weight": args.dense_time_weight,
+        "dense_speaker_mask_max": args.dense_speaker_mask_max,
         "local_reranker_model": args.local_reranker_model,
         "rerank_top_n": args.rerank_top_n if args.local_reranker_model else None,
         "session_fusion_weight": args.session_weight,
@@ -781,7 +1267,11 @@ def main() -> None:
         "current": current,
         "delta_hit_at_1": round(current["hit_at_k"]["1"] - baseline["hit_at_k"]["1"], 4),
         "delta_mrr": round(current["mrr"] - baseline["mrr"], 4),
-    }, ensure_ascii=False, indent=2))
+    }
+    rendered = json.dumps(comparison, ensure_ascii=False, indent=2)
+    if args.output:
+        Path(args.output).write_text(rendered + "\n", encoding="utf-8")
+    print(rendered)
 
 
 if __name__ == "__main__":

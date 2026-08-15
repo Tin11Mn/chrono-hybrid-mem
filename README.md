@@ -23,6 +23,12 @@ Add: validate -> persist raw messages -> gpt-4o-mini fact extraction -> FTS5 ind
 Search: gpt-4o-mini query planning -> user isolation -> FTS5 candidates -> RRF -> gpt-4o-mini evidence ordering
 ```
 
+The current competition-path iteration gives the evidence orderer ranker-only
+provenance (speaker and event date), extracted annotations, and one adjacent
+turn on either side. It still returns the original source records unchanged.
+The ordering rubric explicitly distinguishes updates/retractions, rules and
+exceptions, multi-hop evidence chains, and uncertainty/privacy boundaries.
+
 The optional v0.3 local path preserves the same Add/Search API:
 
 ```text

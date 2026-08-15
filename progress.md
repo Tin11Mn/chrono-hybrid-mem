@@ -1,5 +1,32 @@
 # Progress
 
+## 2026-08-15
+
+- Read the live Academic / Textual leaderboard and recorded the fifth-place capability profile.
+- Redirected optimization from local model scale to evidence quality for the fixed `gpt-4o-mini` competition path.
+- Updated `app/model.py` to extract and retrieve governance/rule/safety cues and to rank by query capability.
+- Updated `app/storage.py` with ranker-only speaker/date/fact/adjacency evidence packages; returned content remains original.
+- Added regression coverage and passed 89 tests plus `compileall` and `git diff --check`.
+- Re-ran all 1,977 no-model evidence questions: Hit@1/3/10/100 improved to 0.3612/0.5468/0.6990/0.8968; MRR is 0.4782 and evidence Recall@100 is 0.7823. Result: `.locomo/leaderboard-targeted-lexical-full.json`.
+- The environment has no `OPENAI_API_KEY`; no new GPT-4o mini Smoke/Full score is available yet, and the Hit@1 goal remains open.
+
+## 2026-08-12
+
+- User resumed the project with the explicit target of strict full-set Hit@1 >= 0.70. Restored the persistent plan and confirmed the current validated best is 0.5225 from Qwen3-Reranker-4B Q3_K_M plus the time-aware dense key.
+- Began a new error-analysis phase before changing ranking. The next experiment must be leakage-free, improve the fixed-200 gate over 0.505, and retain exact source-record outputs.
+- Confirmed upstream LoCoMo dialog-RAG appends `blip_caption` to image-bearing turns but does not use image crawler `query`; repaired the local evaluator accordingly and passed 51 tests plus static compilation.
+- Caption-aware fixed-200 results before Qwen: lexical Hit@1/3/10 0.350/0.540/0.700; BGE-large alpha 0.3 + time key Hit@1/3/10 0.385/0.615/0.795. Caption improves lexical evidence but does not materially raise the dense top-10 ceiling.
+- The caption-aware fixed-200 Qwen gate hit the 20-minute command limit without emitting metrics while its detached server remained healthy. This is a runtime failure under current GPU contention, not a score. Changed the next gate to fixed 20 and will require a resumable evaluator before retrying a larger run.
+- Memory-specific Qwen instructions tied the generic instruction at fixed-20 Hit@1 0.65 and lowered MRR, so they were rejected.
+- Added an optional image-anchor rerank window that appends two following turns only to the scorer document while returning the original anchor ID/content. It passed 55 tests and improved the caption-aware fixed-20 result to Hit@1/3/10 0.70/0.70/0.85 and MRR 0.6683. This reaches the target only on the smoke prefix; fixed-200 and full validation remain required.
+- Added resumable question offsets and aggregate-only chunk output, corrected MRR/category accounting to use the best annotated evidence rank, and added indexed llama.cpp prompt batching; 59 tests pass. Batch mode preserves fixed-20 Hit@1/3/10 exactly but does not materially improve wall-clock time with one server slot.
+- Completed four fixed-50 chunks for the image-followup method and merged exact raw counts: Hit@1/3/10 0.490/0.685/0.795, MRR 0.6004. This is below the prior fixed-200 best Hit@1 0.505, so the smoke-only 0.70 did not generalize and the method is rejected without a full run.
+- Confirmed from upstream methodology that category 4 is open-domain and category 5 is adversarial/unanswerable. The project keeps category 5 in its long-standing 1,977-question strict-evidence protocol rather than changing the denominator. A pairwise `evidence_audit` instruction failed its adversarial 20-question gate at Hit@1 0.25 and was rejected; move to joint candidate comparison.
+- A Qwen3-4B joint `comparative_audit` selector improved the adversarial-heavy offset-150 20-question slice to Hit@1 0.55 with zero format failures, versus pairwise audit 0.25 and the surrounding pairwise baseline near 0.39. Restricting the listwise pool to top-5 reduced Hit@1 to 0.45 while still taking 444 seconds, so retain top-10 only as a selective fallback rather than an all-query stage.
+- Pairwise speaker anonymization reaches Hit@1 0.45 on the same adversarial slice: better than the surrounding exact-identity baseline but below listwise 0.55. Test a label-free max over exact and anonymized pairwise scores before considering an expensive cascade.
+- Max-over-exact-and-anonymized pairwise scores also reaches only Hit@1 0.45 on the adversarial slice. It adds work without improving masked-only ranking and is rejected. Optimize the positive listwise method to select one best ID rather than generate a full permutation.
+- `comparative_top1` preserves adversarial Hit@1 0.55 while cutting the 20-question runtime from 570 to 219 seconds. It regresses the normal prefix to 0.45 but improves an open-domain/category-4 slice to 0.50 versus the surrounding pairwise baseline near 0.43. Treat it as a routed hard-query selector, not a global replacement.
+
 ## 2026-08-07
 
 - Created the independent local Git repository.
@@ -119,3 +146,28 @@
 - Fixed-200 context-key + Qwen scored Hit@1 0.505, Hit@3 0.720, Hit@10 0.840, MRR 0.6021. It ties the time-key configuration on Hit@1 and is rejected alone despite improved candidate coverage; test the two recall signals jointly next.
 - The combined time-key + context-key + Qwen fixed-200 gate took 434 seconds and scored Hit@1 0.500, Hit@3 0.700, Hit@10 0.810, MRR 0.5978. It is below time-key + Qwen's 0.505, so reject the joint feature path and preserve full-set 0.5225 as the current local best.
 - Published the verified v0.4 local research milestone as commit `1d7b9ab` on `agent/qwen-reranker-v0-4`. Direct GitHub push was reset by the network, so the successful retry used the existing local proxy only for that command. Draft PR #2 was created against `main`; it records the 49 passing tests and the local full-set 0.5225 result without claiming a platform leaderboard score.
+- Added optional exact/speaker-anonymized dense max fusion and passed 67 tests. Its caption-aware fixed-200 gate scored Hit@1/3/10 0.360/0.620/0.800 in 432 seconds: only one additional top-10 question versus the 0.795 candidate baseline, with materially worse early ranks. Reject it from reranked/full validation and keep it disabled by default.
+- Downloaded Qwen3-Reranker-8B Q3_K_M from the public GGUF repository, verified its exact 3,855,854,816-byte size and SHA-256 `c77c7097192d7b6834c7714edfb59fa4ad55ef5281fe8f7db24a781b5888f421`, and ran the predeclared same-protocol fixed-20 gate. Hit@1/3/10 was 0.40/0.65/0.85 in 372 seconds, versus 4B's 0.65/0.70/0.85, so reject 8B without a larger run.
+- Implemented and tested a conditional speaker-conflict dense channel, then swept margins 0/0.02/0.05/0.10 on fixed 200 with shared caches. Best total Hit@1 stayed 0.385; category-5 Hit@1 improved only to 0.383 and Hit@10 to 0.800. BGE score margins cannot reliably detect false-person premises, so do not combine this channel with unconditional reranking.
+- A gate-only conflict cascade covered only 1/20 adversarial questions at margin 0.05 (Hit@1 0.40) and 7/20 at margin 0 (Hit@1 0.45), below unconditional comparative-top1's 0.55. A conservative verifier also reduced the normal prefix from 4B's 0.65 to 0.60. Reject both cascades.
+- An optimized full-1,977 lexical diagnostic found that removing or masking participant names moves category-5 BM25 Hit@1 only from 0.2870 to 0.2937 and lowers overall Hit@1 from 0.2752 to 0.2721; pure lexical identity normalization has no useful headroom.
+- Sentence-level latent dense keys passed 74 tests but failed the fixed-200 candidate gate: weights 0.25/0.5/0.75/1.0 scored Hit@10 0.795/0.795/0.800/0.785. The best gain is again one question and does not justify reranking or full validation.
+- Dedicated-reranker score diagnostics found 10 unique scores per query and no exact top ties, but three near-ties under 0.01 on the fixed-20 prefix. A first-stage fallback within epsilon 0.02 raised smoke Hit@1 to 0.70, but exact raw-count aggregation over fixed 200 scored Hit@1/3/10 0.500/0.720/0.795 and MRR 0.6124. It does not beat the 0.505 gate and is rejected from full validation.
+- Generic Qwen3-8B Q4 comparative-top1 scored 0.60 on the adversarial offset-150 slice and 0.55 on the open-domain offset-100 slice, each only +0.05 (+1/20) over generic 4B. The adversarial run took 1,009 seconds, so unconditional 8B listwise selection is rejected; retain only the hypothesis of routing a small conflict subset.
+- Using the Hugging Face CLI skill, identified and cached the Apache-2.0 `jina-reranker-v1-turbo-en` ONNX cross-encoder. It passed fixed-20 at Hit@1 0.60 but collapsed to fixed-200 Hit@1/3/10 0.370/0.535/0.795; reject it without full validation.
+- Added optional per-question Hit@1 bitmaps for local complementarity analysis. On fixed 200, first-stage had 77 hits, Jina 74, overlap 55, and their perfect per-question oracle union only 96/200=0.480. A router over these experts cannot approach 0.70.
+- First-stage versus Qwen fixed-50 complementarity is also absent: all 18 first-stage hits are contained in Qwen's 28 hits, so the oracle union remains 0.560. Reject expert routing as a route to 0.70.
+- A prior-image-to-following-turn dense key modestly improves fixed-200 candidate coverage: weight 1.0 scores Hit@1/3/10 0.400/0.635/0.805 versus 0.385/0.615/0.795. The +2 top-10 questions are insufficient alone, but latent coreference resolution is directionally positive.
+- Added the official Qwen3 asymmetric query-instruction format to the loopback embedding adapter and passed 82 tests. Qwen3-Embedding-0.6B Q4 remained weak on fixed 20 (Hit@1/3/10 0.45/0.60/0.80). Downloaded and verified the official Qwen3-Embedding-4B Q4_K_M file (2,496,703,776 bytes, SHA-256 `2B0CF8F17B4C723C27303015383C27EC4BF2D8314BB677D05E920DD70BB0F16B`); its raw/instructed fixed-20 results were 0.40/0.50/0.75 and 0.35/0.55/0.70. Reject embedding scaling and move to joint candidate reading.
+- Added `constraint_first_top1` and `answer_first_top1` joint-reading protocols plus an optional two-speaker swapped-query dense channel; 85 tests pass. The 8B constraint protocol scores 0.70 on normal fixed-20 but 0.50 adversarial; answer-first is also 0.50 adversarial. Swapped-query + comparative-top1 improves adversarial Hit@1 to 0.65 and normal to 0.50, but its first fixed-50 chunk is only 0.52, so stop the unconditional 200-question run and measure cross-strategy oracle headroom.
+# 2026-08-15 Leaderboard V2 audit
+
+- Completed the required no-code-first audit and created `docs/LEADERBOARD_V2_AUDIT.md`.
+- Established three distinct comparison states: likely leaderboard `v0.2.0`/`7cf45c76…` (`UNVERIFIED`), current public main `c7df0cb…`, and local `11a3b00…` plus uncommitted experiments.
+- Selected P1 structured query planning as the only next method change. The planned flag-off/flag-on ablation will not add an LLM call or alter the formal dependency footprint.
+- Implemented P1 behind `MEMORY_STRUCTURED_QUERY_PLAN=false`, added bounded plan parsing and GPT usage counters, and kept the existing two Search calls (one planner, one ranker).
+- Generated and validated 210 public synthetic cases (30 each for A/B/C/D/E/G/H), plus an evaluator for evidence, coverage, leakage, duplication, latency, calls, and tokens.
+- Passed 94 tests and static compilation. The no-model synthetic baseline is Hit@1 `0.785714` with zero cross-user leakage; the deterministic P1 ablation corrects its targeted retrieval case without an extra planner call.
+- Docker CLI is unavailable in this environment, so a local image build could not be executed. Formal `gpt-4o-mini` baseline/ablation remains pending because `OPENAI_API_KEY` is absent; do not advance to P2 or declare P1 `KEEP` yet.
+- Ran a full 210-case fixture-plan sweep to isolate retrieval mechanics. Rejected support weights `0.35`, `0.2`, `0.1`, and `0.05` for broad G/H regressions. Weights `0.005/0.01/0.015/0.02` improved Hit@1 from flat OR `0.357143` to `0.785714`, preserved Hit@3/5/10 at `1`, lowered forbidden@1 to `0.071429`, and retained zero leakage. A focused near-neighbor regression rejected `0.02`; provisional P1 now uses `0.01`.
+- Added a machine-enforced comparison gate. The retained `0.01` result is `MECHANICS_PASS`: Hit@1 delta `+0.428571`, A/B deltas `+1/+1`, C/E/H deltas `+1/0/0`, forbidden@1 delta `-0.285714`, Search latency ratio `1.167183`, and GPT-call delta `0`. The repository now passes 95 tests.
