@@ -24,7 +24,7 @@ def temporal_bonus_from_environment() -> float:
 
 
 def structured_query_plan_from_environment() -> bool:
-    return os.getenv("MEMORY_STRUCTURED_QUERY_PLAN", "false").lower() == "true"
+    return os.getenv("MEMORY_STRUCTURED_QUERY_PLAN", "true").lower() == "true"
 
 
 def dense_rrf_weight_from_environment() -> float:

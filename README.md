@@ -37,7 +37,8 @@ The score-fusion formula follows the training-free lexical-dense method describe
 Set `MEMORY_STRUCTURED_QUERY_PLAN=true` to replace the flat list produced by the existing
 `gpt-4o-mini` query-planning call with a bounded plan that separates core/entity/temporal
 terms from low-weight expansion and evidence-need terms. This does not add a model call,
-change the Add/Search contract, or permit generated answers. The default remains `false`.
+change the Add/Search contract, or permit generated answers. The competition path defaults
+to `true`; set the flag to `false` for a direct flat-planner ablation.
 
 On a fixed 20-question LoCoMo development slice, using local Qwen3-4B only as a
 `gpt-4o-mini` planning/ranking proxy, P1 improved Hit@1 from 0.55 to 0.60 and MRR from
