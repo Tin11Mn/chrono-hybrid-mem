@@ -32,6 +32,19 @@ Search: Porter-BM25 + BGE-large dense scores -> candidate-set z-score fusion (al
 
 The score-fusion formula follows the training-free lexical-dense method described in [Training-Free Lexical–Dense Fusion for Conversational-Memory Retrieval](https://arxiv.org/html/2606.04194). The local reranker is a token-level late-interaction stage, not an answer generator. Model files, evaluation data, and credentials are excluded from Git.
 
+### P1 structured query plan (opt-in)
+
+Set `MEMORY_STRUCTURED_QUERY_PLAN=true` to replace the flat list produced by the existing
+`gpt-4o-mini` query-planning call with a bounded plan that separates core/entity/temporal
+terms from low-weight expansion and evidence-need terms. This does not add a model call,
+change the Add/Search contract, or permit generated answers. The default remains `false`.
+
+On a fixed 20-question LoCoMo development slice, using local Qwen3-4B only as a
+`gpt-4o-mini` planning/ranking proxy, P1 improved Hit@1 from 0.55 to 0.60 and MRR from
+0.5917 to 0.6125. Hit@10 stayed at 0.65, while exact evidence recall@10 decreased from
+0.4839 to 0.4194. These small-slice proxy measurements are ablation evidence, not an
+official leaderboard result; the feature therefore remains isolated behind the flag.
+
 ## Validated retrieval result
 
 The selected v0.3 configuration was evaluated on all 1,977 LoCoMo questions using strict exact annotated evidence-turn matching:
@@ -50,7 +63,8 @@ This is a retrieval-only external result, not an official leaderboard score. The
 ```bash
 docker build -t chrono-hybrid-mem:0.2.0 .
 docker run --rm -p 8000:8000 -v chrono-memory-data:/data \
-  -e MEMORY_REQUIRE_MODEL=true -e OPENAI_API_KEY=your_runtime_secret \
+  -e MEMORY_REQUIRE_MODEL=true -e MEMORY_STRUCTURED_QUERY_PLAN=true \
+  -e OPENAI_API_KEY=your_runtime_secret \
   chrono-hybrid-mem:0.2.0
 ```
 
