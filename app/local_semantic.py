@@ -11,6 +11,77 @@ from typing import Dict, List, Optional
 DEFAULT_LOCAL_MODEL = "BAAI/bge-small-en-v1.5"
 
 
+class LocalHTTPEmbeddingRetriever:
+    """Dense retrieval through a loopback OpenAI-compatible embedding endpoint."""
+
+    def __init__(
+        self,
+        base_url: str,
+        model_name: str = "local",
+        timeout_seconds: float = 300.0,
+        query_instruction: Optional[str] = None,
+    ) -> None:
+        try:
+            import numpy as np
+            from openai import OpenAI
+        except ImportError as error:
+            raise RuntimeError(
+                "Install requirements-local.txt to enable HTTP embedding retrieval"
+            ) from error
+        if not base_url.startswith(("http://127.0.0.1:", "http://localhost:")):
+            raise RuntimeError("Local embedding retrieval must use a loopback HTTP URL")
+        self.client = OpenAI(
+            api_key="local-only",
+            base_url=base_url.rstrip("/"),
+            timeout=timeout_seconds,
+        )
+        self.model_name = model_name
+        self.query_instruction = (query_instruction or "").strip()
+        self._np = np
+        self._embedding_cache = {}
+
+    def _embed(self, texts: List[str]) -> object:
+        missing = [text for text in texts if text not in self._embedding_cache]
+        if missing:
+            response = self.client.embeddings.create(
+                model=self.model_name, input=missing
+            )
+            ordered = sorted(response.data, key=lambda item: int(item.index))
+            if len(ordered) != len(missing):
+                raise RuntimeError("Local embedding endpoint returned the wrong count")
+            for text, item in zip(missing, ordered):
+                vector = self._np.asarray(item.embedding, dtype=self._np.float32)
+                norm = self._np.linalg.norm(vector)
+                self._embedding_cache[text] = vector / max(float(norm), 1e-12)
+        return self._np.stack([self._embedding_cache[text] for text in texts])
+
+    def score(
+        self, query: str, options: List[str], candidates: List[Dict[str, str]]
+    ) -> Dict[str, float]:
+        if not candidates:
+            return {}
+        option_text = " ".join(option for option in options if option.strip())
+        query_text = "{} {}".format(query, option_text).strip()
+        if self.query_instruction:
+            query_text = "Instruct: {}\nQuery:{}".format(
+                self.query_instruction, query_text
+            )
+        passages = [candidate["content"] for candidate in candidates]
+        query_vector = self._embed([query_text])[0]
+        passage_vectors = self._embed(passages)
+        similarities = passage_vectors @ query_vector
+        return {
+            candidate["id"]: float(similarities[index])
+            for index, candidate in enumerate(candidates)
+        }
+
+    def rank(
+        self, query: str, options: List[str], candidates: List[Dict[str, str]], limit: int
+    ) -> List[str]:
+        scores = self.score(query, options, candidates)
+        return sorted(scores, key=scores.get, reverse=True)[:limit]
+
+
 class LocalSemanticRetriever:
     """Ranks raw memory records with a locally hosted embedding model."""
 
@@ -89,7 +160,24 @@ class LocalSemanticRetriever:
 
 
 def local_semantic_retriever_from_environment() -> Optional[LocalSemanticRetriever]:
+    late_model = os.getenv("MEMORY_LOCAL_LATE_INTERACTION_MODEL", "").strip()
     model_name = os.getenv("MEMORY_LOCAL_EMBEDDING_MODEL", "").strip()
+    if late_model and model_name:
+        raise RuntimeError(
+            "Use either MEMORY_LOCAL_EMBEDDING_MODEL or "
+            "MEMORY_LOCAL_LATE_INTERACTION_MODEL, not both"
+        )
+    if late_model:
+        device = os.getenv("MEMORY_LOCAL_EMBEDDING_DEVICE") or None
+        batch_size = int(os.getenv("MEMORY_LOCAL_EMBEDDING_BATCH_SIZE", "32"))
+        if batch_size < 1:
+            raise RuntimeError("MEMORY_LOCAL_EMBEDDING_BATCH_SIZE must be positive")
+        return LocalLateInteractionReranker(
+            late_model,
+            device=device,
+            batch_size=batch_size,
+            cache_dir=os.getenv("MEMORY_LOCAL_MODEL_CACHE") or None,
+        )
     if not model_name:
         return None
     device = os.getenv("MEMORY_LOCAL_EMBEDDING_DEVICE") or None
@@ -139,10 +227,15 @@ class LocalLateInteractionReranker:
         return values / self._np.maximum(norms, 1e-12)
 
     def rank(
-        self, query: str, options: List[str], candidates: List[Dict[str, str]]
+        self,
+        query: str,
+        options: List[str],
+        candidates: List[Dict[str, str]],
+        limit: Optional[int] = None,
     ) -> List[str]:
         scores = self.score(query, options, candidates)
-        return sorted(scores, key=scores.get, reverse=True)
+        ranked = sorted(scores, key=scores.get, reverse=True)
+        return ranked if limit is None else ranked[:limit]
 
     def score(
         self, query: str, options: List[str], candidates: List[Dict[str, str]]

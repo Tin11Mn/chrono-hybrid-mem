@@ -7,13 +7,99 @@ from pathlib import Path
 from typing import Iterator, List, Optional
 
 from .model import MemoryModel
+from .local_instruction import mask_candidate_speakers
 from .schemas import AddRequest, MemoryResult
+
+
+def bind_first_person_to_speaker(content: str, speaker: str) -> str:
+    """Resolve unambiguous first-person forms in a latent retrieval key."""
+    if not speaker:
+        return content
+    replacements = [
+        (r"\bI'm\b", "{} is".format(speaker)),
+        (r"\bI've\b", "{} has".format(speaker)),
+        (r"\bI'll\b", "{} will".format(speaker)),
+        (r"\bI'd\b", "{} would".format(speaker)),
+        (r"\bmy\b", "{}'s".format(speaker)),
+        (r"\bmine\b", "{}'s".format(speaker)),
+        (r"\bme\b", speaker),
+        (r"\bI\b", speaker),
+    ]
+    result = content
+    for pattern, replacement in replacements:
+        result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+    return result
+
+
+def latent_message_text(content: str, speaker: str, event_ts: Optional[int]) -> str:
+    """Add source attribution to retrieval keys without changing returned content."""
+    parts = []
+    if speaker and not content.casefold().startswith((speaker + ":").casefold()):
+        parts.append("Speaker: {}".format(speaker))
+    if event_ts is not None:
+        timestamp = int(event_ts)
+        if timestamp >= 100_000_000_000:
+            timestamp //= 1000
+        if timestamp >= 86400:
+            try:
+                event_date = datetime.fromtimestamp(
+                    timestamp, tz=timezone.utc
+                ).strftime("%d %B %Y")
+            except (OSError, OverflowError, ValueError):
+                event_date = ""
+            if event_date:
+                parts.append("Event date: {}".format(event_date))
+    parts.append(content)
+    return "\n".join(parts)
+
+
+def candidate_ranking_text(
+    content: str,
+    speaker: str,
+    event_ts: Optional[int],
+    facts: Optional[List[str]] = None,
+    neighbor_context: Optional[List[str]] = None,
+) -> str:
+    """Expose provenance and extracted facts only to the evidence ranker."""
+    parts = ["Original memory:\n{}".format(content)]
+    metadata = []
+    if speaker:
+        metadata.append("Source speaker: {}".format(speaker))
+    if event_ts is not None:
+        timestamp = int(event_ts)
+        if timestamp >= 100_000_000_000:
+            timestamp //= 1000
+        if timestamp >= 86400:
+            try:
+                event_date = datetime.fromtimestamp(
+                    timestamp, tz=timezone.utc
+                ).strftime("%d %B %Y")
+            except (OSError, OverflowError, ValueError):
+                event_date = ""
+            if event_date:
+                metadata.append("Event date: {}".format(event_date))
+    if metadata:
+        parts.insert(0, "\n".join(metadata))
+    supported_facts = [item.strip() for item in (facts or []) if item.strip()]
+    if supported_facts:
+        parts.append(
+            "Extracted retrieval annotations:\n- {}".format(
+                "\n- ".join(supported_facts)
+            )
+        )
+    neighbors = [item.strip() for item in (neighbor_context or []) if item.strip()]
+    if neighbors:
+        parts.append("Adjacent source context:\n{}".format("\n".join(neighbors)))
+    return "\n".join(parts)
 
 
 class MemoryStore:
     RRF_CONSTANT = 60
+    MODEL_RERANK_LIMIT = 30
     CONTEXT_RRF_WEIGHT = 0.5
-    # Recall-only support must not displace core-intent evidence.
+    # Support terms widen recall but must not displace core-intent evidence.
+    # A public synthetic sweep retained 0.01; weights >=0.05 caused G/H regressions,
+    # while 0.02 could still flip a focused near-neighbor conflict case.
     STRUCTURED_SUPPORT_RRF_WEIGHT = 0.01
     # Kept for controlled ablations; full LoCoMo evaluation showed that
     # hard entity binding harms adversarial cross-speaker questions overall.
@@ -38,11 +124,21 @@ class MemoryStore:
                  dense_fusion_alpha: Optional[float] = None,
                  dense_context_weight: float = 0.0,
                  dense_time_weight: float = 0.0,
+                 dense_speaker_mask_max: bool = False,
+                 dense_speaker_conflict_margin: Optional[float] = None,
+                 dense_speaker_conflict_gate_only: bool = False,
+                 dense_sentence_weight: float = 0.0,
+                 dense_image_carry_weight: float = 0.0,
+                 dense_speaker_coref_weight: float = 0.0,
+                 dense_speaker_swap_max: bool = False,
                  local_reranker: object = None, rerank_top_n: int = 10,
+                 rerank_image_followups: int = 0,
                  session_fusion_weight: float = 0.0,
                  session_top_n: int = 0,
                  rerank_fusion_weight: Optional[float] = None,
+                 rerank_near_tie_epsilon: float = 0.0,
                  local_instruction_reranker: object = None,
+                 instruction_speaker_conflict_only: bool = False,
                  local_query_expander: object = None,
                  instruction_rerank_top_n: int = 10,
                  instruction_refine_top_n: int = 0,
@@ -55,12 +151,24 @@ class MemoryStore:
         self.dense_fusion_alpha = dense_fusion_alpha
         self.dense_context_weight = dense_context_weight
         self.dense_time_weight = dense_time_weight
+        self.dense_speaker_mask_max = dense_speaker_mask_max
+        self.dense_speaker_conflict_margin = dense_speaker_conflict_margin
+        self.dense_speaker_conflict_gate_only = dense_speaker_conflict_gate_only
+        self.dense_sentence_weight = dense_sentence_weight
+        self.dense_image_carry_weight = dense_image_carry_weight
+        self.dense_speaker_coref_weight = dense_speaker_coref_weight
+        self.dense_speaker_swap_max = dense_speaker_swap_max
+        self.speaker_conflict_trigger_count = 0
+        self.last_speaker_conflict = False
         self.local_reranker = local_reranker
         self.rerank_top_n = rerank_top_n
+        self.rerank_image_followups = rerank_image_followups
         self.session_fusion_weight = session_fusion_weight
         self.session_top_n = session_top_n
         self.rerank_fusion_weight = rerank_fusion_weight
+        self.rerank_near_tie_epsilon = rerank_near_tie_epsilon
         self.local_instruction_reranker = local_instruction_reranker
+        self.instruction_speaker_conflict_only = instruction_speaker_conflict_only
         self.local_query_expander = local_query_expander
         self.instruction_rerank_top_n = instruction_rerank_top_n
         self.instruction_refine_top_n = instruction_refine_top_n
@@ -165,6 +273,9 @@ class MemoryStore:
                 return
             inserted_messages = []
             for sequence, message in enumerate(request.messages):
+                indexed_content = latent_message_text(
+                    message.content, message.role, message.timestamp
+                )
                 cursor = connection.execute(
                     """INSERT INTO raw_messages(user_id, session_id, role, content, event_ts, sequence, created_at)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
@@ -174,15 +285,19 @@ class MemoryStore:
                 message_id = cursor.lastrowid
                 connection.execute(
                     "INSERT INTO messages_fts(message_id, user_id, content) VALUES (?, ?, ?)",
-                    (message_id, request.user_id, message.content),
+                    (message_id, request.user_id, indexed_content),
                 )
                 connection.execute(
                     "INSERT INTO messages_porter_fts(message_id, user_id, content) VALUES (?, ?, ?)",
-                    (message_id, request.user_id, message.content),
+                    (message_id, request.user_id, indexed_content),
                 )
-                inserted_messages.append((message_id, message.content))
+                inserted_messages.append((message_id, indexed_content))
                 if self.model:
-                    for fact in self.model.extract_facts(message.content):
+                    for fact in self.model.extract_facts(
+                        message.content,
+                        speaker=message.role,
+                        timestamp=message.timestamp,
+                    ):
                         try:
                             fact_cursor = connection.execute(
                                 """INSERT INTO facts(user_id, source_message_id, fact_text, created_at)
@@ -229,6 +344,7 @@ class MemoryStore:
 
     def search(self, *, user_id: str, query: str, options: Optional[List[str]] = None,
                top_k: int) -> List[MemoryResult]:
+        self.last_speaker_conflict = False
         expanded_queries = (
             self.local_query_expander.expand(query, options or [])
             if self.local_query_expander else []
@@ -423,6 +539,53 @@ class MemoryStore:
                            ORDER BY bm25(session_porter_fts)""",
                         (match_query, user_id),
                     ).fetchall()
+            ranking_metadata = {}
+            if self.model:
+                metadata_rows = connection.execute(
+                    """SELECT raw.id, raw.role, raw.event_ts, fact.fact_text
+                       FROM raw_messages AS raw
+                       LEFT JOIN facts AS fact ON fact.source_message_id = raw.id
+                       WHERE raw.user_id = ?
+                       ORDER BY raw.id, fact.id""",
+                    (user_id,),
+                ).fetchall()
+                for row in metadata_rows:
+                    item = ranking_metadata.setdefault(
+                        int(row["id"]),
+                        {
+                            "speaker": str(row["role"]),
+                            "event_ts": row["event_ts"],
+                            "facts": [],
+                        },
+                    )
+                    if row["fact_text"]:
+                        item["facts"].append(str(row["fact_text"]))
+                neighbor_rows = connection.execute(
+                    """SELECT id, session_id, content
+                       FROM raw_messages
+                       WHERE user_id = ?
+                       ORDER BY session_id, id""",
+                    (user_id,),
+                ).fetchall()
+                rows_by_session = {}
+                for row in neighbor_rows:
+                    rows_by_session.setdefault(str(row["session_id"]), []).append(row)
+                for session_rows in rows_by_session.values():
+                    for index, row in enumerate(session_rows):
+                        neighbors = []
+                        if index > 0:
+                            neighbors.append(
+                                "Previous memory: {}".format(
+                                    str(session_rows[index - 1]["content"])
+                                )
+                            )
+                        if index + 1 < len(session_rows):
+                            neighbors.append(
+                                "Next memory: {}".format(
+                                    str(session_rows[index + 1]["content"])
+                                )
+                            )
+                        ranking_metadata[int(row["id"])]["neighbors"] = neighbors
         dense_rows = []
         dense_scores = {}
         if self.semantic_retriever and semantic_source_rows:
@@ -434,6 +597,36 @@ class MemoryStore:
                 dense_scores = self.semantic_retriever.score(
                     query, options or [], semantic_candidates
                 )
+                if self.dense_speaker_swap_max:
+                    speakers = list(dict.fromkeys(
+                        str(row["role"]).strip()
+                        for row in semantic_source_rows
+                        if str(row["role"]).strip()
+                    ))
+                    mentioned = [
+                        speaker for speaker in speakers
+                        if re.search(
+                            r"(?<!\w){}(?!\w)".format(re.escape(speaker)),
+                            query,
+                            flags=re.IGNORECASE,
+                        )
+                    ]
+                    if len(speakers) == 2 and len(mentioned) == 1:
+                        source = mentioned[0]
+                        target = next(item for item in speakers if item != source)
+                        swapped_query = re.sub(
+                            r"(?<!\w){}(?!\w)".format(re.escape(source)),
+                            target,
+                            query,
+                            flags=re.IGNORECASE,
+                        )
+                        swapped_scores = self.semantic_retriever.score(
+                            swapped_query, options or [], semantic_candidates
+                        )
+                        dense_scores = {
+                            candidate_id: max(score, swapped_scores[candidate_id])
+                            for candidate_id, score in dense_scores.items()
+                        }
                 for expanded_query in expanded_queries:
                     expanded_scores = self.semantic_retriever.score(
                         expanded_query, [], semantic_candidates
@@ -442,6 +635,159 @@ class MemoryStore:
                         candidate_id: max(score, expanded_scores[candidate_id])
                         for candidate_id, score in dense_scores.items()
                     }
+                if self.dense_sentence_weight > 0:
+                    sentence_candidates = []
+                    for row in semantic_source_rows:
+                        candidate_id = "mem_{}".format(row["id"])
+                        content = str(row["content"])
+                        speaker = str(row["role"]).strip()
+                        body = content
+                        prefix = "{}: ".format(speaker)
+                        if speaker and content.casefold().startswith(prefix.casefold()):
+                            body = content[len(prefix):]
+                        sentences = [
+                            item.strip()
+                            for item in re.split(r"(?<=[.!?;])\s+|\n+", body)
+                            if item.strip()
+                        ] or [body]
+                        for index, sentence in enumerate(sentences):
+                            sentence_candidates.append({
+                                "id": "{}::sentence:{}".format(candidate_id, index),
+                                "content": (
+                                    "{}: {}".format(speaker, sentence)
+                                    if speaker else sentence
+                                ),
+                            })
+                    sentence_scores = self.semantic_retriever.score(
+                        query, options or [], sentence_candidates
+                    )
+                    max_sentence_scores = {
+                        candidate["id"]: float("-inf")
+                        for candidate in semantic_candidates
+                    }
+                    for sentence in sentence_candidates:
+                        candidate_id = sentence["id"].split("::sentence:", 1)[0]
+                        max_sentence_scores[candidate_id] = max(
+                            max_sentence_scores[candidate_id],
+                            sentence_scores[sentence["id"]],
+                        )
+                    weight = self.dense_sentence_weight
+                    dense_scores = {
+                        candidate_id: (
+                            (1.0 - weight) * score
+                            + weight * max_sentence_scores[candidate_id]
+                        )
+                        for candidate_id, score in dense_scores.items()
+                    }
+                if self.dense_image_carry_weight > 0:
+                    image_carry_candidates = []
+                    last_image_by_session = {}
+                    for row in semantic_source_rows:
+                        session_id = str(row["session_id"])
+                        content = str(row["content"])
+                        image_anchor = last_image_by_session.get(session_id)
+                        carried_content = (
+                            "Shared image context: {}\nFollowing message: {}".format(
+                                image_anchor, content
+                            )
+                            if image_anchor else content
+                        )
+                        image_carry_candidates.append({
+                            "id": "mem_{}".format(row["id"]),
+                            "content": carried_content,
+                        })
+                        if "Shared image:" in content:
+                            last_image_by_session[session_id] = content
+                        elif image_anchor:
+                            last_image_by_session[session_id] = None
+                    image_carry_scores = self.semantic_retriever.score(
+                        query, options or [], image_carry_candidates
+                    )
+                    weight = self.dense_image_carry_weight
+                    dense_scores = {
+                        candidate_id: (
+                            (1.0 - weight) * score
+                            + weight * image_carry_scores[candidate_id]
+                        )
+                        for candidate_id, score in dense_scores.items()
+                    }
+                if self.dense_speaker_coref_weight > 0:
+                    coref_candidates = [
+                        {
+                            "id": "mem_{}".format(row["id"]),
+                            "content": bind_first_person_to_speaker(
+                                str(row["content"]), str(row["role"]).strip()
+                            ),
+                        }
+                        for row in semantic_source_rows
+                    ]
+                    coref_scores = self.semantic_retriever.score(
+                        query, options or [], coref_candidates
+                    )
+                    weight = self.dense_speaker_coref_weight
+                    dense_scores = {
+                        candidate_id: (
+                            (1.0 - weight) * score
+                            + weight * coref_scores[candidate_id]
+                        )
+                        for candidate_id, score in dense_scores.items()
+                    }
+                if self.dense_speaker_mask_max:
+                    masked_query, masked_candidates = mask_candidate_speakers(
+                        query, semantic_candidates
+                    )
+                    masked_scores = self.semantic_retriever.score(
+                        masked_query, options or [], masked_candidates
+                    )
+                    dense_scores = {
+                        candidate_id: max(score, masked_scores[candidate_id])
+                        for candidate_id, score in dense_scores.items()
+                    }
+                if self.dense_speaker_conflict_margin is not None:
+                    query_speakers = []
+                    for row in semantic_source_rows:
+                        speaker = str(row["role"]).strip()
+                        already_seen = {
+                            item.casefold() for item in query_speakers
+                        }
+                        if (
+                            speaker
+                            and speaker.casefold() not in already_seen
+                            and re.search(
+                                r"(?<!\w){}(?!\w)".format(re.escape(speaker)),
+                                query,
+                                flags=re.IGNORECASE,
+                            )
+                        ):
+                            query_speakers.append(speaker)
+                    if len(query_speakers) == 1:
+                        target = query_speakers[0].casefold()
+                        masked_query, masked_candidates = mask_candidate_speakers(
+                            query, semantic_candidates
+                        )
+                        masked_scores = self.semantic_retriever.score(
+                            masked_query, options or [], masked_candidates
+                        )
+                        target_ids = [
+                            "mem_{}".format(row["id"])
+                            for row in semantic_source_rows
+                            if str(row["role"]).strip().casefold() == target
+                        ]
+                        other_ids = [
+                            "mem_{}".format(row["id"])
+                            for row in semantic_source_rows
+                            if str(row["role"]).strip().casefold() != target
+                        ]
+                        if target_ids and other_ids:
+                            best_target = max(masked_scores[item] for item in target_ids)
+                            best_other = max(masked_scores[item] for item in other_ids)
+                            if best_other >= (
+                                best_target + self.dense_speaker_conflict_margin
+                            ):
+                                self.speaker_conflict_trigger_count += 1
+                                self.last_speaker_conflict = True
+                                if not self.dense_speaker_conflict_gate_only:
+                                    dense_scores = dict(masked_scores)
                 if self.dense_context_weight > 0:
                     previous_by_session = {}
                     context_candidates = []
@@ -586,17 +932,64 @@ class MemoryStore:
                 ]
             if self.local_reranker:
                 rerank_count = min(self.rerank_top_n, len(fused))
+                rerank_content = {
+                    "mem_{}".format(row["id"]): str(row["content"])
+                    for row in semantic_source_rows
+                }
+                if self.rerank_image_followups > 0:
+                    rows_by_session = {}
+                    for row in semantic_source_rows:
+                        rows_by_session.setdefault(str(row["session_id"]), []).append(row)
+                    for session_rows in rows_by_session.values():
+                        for index, row in enumerate(session_rows):
+                            content = str(row["content"])
+                            if "Shared image:" not in content:
+                                continue
+                            following = session_rows[
+                                index + 1:index + 1 + self.rerank_image_followups
+                            ]
+                            if following:
+                                rerank_content["mem_{}".format(row["id"])] = (
+                                    content + "\nFollowing conversation:\n" + "\n".join(
+                                        str(item["content"]) for item in following
+                                    )
+                                )
                 rerank_candidates = [
                     {
                         "id": candidate["result"].id,
-                        "content": candidate["result"].content,
+                        "content": rerank_content[candidate["result"].id],
                     }
                     for candidate in fused[:rerank_count]
                 ]
                 if self.rerank_fusion_weight is None:
-                    ordered_ids = self.local_reranker.rank(
-                        query, options or [], rerank_candidates
-                    )
+                    if self.rerank_near_tie_epsilon > 0:
+                        rerank_scores = self.local_reranker.score(
+                            query, options or [], rerank_candidates
+                        )
+                        score_order = sorted(
+                            rerank_scores,
+                            key=rerank_scores.get,
+                            reverse=True,
+                        )
+                        top_score = rerank_scores[score_order[0]]
+                        near_tied = {
+                            candidate_id for candidate_id in score_order
+                            if rerank_scores[candidate_id] >= (
+                                top_score - self.rerank_near_tie_epsilon
+                            )
+                        }
+                        first_stage_choice = next(
+                            candidate["id"] for candidate in rerank_candidates
+                            if candidate["id"] in near_tied
+                        )
+                        ordered_ids = [first_stage_choice] + [
+                            candidate_id for candidate_id in score_order
+                            if candidate_id != first_stage_choice
+                        ]
+                    else:
+                        ordered_ids = self.local_reranker.rank(
+                            query, options or [], rerank_candidates
+                        )
                     positions = {
                         candidate_id: index for index, candidate_id in enumerate(ordered_ids)
                     }
@@ -629,7 +1022,10 @@ class MemoryStore:
                         key=lambda candidate: -combined_scores[candidate["result"].id],
                     )
                 fused = reranked + fused[rerank_count:]
-            if self.local_instruction_reranker:
+            if self.local_instruction_reranker and (
+                not self.instruction_speaker_conflict_only
+                or self.last_speaker_conflict
+            ):
                 instruction_count = min(self.instruction_rerank_top_n, len(fused))
                 instruction_candidates = [
                     {
@@ -696,6 +1092,7 @@ class MemoryStore:
                         created_at=row["created_at"],
                     ),
                     "event_ts": row["event_ts"],
+                    "message_id": int(row["id"]),
                 })
                 candidate["result"].score += channel_weight / (self.RRF_CONSTANT + rank + 1)
 
@@ -735,7 +1132,23 @@ class MemoryStore:
                 result.score = round(result.score, 6)
                 deduplicated.append(result)
         if self.model and deduplicated:
-            candidates = [{"id": result.id, "content": result.content} for result in deduplicated]
+            message_ids = {
+                candidate["result"].id: candidate["message_id"]
+                for candidate in ranked
+            }
+            candidates = []
+            for result in deduplicated[:self.MODEL_RERANK_LIMIT]:
+                metadata = ranking_metadata.get(message_ids[result.id], {})
+                candidates.append({
+                    "id": result.id,
+                    "content": candidate_ranking_text(
+                        result.content,
+                        str(metadata.get("speaker", "")),
+                        metadata.get("event_ts"),
+                        metadata.get("facts", []),
+                        metadata.get("neighbors", []),
+                    ),
+                })
             ordered_ids = self.model.rank_candidates(query, options or [], candidates)
             positions = {candidate_id: index for index, candidate_id in enumerate(ordered_ids)}
             deduplicated.sort(key=lambda result: positions.get(result.id, len(positions)))
