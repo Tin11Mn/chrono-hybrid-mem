@@ -48,8 +48,14 @@ The selected v0.3 configuration was evaluated on all 1,977 LoCoMo questions usin
 | Latest no-model lexical baseline | 0.3359 | 0.5169 | 0.6591 | 0.4328 |
 | v0.3 local hybrid | **0.4355** | **0.6186** | **0.7577** | **0.5183** |
 | v0.4 local Qwen + time key | **0.5225** | **0.6808** | **0.7653** | **0.5856** |
+| P1 local Qwen structured planner | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
 
 This is a retrieval-only external result, not an official leaderboard score. The cited paper reports session-level retrieval, whereas this repository uses the stricter exact evidence-turn criterion, so its numbers are not directly comparable. The project target remains Hit@1 ≥ 0.70.
+
+The P1 local-model full-set result and its fixed-200 gate are documented in
+[docs/P1_LOCAL_EVALUATION.md](docs/P1_LOCAL_EVALUATION.md). It uses Qwen3-4B
+as a local substitute for both Search planner and evidence ranker; no full-set
+local flat control was run, so the P1 number is not a full-set flat-to-P1 delta.
 
 ## Run the competition-compatible image
 
