@@ -8,6 +8,30 @@ from typing import Dict, List, Optional
 MODEL_NAME = "gpt-4o-mini"
 
 
+def parse_json_object(content: str) -> Optional[Dict[str, object]]:
+    """Parse JSON returned by strict APIs or tolerant local model servers."""
+    stripped = content.strip()
+    candidates = [stripped]
+    if stripped.startswith("```"):
+        first_newline = stripped.find("\n")
+        fenced = stripped[first_newline + 1:] if first_newline >= 0 else ""
+        if fenced.endswith("```"):
+            fenced = fenced[:-3]
+        candidates.append(fenced.strip())
+    start = stripped.find("{")
+    end = stripped.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(stripped[start:end + 1])
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
 class MemoryModel:
     """Uses the model only for facts and candidate ordering, never final answers."""
 
@@ -30,6 +54,7 @@ class MemoryModel:
             client_options["base_url"] = base_url.rstrip("/")
         self.client = OpenAI(**client_options)
         self.model_name = model_name
+        self.local_endpoint = bool(base_url)
         self.disable_thinking = disable_thinking
         self.call_count = 0
         self.prompt_tokens = 0
@@ -56,10 +81,15 @@ class MemoryModel:
         content = response.choices[0].message.content
         if not content:
             raise RuntimeError("gpt-4o-mini returned an empty response")
-        parsed = json.loads(content)
-        if not isinstance(parsed, dict):
-            raise RuntimeError("gpt-4o-mini returned a non-object JSON response")
-        return parsed
+        parsed = parse_json_object(content)
+        if parsed is not None:
+            return parsed
+        if self.local_endpoint:
+            # A local llama.cpp screen must not lose an entire chunk because a
+            # bounded generation ended mid-JSON. Callers retain safe first-stage
+            # behavior when the returned object is empty.
+            return {}
+        raise RuntimeError("gpt-4o-mini returned a non-object JSON response")
 
     def extract_facts(
         self, content: str, speaker: str = "", timestamp: Optional[int] = None
