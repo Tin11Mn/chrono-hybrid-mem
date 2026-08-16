@@ -89,7 +89,8 @@ LoCoMo adapter
 These local backends are useful for diagnosis, but they are disabled by
 default, use `requirements-local.txt`/`Dockerfile.local`, and are not evidence
 that the deployable competition path improved. The best full local result,
-Hit@1 `0.5225`, is therefore a research result rather than a leaderboard
+Hit@1 `0.5225` was the previous v0.4 result; the current P1 local proxy is
+Hit@1 `0.5761`. Both are research results rather than a leaderboard
 baseline or formal-model result.
 
 ## 3. Leaderboard score diagnosis

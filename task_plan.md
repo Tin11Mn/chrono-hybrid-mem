@@ -20,7 +20,7 @@
 - [ ] Run a formal `gpt-4o-mini` Smoke/Full evaluation and verify D/G/B/A plus overall score.
 - [ ] Verify strict Hit@1 >= 0.70 on all 1,977 local evidence questions.
 
-The strict full-set model-enhanced best remains 0.5225. The new no-model base is 0.3612/0.5468/0.6990/0.8968 at Hit@1/3/10/100. `OPENAI_API_KEY` is not configured in this environment, so the new fixed-model path has not yet produced a model-mode score and must not be reported as reaching 0.70.
+The previous strict full-set model-enhanced best was 0.5225. The current local Qwen3-4B P1 proxy is 0.5761/0.7157/0.7618/0.6479 at Hit@1/3/10/MRR. The new no-model base is 0.3612/0.5468/0.6990/0.8968 at Hit@1/3/10/100. `OPENAI_API_KEY` is not configured in this environment, so the P1 result is a local proxy and must not be reported as an official or 0.70 result.
 
 ## Goal
 
@@ -77,12 +77,12 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [ ] Calibrate first-stage/Qwen score fusion on the fixed-200 set; advance only a better weight to full validation.
 - [x] Calibrate first-stage/Qwen score fusion on the fixed-200 set; reject all tested weights (best 0.470 < 0.485 hard Qwen).
 - [x] Gate Qwen hard reranking with the previously recall-positive time-aware dense key (weight 0.5) on fixed 200 questions; Hit@1=0.505 > 0.485, advance to full.
-- [x] Run full Qwen + time-aware-key validation; Hit@1=0.5225 > 0.5195, retain as current local best.
+- [x] Run full Qwen + time-aware-key validation; Hit@1=0.5225 > 0.5195 (historical v0.4 local best).
 - [x] Gate Qwen hard reranking with the previously high-recall context-aware dense key (weight 0.5) on fixed 200 questions; tie Hit@1=0.505, reject alone.
 - [x] Gate the combined time-aware + context-aware dense keys with hard Qwen on fixed 200 questions; reject Hit@1=0.500.
-- [ ] Select a new non-overlapping retrieval mechanism and gate it against the current full-set best Hit@1=0.5225.
+- [ ] Select a new non-overlapping retrieval mechanism and gate it against the current P1 local proxy best Hit@1=0.5761.
 - [x] Publish the verified v0.4 local research milestone to an isolated GitHub branch and draft PR.
-- [ ] Diagnose the remaining exact-turn errors from the 0.5225 full-set run and identify a leakage-free mechanism with enough oracle headroom (in progress).
+- [ ] Diagnose the remaining exact-turn errors from the current P1 local proxy full-set run (Hit@1=0.5761) and identify a leakage-free mechanism with enough oracle headroom (in progress).
 - [ ] Gate a conflict-routed cascade: retain the dedicated 4B pairwise first choice by default and invoke comparative top-1 verification only on likely wrong-person premises.
 - [x] Gate and reject conflict-routed and conservative-verifier cascades; neither preserves normal-query Hit@1 while improving false-premise selection.
 - [ ] Add sentence-level latent retrieval keys that aggregate back to the original evidence turn, and gate candidate recall before reranking.
