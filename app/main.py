@@ -58,10 +58,70 @@ def dense_time_weight_from_environment() -> float:
     return value
 
 
+def structured_query_plan_from_environment() -> bool:
+    return os.getenv("MEMORY_STRUCTURED_QUERY_PLAN", "false").lower() == "true"
+
+
+def dense_speaker_mask_max_from_environment() -> bool:
+    return os.getenv("MEMORY_DENSE_SPEAKER_MASK_MAX", "false").lower() == "true"
+
+
+def dense_speaker_conflict_margin_from_environment():
+    raw_value = os.getenv("MEMORY_DENSE_SPEAKER_CONFLICT_MARGIN", "").strip()
+    if not raw_value:
+        return None
+    value = float(raw_value)
+    if value < 0:
+        raise RuntimeError("MEMORY_DENSE_SPEAKER_CONFLICT_MARGIN must be non-negative")
+    return value
+
+
+def dense_speaker_conflict_gate_only_from_environment() -> bool:
+    return (
+        os.getenv("MEMORY_DENSE_SPEAKER_CONFLICT_GATE_ONLY", "false").lower()
+        == "true"
+    )
+
+
+def dense_sentence_weight_from_environment() -> float:
+    value = float(os.getenv("MEMORY_DENSE_SENTENCE_WEIGHT", "0"))
+    if value < 0 or value > 1:
+        raise RuntimeError("MEMORY_DENSE_SENTENCE_WEIGHT must be between 0 and 1")
+    return value
+
+
+def dense_image_carry_weight_from_environment() -> float:
+    value = float(os.getenv("MEMORY_DENSE_IMAGE_CARRY_WEIGHT", "0"))
+    if value < 0 or value > 1:
+        raise RuntimeError("MEMORY_DENSE_IMAGE_CARRY_WEIGHT must be between 0 and 1")
+    return value
+
+
+def dense_speaker_coref_weight_from_environment() -> float:
+    value = float(os.getenv("MEMORY_DENSE_SPEAKER_COREF_WEIGHT", "0"))
+    if value < 0 or value > 1:
+        raise RuntimeError("MEMORY_DENSE_SPEAKER_COREF_WEIGHT must be between 0 and 1")
+    return value
+
+
+def instruction_speaker_conflict_only_from_environment() -> bool:
+    return (
+        os.getenv("MEMORY_LOCAL_INSTRUCTION_SPEAKER_CONFLICT_ONLY", "false").lower()
+        == "true"
+    )
+
+
 def rerank_top_n_from_environment() -> int:
     value = int(os.getenv("MEMORY_LOCAL_RERANK_TOP_N", "5"))
     if value < 1 or value > 100:
         raise RuntimeError("MEMORY_LOCAL_RERANK_TOP_N must be between 1 and 100")
+    return value
+
+
+def rerank_image_followups_from_environment() -> int:
+    value = int(os.getenv("MEMORY_LOCAL_RERANK_IMAGE_FOLLOWUPS", "0"))
+    if value < 0 or value > 4:
+        raise RuntimeError("MEMORY_LOCAL_RERANK_IMAGE_FOLLOWUPS must be between 0 and 4")
     return value
 
 
@@ -86,6 +146,15 @@ def rerank_fusion_weight_from_environment():
     value = float(raw_value)
     if value < 0 or value > 1:
         raise RuntimeError("MEMORY_LOCAL_RERANK_FUSION_WEIGHT must be between 0 and 1")
+    return value
+
+
+def rerank_near_tie_epsilon_from_environment() -> float:
+    value = float(os.getenv("MEMORY_LOCAL_RERANK_NEAR_TIE_EPSILON", "0"))
+    if value < 0 or value > 1:
+        raise RuntimeError(
+            "MEMORY_LOCAL_RERANK_NEAR_TIE_EPSILON must be between 0 and 1"
+        )
     return value
 
 
@@ -133,12 +202,25 @@ def create_app(database_path: str = None) -> FastAPI:
         dense_fusion_alpha=dense_fusion_alpha_from_environment(),
         dense_context_weight=dense_context_weight_from_environment(),
         dense_time_weight=dense_time_weight_from_environment(),
+        dense_speaker_mask_max=dense_speaker_mask_max_from_environment(),
+        dense_speaker_conflict_margin=dense_speaker_conflict_margin_from_environment(),
+        dense_speaker_conflict_gate_only=(
+            dense_speaker_conflict_gate_only_from_environment()
+        ),
+        dense_sentence_weight=dense_sentence_weight_from_environment(),
+        dense_image_carry_weight=dense_image_carry_weight_from_environment(),
+        dense_speaker_coref_weight=dense_speaker_coref_weight_from_environment(),
         local_reranker=yes_no_reranker or local_reranker,
         rerank_top_n=rerank_top_n_from_environment(),
+        rerank_image_followups=rerank_image_followups_from_environment(),
         session_fusion_weight=session_fusion_weight_from_environment(),
         session_top_n=session_top_n_from_environment(),
         rerank_fusion_weight=rerank_fusion_weight_from_environment(),
+        rerank_near_tie_epsilon=rerank_near_tie_epsilon_from_environment(),
         local_instruction_reranker=local_instruction_reranker_from_environment(),
+        instruction_speaker_conflict_only=(
+            instruction_speaker_conflict_only_from_environment()
+        ),
         local_query_expander=local_query_expander_from_environment(),
         instruction_rerank_top_n=instruction_rerank_top_n_from_environment(),
         instruction_refine_top_n=instruction_refine_top_n_from_environment(),

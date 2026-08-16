@@ -76,6 +76,7 @@ exact evidence recall@10 从 0.4839 降至 0.4194。该结果仅用于方法筛�
 | v0.3 本地混合检索 | 0.4355 | 0.6186 | 0.7577 | 0.5183 |
 | Qwen3-Reranker | 0.5195 | 0.6763 | 0.7577 | 0.5812 |
 | Qwen + 时间感知 dense key | **0.5225** | **0.6808** | **0.7653** | **0.5856** |
+| P1 本地 Qwen 结构化规划 | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
 
 以上是公开 LoCoMo 数据上的离线检索结果，不是官方平台成绩。评测使用严格的 exact evidence-turn matching。
 
@@ -272,6 +273,7 @@ The best recorded local proxy result is:
 | v0.3 local hybrid | 0.4355 | 0.6186 | 0.7577 | 0.5183 |
 | Qwen3-Reranker | 0.5195 | 0.6763 | 0.7577 | 0.5812 |
 | Qwen + timestamp-aware dense key | **0.5225** | **0.6808** | **0.7653** | **0.5856** |
+| P1 local Qwen structured planner | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
 
 These are offline LoCoMo retrieval-only results using strict exact evidence-turn matching, not official platform scores.
 

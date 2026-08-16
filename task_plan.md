@@ -1,5 +1,27 @@
 # ChronoHybridMem implementation plan
 
+## 2026-08-15 leaderboard V2 audit and controlled ablation
+
+- [x] Reconstruct the likely 44.33 leaderboard baseline and label the exact deployment SHA `UNVERIFIED`.
+- [x] Separate the v0.2.0 competition path, current public main, current worktree, and local research path.
+- [x] Audit A/B/C/D/E/G/H mechanisms and publish `docs/LEADERBOARD_V2_AUDIT.md`.
+- [x] Build the non-hidden AML-like seven-category synthetic regression harness.
+- [x] Implement only P1 structured query planning behind `MEMORY_STRUCTURED_QUERY_PLAN`.
+- [ ] Run flag-off baseline, flag-on ablation, preservation, latency, and call-count checks (fixture mechanics gate passes; formal model arms require `OPENAI_API_KEY`).
+- [ ] Decide `KEEP` or `REJECT` before implementing P2.
+
+## 2026-08-15 leaderboard-targeted iteration
+
+- [x] Read the live Academic / Textual leaderboard and compare ChronoHybridMem with ranks 1-4.
+- [x] Stop answer-model scaling; the formal path is fixed to `gpt-4o-mini`.
+- [x] Supply speaker, event date, extracted annotations, and adjacent context to evidence ranking.
+- [x] Strengthen update/retraction, rule/process, multi-hop, and evidence/privacy ranking rules.
+- [x] Run unit, compile, and diff validation (89 passed).
+- [ ] Run a formal `gpt-4o-mini` Smoke/Full evaluation and verify D/G/B/A plus overall score.
+- [ ] Verify strict Hit@1 >= 0.70 on all 1,977 local evidence questions.
+
+The previous strict full-set model-enhanced best was 0.5225. The current local Qwen3-4B P1 proxy is 0.5761/0.7157/0.7618/0.6479 at Hit@1/3/10/MRR. The new no-model base is 0.3612/0.5468/0.6990/0.8968 at Hit@1/3/10/100. `OPENAI_API_KEY` is not configured in this environment, so the P1 result is a local proxy and must not be reported as an official or 0.70 result.
+
 ## Goal
 
 Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/SPEC.md`.
@@ -55,11 +77,32 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [ ] Calibrate first-stage/Qwen score fusion on the fixed-200 set; advance only a better weight to full validation.
 - [x] Calibrate first-stage/Qwen score fusion on the fixed-200 set; reject all tested weights (best 0.470 < 0.485 hard Qwen).
 - [x] Gate Qwen hard reranking with the previously recall-positive time-aware dense key (weight 0.5) on fixed 200 questions; Hit@1=0.505 > 0.485, advance to full.
-- [x] Run full Qwen + time-aware-key validation; Hit@1=0.5225 > 0.5195, retain as current local best.
+- [x] Run full Qwen + time-aware-key validation; Hit@1=0.5225 > 0.5195 (historical v0.4 local best).
 - [x] Gate Qwen hard reranking with the previously high-recall context-aware dense key (weight 0.5) on fixed 200 questions; tie Hit@1=0.505, reject alone.
 - [x] Gate the combined time-aware + context-aware dense keys with hard Qwen on fixed 200 questions; reject Hit@1=0.500.
-- [ ] Select a new non-overlapping retrieval mechanism and gate it against the current full-set best Hit@1=0.5225.
+- [ ] Select a new non-overlapping retrieval mechanism and gate it against the current P1 local proxy best Hit@1=0.5761.
 - [x] Publish the verified v0.4 local research milestone to an isolated GitHub branch and draft PR.
+- [ ] Diagnose the remaining exact-turn errors from the current P1 local proxy full-set run (Hit@1=0.5761) and identify a leakage-free mechanism with enough oracle headroom (in progress).
+- [ ] Gate a conflict-routed cascade: retain the dedicated 4B pairwise first choice by default and invoke comparative top-1 verification only on likely wrong-person premises.
+- [x] Gate and reject conflict-routed and conservative-verifier cascades; neither preserves normal-query Hit@1 while improving false-premise selection.
+- [ ] Add sentence-level latent retrieval keys that aggregate back to the original evidence turn, and gate candidate recall before reranking.
+- [x] Gate and reject sentence-level latent dense keys; candidate coverage improved by at most one fixed-200 question.
+- [ ] Measure dedicated-reranker score saturation, ties, and evidence score rank; test a principled tie-breaking or score-calibration change if diagnosed.
+- [x] Diagnose and gate near-tie calibration; reject it after fixed-200 Hit@1 0.500 failed the 0.505 advancement threshold.
+- [ ] Gate generic Qwen3-8B comparative-top1 on adversarial and open-domain slices; advance only if it materially exceeds generic 4B listwise selection.
+- [x] Gate and reject unconditional generic 8B comparative-top1; gains were only +1/20 per hard slice at prohibitive latency.
+- [ ] Measure a speaker-mismatch router against fixed-200 categories, then invoke comparative selection only if the router isolates hard wrong-person premises with useful precision.
+- [x] Gate and reject Jina turbo cross-encoding after fixed-200 Hit@1 0.370 failed to generalize.
+- [ ] Quantify Qwen/Jina/first-stage expert complementarity and the observable routing ceiling before implementing another cascade.
+- [ ] Generate a shared fixed-50 Qwen bitmap and stop the expert-routing path unless first-stage∨Qwen oracle reaches at least 0.70.
+- [x] Reject expert routing after first-stage∨Qwen fixed-50 oracle reached only 0.560.
+- [ ] Add speaker-bound first-person coreference latent keys and gate fixed-200 candidate recall before reranking.
+- [x] Gate official asymmetric Qwen3 embeddings at 0.6B and 4B; reject both after fixed-20 candidate recall regressed.
+- [ ] Audit fixed-200 candidate/evidence error structure and gate a stronger joint candidate reader that can reason over speaker identity and temporal relations.
+- [x] Gate structured 8B joint reading and speaker-swapped latent queries; reject unconditional expansion after fixed-50 Hit@1 reached only 0.52.
+- [ ] Measure constraint/comparative strategy complementarity and implement an observable arbiter only if the oracle ceiling exceeds 0.70.
+- [ ] Gate each new mechanism on the fixed 200-question subset, then run full 1,977-question validation only for a material gain.
+- [ ] Continue bounded iterations until strict full-set Hit@1 >= 0.70, or document a genuine external blocker after exhausting safe local paths.
 
 ## Errors encountered
 
@@ -110,3 +153,8 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 | Qwen reranker first evaluation failed because the installed OpenAI SDK rejects `top_logprobs` on `/v1/completions` | 1 | Use the text-completions API form `logprobs=20`; retain the response parser for llama.cpp's content-shaped logprobs. |
 | First Qwen reranker adapter treated llama.cpp's `logprobs.content` entries only as objects, but this SDK returned dictionaries | 1 | Support both shapes and cover the dictionary form with a unit test before rerunning the exact same gate. |
 | Full Qwen reranker evaluation lost the local server connection | 1 | The launcher tool's 30-minute timeout terminated its child server before full evaluation could finish. Launch the verified loopback server as a detached hidden process, health-check it, then restart the unchanged full gate. |
+| Caption-aware fixed-200 Qwen gate exceeded the 20-minute command limit without producing metrics | 1 | Treat it as a runtime failure, not a quality result. Switch to a fixed-20 gate and add resumable per-question diagnostics before any larger retry. Do not stop unrelated GPU processes. |
+| Initial image-followup multi-file patch expected identical evaluator argument blocks | 1 | No partial changes were applied. Split storage/tests from CLI wiring and patch the evaluator's distinct branches at exact anchors. |
+| Resume-offset test expected a hit for the query `Second?`, which had no matching content term | 1 | Keep the production offset logic unchanged and use `What does Milo prefer, coffee?` in the retrieval fixture. |
+| Manual batched-completion probe used single-quoted PowerShell strings, leaving literal backtick-newline text in the prompt | 1 | Use the probe only to confirm indexed batch response support. Implement batching through the existing Python `prompt()` method and require exact fixed-20 metric parity before accepting it. |
+| Comparative-audit patch placed an evaluator constructor anchor under the model-file patch section | 1 | No partial changes were applied. Patch the model/test and evaluator CLI as separate exact file edits. |
