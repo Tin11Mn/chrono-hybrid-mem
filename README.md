@@ -50,6 +50,8 @@ The selected v0.3 configuration was evaluated on all 1,977 LoCoMo questions usin
 | v0.4 local Qwen + time key | **0.5225** | **0.6808** | **0.7653** | **0.5856** |
 | P1 local Qwen structured planner | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
 
+The current best local proxy is the P1 structured-planner run (Hit@1 **0.5761** across all 1,977 questions). The v0.4 score above is historical; neither is an official leaderboard score.
+
 This is a retrieval-only external result, not an official leaderboard score. The cited paper reports session-level retrieval, whereas this repository uses the stricter exact evidence-turn criterion, so its numbers are not directly comparable. The project target remains Hit@1 ≥ 0.70.
 
 The P1 local-model full-set result and its fixed-200 gate are documented in
