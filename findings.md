@@ -142,6 +142,16 @@
 - Structured 8B joint reading is slice-dependent: `constraint_first_top1` reaches 0.70 on the normal prefix but only 0.50 on the adversarial slice. A two-speaker name-swapped latent query raises 8B `comparative_top1` from 0.60 to 0.65 on the adversarial slice and from 0.45 to 0.50 on the normal prefix, but the first fixed-50 chunk is only 0.52. Do not expand this unconditional configuration; measure strategy complementarity before routing or scaling.
 # 2026-08-15 Leaderboard V2 audit
 
+## 2026-08-18 P3 evidence-graph design decision
+
+- Use SQLite tables rather than Neo4j: the experiment needs provenance-aware bounded traversal, not a separate graph service.
+- Do not use a GNN: no leakage-safe supervised graph-ranking dataset exists, and learned node scores do not naturally preserve exact source-turn evidence.
+- Do not use full GraphRAG: community summaries and answer generation are misaligned with exact evidence Hit@1 and add model calls/noise.
+- The graph unit is an explicit evidence edge `(subject, relation, object)` linked to `user_id`, `source_message_id`, and optional event/validity metadata.
+- P3-A recalls direct one-hop evidence; P3-B adds bounded two-hop paths for relational questions; P3-C adds temporal/supersession constraints only for temporal queries.
+- Graph candidates must re-enter the existing evidence-ID ranking path. The graph never answers the query and never returns synthetic text.
+- Primary design target: improve multi-hop/temporal top-1 while recovering P1's evidence-coverage loss. Stop if graph expansion adds topic noise without raising the fixed-200 Hit@1 threshold.
+
 - The 44.33 submission names `v0.2.0`, resolving to `7cf45c76ea7998554a13386b924627b83aeb3134`; the platform does not expose a deployed SHA, so this is `UNVERIFIED` rather than exact.
 - Public `main` is `c7df0cb3f436953e450f966fbc60c22727ce806a` and includes post-submission PR #3's stronger `gpt-4o-mini` rubric. Its model workflow failed for missing `OPENAI_API_KEY`, so no formal score validates the change.
 - The deployable path uses `gpt-4o-mini`; optional BGE/ColBERT/Qwen paths are local research and must not drive the next iteration.
