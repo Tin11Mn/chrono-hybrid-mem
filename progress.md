@@ -162,6 +162,13 @@
 - Added `constraint_first_top1` and `answer_first_top1` joint-reading protocols plus an optional two-speaker swapped-query dense channel; 85 tests pass. The 8B constraint protocol scores 0.70 on normal fixed-20 but 0.50 adversarial; answer-first is also 0.50 adversarial. Swapped-query + comparative-top1 improves adversarial Hit@1 to 0.65 and normal to 0.50, but its first fixed-50 chunk is only 0.52, so stop the unconditional 200-question run and measure cross-strategy oracle headroom.
 # 2026-08-15 Leaderboard V2 audit
 
+## 2026-08-18 P3 planning
+
+- Selected a lightweight, provenance-preserving SQLite evidence graph as the next candidate mechanism.
+- Split validation into P3-A one-hop, P3-B bounded two-hop, and P3-C intent-routed temporal versioning so gains and regressions remain attributable.
+- Kept the formal constraints: no extra model call, no answer generation, exact `user_id` isolation, original evidence output, and default-off experimental flags until each gate passes.
+- No P3 production code has been implemented yet; this entry records the predeclared design and advancement gates.
+
 - Completed the required no-code-first audit and created `docs/LEADERBOARD_V2_AUDIT.md`.
 - Established three distinct comparison states: likely leaderboard `v0.2.0`/`7cf45c76…` (`UNVERIFIED`), current public main `c7df0cb…`, and local `11a3b00…` plus uncommitted experiments.
 - Selected P1 structured query planning as the only next method change. The planned flag-off/flag-on ablation will not add an LLM call or alter the formal dependency footprint.

@@ -1,5 +1,19 @@
 # ChronoHybridMem implementation plan
 
+## 2026-08-18 P3 lightweight evidence graph plan
+
+- [ ] Freeze the P1 platform result and a reproducible local P1 baseline before graph changes.
+- [ ] Define an explicit-only, user-isolated evidence-graph schema in SQLite; every node/edge must retain `source_message_id` provenance.
+- [ ] Extend the existing Add extraction call to return facts plus bounded entities/relations/time metadata without adding an LLM call.
+- [ ] Implement deterministic entity canonicalization and append-only temporal versioning; never collapse conflicting evidence destructively.
+- [ ] Implement P3-A one-hop graph candidate recall behind a default-off flag and measure candidate coverage before reranking.
+- [ ] Advance to P3-B two-hop traversal only if P3-A passes; cap hops, degree, paths, and returned source IDs.
+- [ ] Advance to P3-C temporal/supersession routing only if P3-B passes; activate it only for temporal intent/cues.
+- [ ] Gate P1 vs P3-A/B/C on targeted synthetic cases, fixed-20, fixed-200, then full 1,977 only after a material Hit@1 gain.
+- [ ] Accept the final intent-routed graph only if Hit@1 improves, Hit@10/evidence recall are preserved within the declared tolerance, user leakage stays zero, and planner/ranker call count does not increase.
+
+P3 is one shared evidence-graph implementation with independently switchable one-hop, two-hop, and temporal behavior. The components are not enabled together until their individual contribution is measured.
+
 ## 2026-08-15 leaderboard V2 audit and controlled ablation
 
 - [x] Reconstruct the likely 44.33 leaderboard baseline and label the exact deployment SHA `UNVERIFIED`.
