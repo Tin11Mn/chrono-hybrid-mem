@@ -58,10 +58,6 @@ def dense_time_weight_from_environment() -> float:
     return value
 
 
-def structured_query_plan_from_environment() -> bool:
-    return os.getenv("MEMORY_STRUCTURED_QUERY_PLAN", "false").lower() == "true"
-
-
 def dense_speaker_mask_max_from_environment() -> bool:
     return os.getenv("MEMORY_DENSE_SPEAKER_MASK_MAX", "false").lower() == "true"
 
