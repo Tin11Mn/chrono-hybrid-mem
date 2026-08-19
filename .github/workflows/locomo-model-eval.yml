@@ -1,11 +1,7 @@
 name: LoCoMo gpt-4o-mini Search Evaluation
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/locomo-model-eval.yml"
-      - "app/model.py"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,4 +24,9 @@ jobs:
       - name: Evaluate 100 questions with gpt-4o-mini Search
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-        run: python scripts/evaluate_locomo_retrieval.py --dataset "$RUNNER_TEMP/locomo10.json" --max-questions 100 --search-model
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "OPENAI_API_KEY is required for this manually triggered evaluation."
+            exit 1
+          fi
+          python scripts/evaluate_locomo_retrieval.py --dataset "$RUNNER_TEMP/locomo10.json" --max-questions 100 --search-model
