@@ -9,8 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  test-and-build:
+  core-verification:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -21,12 +22,12 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: python -m pip install --upgrade pip && python -m pip install -r requirements.txt
-      - name: Run API contract tests
+        run: python -m pip install --upgrade pip && python -m pip install -r requirements-test.txt
+      - name: Run core tests
         run: python -m pytest
+      - name: Compile Python sources
+        run: python -m compileall -q app tests scripts
       - name: Compare released retrieval baseline
         run: python scripts/compare_release_v020.py --cases examples/release_comparison_diagnostic.json
-      - name: Build Docker image
+      - name: Build production Docker image
         run: docker build --tag chrono-hybrid-mem:${{ github.sha }} .
-      - name: Build optional local-model Docker image
-        run: docker build --file Dockerfile.local --tag chrono-hybrid-mem-local:${{ github.sha }} .

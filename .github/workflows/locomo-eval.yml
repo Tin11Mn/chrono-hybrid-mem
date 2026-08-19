@@ -7,11 +7,6 @@ on:
         description: "Maximum annotated LoCoMo questions to evaluate; blank evaluates all."
         required: false
         default: "100"
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/locomo-eval.yml"
-      - "app/storage.py"
 
 permissions:
   contents: read

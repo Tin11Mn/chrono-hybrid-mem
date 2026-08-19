@@ -80,11 +80,11 @@ def test_custom_memory_model_endpoint_must_be_loopback():
         MemoryModel("test", base_url="https://example.com/v1")
 
 
-def test_structured_query_plan_flag_defaults_off_and_reads_true(monkeypatch):
+def test_structured_query_plan_defaults_on_and_reads_false(monkeypatch):
     monkeypatch.delenv("MEMORY_STRUCTURED_QUERY_PLAN", raising=False)
-    assert structured_query_plan_from_environment() is False
-    monkeypatch.setenv("MEMORY_STRUCTURED_QUERY_PLAN", "true")
     assert structured_query_plan_from_environment() is True
+    monkeypatch.setenv("MEMORY_STRUCTURED_QUERY_PLAN", "FaLsE")
+    assert structured_query_plan_from_environment() is False
 
 
 def test_structured_query_plan_contract_is_bounded_and_sanitized():
