@@ -14,7 +14,7 @@
   <a href="README.ko.md">한국어</a>
 </p>
 
-<!-- README_FACTS: main=stable-post-submission-research; p3=experimental; official-v020-mapping=UNVERIFIED -->
+<!-- README_FACTS: main=stable-post-submission-research; p3=experimental; official-v020-mapping=CONFIRMED -->
 
 <p align="center">
   Agent Memory Challenge · Academic Textual Memory · <strong>Rank 5</strong> · <strong>Overall 44.33</strong>
@@ -94,11 +94,11 @@ P1 は既存のクエリ計画呼び出しを再利用します。モデル呼�
 
 ### A. 公式コンペティション結果
 
-| トラック | 順位 | 総合 | 最も可能性の高い過去バージョン |
+| トラック | 順位 | 総合 | 確認済みの過去バージョン |
 |---|---:|---:|---|
-| Agent Memory Challenge — Academic Textual Memory | **5** | **44.33** | `v0.2.0`（**UNVERIFIED mapping**） |
+| Agent Memory Challenge — Academic Textual Memory | **5** | **44.33** | `v0.2.0`（**主催者確認済み**） |
 
-Git 履歴から最も強く示唆されるのは、公式の 44.33 という結果が [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) に対応するということです。しかし、コンペティションプラットフォームはデプロイ済みチェックアウトの SHA やイメージダイジェストを公開していませんでした。そのため、この対応関係は未検証のままです。P1 と P3 は提出後の研究であり、新たな公式リーダーボードへの提出結果として解釈してはなりません。
+主催者は、公式結果が [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0)、コミット `7cf45c76ea7998554a13386b924627b83aeb3134` に対応することを正式に確認しました。[公式評価確認記録](docs/OFFICIAL_EVALUATION_CONFIRMATION.md)を参照してください。P1 と P3 は提出後の研究であり、新たな公式リーダーボードへの提出結果として解釈してはなりません。
 
 ### B. 安定した提出後のローカル研究
 
@@ -121,7 +121,7 @@ Hit@K は、最初の K 件の結果に、アノテーションされた出典�
 | Ref | 目的 | 状態 |
 |---|---|---|
 | [`v0.1.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.1.0) | 信頼性の高い最小構成の SQLite/FTS ベースライン | アーカイブ済みリリース |
-| [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) | 公式コンペティション版である可能性が最も高いバージョン | 固定済みリリース。対応関係は未検証 |
+| [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) | 公式コンペティション版 | 固定済みリリース。主催者確認済み |
 | [`research-v0.3.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.3.0) | BGE + ColBERT ローカルハイブリッドのマイルストーン | 固定済み研究タグ |
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen リランカー + time-aware-key のマイルストーン | 固定済み研究タグ |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | 構造化クエリ計画のマイルストーン | 安定版研究タグ |

@@ -142,7 +142,7 @@
 - Structured 8B joint reading is slice-dependent: `constraint_first_top1` reaches 0.70 on the normal prefix but only 0.50 on the adversarial slice. A two-speaker name-swapped latent query raises 8B `comparative_top1` from 0.60 to 0.65 on the adversarial slice and from 0.45 to 0.50 on the normal prefix, but the first fixed-50 chunk is only 0.52. Do not expand this unconditional configuration; measure strategy complementarity before routing or scaling.
 # 2026-08-15 Leaderboard V2 audit
 
-- The 44.33 submission names `v0.2.0`, resolving to `7cf45c76ea7998554a13386b924627b83aeb3134`; the platform does not expose a deployed SHA, so this is `UNVERIFIED` rather than exact.
+- The 44.33 submission names `v0.2.0`, resolving to `7cf45c76ea7998554a13386b924627b83aeb3134`; the platform did not expose a deployed SHA during this audit. The organizer subsequently confirmed this exact mapping on 2026-08-20.
 - Public `main` is `c7df0cb3f436953e450f966fbc60c22727ce806a` and includes post-submission PR #3's stronger `gpt-4o-mini` rubric. Its model workflow failed for missing `OPENAI_API_KEY`, so no formal score validates the change.
 - The deployable path uses `gpt-4o-mini`; optional BGE/ColBERT/Qwen paths are local research and must not drive the next iteration.
 - Current formal query planning returns a flat term list that is merged into one equally weighted OR query. It cannot preserve intent, evidence hops, entity roles, state, or rule structure.

@@ -14,7 +14,7 @@
   <a href="README.ko.md">한국어</a>
 </p>
 
-<!-- README_FACTS: main=stable-post-submission-research; p3=experimental; official-v020-mapping=UNVERIFIED -->
+<!-- README_FACTS: main=stable-post-submission-research; p3=experimental; official-v020-mapping=CONFIRMED -->
 
 <p align="center">
   Agent Memory Challenge · Academic Textual Memory · <strong>Rank 5</strong> · <strong>Overall 44.33</strong>
@@ -94,11 +94,11 @@ Optional BGE, ColBERT, cross-encoder, Qwen, and other local-model components rem
 
 ### A. Official competition result
 
-| Track | Rank | Overall | Most likely historical version |
+| Track | Rank | Overall | Confirmed historical version |
 |---|---:|---:|---|
-| Agent Memory Challenge — Academic Textual Memory | **5** | **44.33** | `v0.2.0` (**UNVERIFIED mapping**) |
+| Agent Memory Challenge — Academic Textual Memory | **5** | **44.33** | `v0.2.0` (**organizer-confirmed**) |
 
-Git history most strongly suggests that the official 44.33 result corresponds to [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0), but the competition platform did not expose the deployed checkout SHA or image digest. The mapping therefore remains unverified. P1 and P3 are post-submission research and must not be read as new official leaderboard submissions.
+The organizer has formally confirmed that the official result corresponds to [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0), commit `7cf45c76ea7998554a13386b924627b83aeb3134`. See the [official evaluation confirmation record](docs/OFFICIAL_EVALUATION_CONFIRMATION.md). P1 and P3 are post-submission research and must not be read as new official leaderboard submissions.
 
 ### B. Stable post-submission local research
 
@@ -121,7 +121,7 @@ Hit@K means at least one annotated source turn appears in the first K results. M
 | Ref | Purpose | Status |
 |---|---|---|
 | [`v0.1.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.1.0) | Minimal reliable SQLite/FTS baseline | Archived release |
-| [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) | Most likely official competition version | Frozen release; mapping unverified |
+| [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) | Official competition version | Frozen release; organizer-confirmed |
 | [`research-v0.3.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.3.0) | BGE + ColBERT local hybrid milestone | Frozen research tag |
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen reranker + time-aware-key milestone | Frozen research tag |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | Structured query-planning milestone | Stable research tag |
