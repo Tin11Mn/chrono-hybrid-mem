@@ -1,0 +1,336 @@
+<p align="center">
+  <img src="assets/chronohybridmem-logo.png" alt="ChronoHybridMem ロゴ" width="240">
+</p>
+
+<h1 align="center">ChronoHybridMem</h1>
+
+<p align="center"><strong>長期稼働する AI エージェントのための、根拠に基づくハイブリッドメモリ検索。</strong></p>
+
+<p align="center">
+  <a href="README.md">English</a> |
+  <a href="README.zh-CN.md">简体中文</a> |
+  <a href="README.es.md">Español</a> |
+  <strong>日本語</strong> |
+  <a href="README.ko.md">한국어</a>
+</p>
+
+<!-- README_FACTS: main=stable-post-submission-research; p3=experimental; official-v020-mapping=UNVERIFIED -->
+
+<p align="center">
+  Agent Memory Challenge · Academic Textual Memory · <strong>Rank 5</strong> · <strong>Overall 44.33</strong>
+</p>
+
+ChronoHybridMem は、会話ターンを保存し、クエリとの関連性が最も高い原典の根拠を検索する、Docker でデプロイ可能な長期メモリサービスです。Agent Memory Challenge のために開発され、意図的に根拠検索までを責務としています。ベンチマークの最終回答は生成しません。
+
+デフォルトブランチの `main` は、現在検証済みで安定している、提出後のローカル研究実装 P1 です。進行中の Evidence Graph の作業は [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) で分離して管理されており、実験段階にあります。安定版 `main` には含まれません。
+
+## システムの役割
+
+ベンチマークでは、メモリと回答が分離されています。
+
+| ChronoHybridMem | コンペティションプラットフォーム |
+|---|---|
+| `Add`：会話の根拠を保存 | `Answer`：検索された根拠に基づいて推論 |
+| `Search`：順位付けされた原典レコードを返却 | `Evaluation`：最終回答とメモリの挙動を採点 |
+
+たとえば、メモリに次の内容が保存されているとします。
+
+```text
+Bob gave Alice a book.
+Bob works at Microsoft.
+```
+
+「Alice に本を渡した人物はどこで働いていますか？」という質問に対し、ChronoHybridMem はこの二件の原典レコードを検索します。最終回答として `Microsoft` を生成するのは、メモリサービスではなくプラットフォームです。
+
+## アーキテクチャ
+
+```mermaid
+flowchart LR
+    A["Conversation"] --> B["Add"]
+    B --> C["Raw evidence in SQLite"]
+    C --> D["FTS5 and retrieval annotations"]
+    Q["Question"] --> E["Search"]
+    D --> E
+    E --> F["Multi-route retrieval"]
+    F --> G["RRF candidate fusion"]
+    G --> H["Evidence-ID reranking"]
+    H --> I["Original evidence records"]
+```
+
+安定版サービスは、次の六原則に従います。
+
+- 生の根拠を信頼できる唯一の情報源とします。
+- 検索用アノテーションで原典の根拠を置き換えません。
+- すべてのストレージクエリで、厳密な `user_id` 分離を適用します。
+- リランカーは、既存の候補 ID の順序だけを変更できます。
+- メモリの Search は、ベンチマークの回答を生成しません。
+- 複雑さを増す前に、再現性と範囲を限定した回帰テストを優先します。
+
+## 現在の安定版パイプライン：P1
+
+### Add
+
+1. Pydantic でリクエストを検証します。
+2. べき等な `request_id` 処理を使用し、原文メッセージを SQLite に永続化します。
+3. 必要に応じて `gpt-4o-mini` を使用し、出典に紐づく事実アノテーションを作成します。
+4. 生のメッセージ、事実、Porter ステミング済みテキスト、隣接コンテキストを FTS5 でインデックス化します。
+
+話者・日付キーとモデルによるアノテーションは検索を改善しますが、`/search` が返す内容は常に原文メッセージテーブルに由来します。
+
+### Search
+
+1. 厳密な `user_id` フィルタリングを適用します。
+2. モデルモードでは、意図、主要語、展開語、エンティティ、時間的手掛かり、必要な根拠から成る、範囲を限定したクエリフィールドを計画します。
+3. 生のメッセージ、事実、Porter、隣接コンテキストの各 FTS5 経路で検索します。
+4. reciprocal rank fusion（RRF）で候補を統合します。
+5. 必要に応じて `gpt-4o-mini` を使い、範囲を限定した候補集合を並べ替えます。
+6. モデル出力を、与えられた候補 ID の許可リストと照合して絞り込み、原典の根拠を返します。
+
+P1 は既存のクエリ計画呼び出しを再利用します。モデル呼び出しを追加せず、Add/Search API も変更しません。API サービスのデフォルトは `MEMORY_STRUCTURED_QUERY_PLAN=true` です。フラットプランナーによるアブレーションでは `false` に設定してください。`MemoryStore` を直接使用する場合と、オフラインの LoCoMo 評価器では、引き続き保守的な挙動を採用します。評価器では明示的な `--structured-query-plan` フラグが必要です。`OPENAI_API_KEY` がない場合、標準サービスは字句検索経路を使用し、モデルを呼び出しません。
+
+オプションの BGE、ColBERT、cross-encoder、Qwen、そのほかのローカルモデルコンポーネントは、引き続き研究専用です。安定版 `main` のデフォルトに含まれることを意味しません。
+
+## 結果と根拠レベル
+
+### A. 公式コンペティション結果
+
+| トラック | 順位 | 総合 | 最も可能性の高い過去バージョン |
+|---|---:|---:|---|
+| Agent Memory Challenge — Academic Textual Memory | **5** | **44.33** | `v0.2.0`（**UNVERIFIED mapping**） |
+
+Git 履歴から最も強く示唆されるのは、公式の 44.33 という結果が [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) に対応するということです。しかし、コンペティションプラットフォームはデプロイ済みチェックアウトの SHA やイメージダイジェストを公開していませんでした。そのため、この対応関係は未検証のままです。P1 と P3 は提出後の研究であり、新たな公式リーダーボードへの提出結果として解釈してはなりません。
+
+### B. 安定した提出後のローカル研究
+
+このリポジトリには、対象となる LoCoMo の 1,977 問すべてを用いた、次の P1 ローカル実行結果が記録されています。
+
+| 手法 | Hit@1 | Hit@3 | Hit@10 | MRR |
+|---|---:|---:|---:|---:|
+| P1 structured planner + local Qwen3-4B proxy | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
+
+これは 2026-08-16 に記録された、過去の全件結果です。提出後の LoCoMo ローカル研究であり、公式リーダーボードの結果ではありません。この実行では、Search の計画と根拠の並べ替えにループバックの Qwen3-4B サーバーを使用し、P1 を明示的に有効化しました。全 1,977 問を用いたフラットプランナー対照実験は行っていないため、この表は全件におけるフラット方式から P1 への差分を示す根拠ではありません。プロトコル、カテゴリ別指標、再現手順については、[P1 ローカルモデル評価](docs/P1_LOCAL_EVALUATION.md)を参照してください。
+
+### C. プロキシおよび実験的な根拠
+
+固定 20 問、固定 200 問、AML 類似の合成データ、診断用の各実行は、リーダーボード結果ではなく、手法選択のためのゲートです。P1 の固定 200 問ゲートでは、ローカルの Hit@1 が 0.545 から 0.565 に改善し、Hit@10 は 0.740 を維持しました。その後、上記の全件結果が記録されました。不採用となったアイデアを含む詳細な実験履歴は、[findings.md](findings.md)、[progress.md](progress.md)、[評価ドキュメント](docs/EXTERNAL_EVALUATION.md)に保存されています。
+
+Hit@K は、最初の K 件の結果に、アノテーションされた出典ターンが一件以上含まれることを意味します。MRR には、最初に現れたアノテーション済み出典ターンの順位を使用します。Evidence Recall@K は、アノテーションされた根拠項目を何件検索できたかを測定します。
+
+## バージョン対応表
+
+| Ref | 目的 | 状態 |
+|---|---|---|
+| [`v0.1.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.1.0) | 信頼性の高い最小構成の SQLite/FTS ベースライン | アーカイブ済みリリース |
+| [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) | 公式コンペティション版である可能性が最も高いバージョン | 固定済みリリース。対応関係は未検証 |
+| [`research-v0.3.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.3.0) | BGE + ColBERT ローカルハイブリッドのマイルストーン | 固定済み研究タグ |
+| [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen リランカー + time-aware-key のマイルストーン | 固定済み研究タグ |
+| [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | 構造化クエリ計画のマイルストーン | 安定版研究タグ |
+| [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | 現在検証済みで安定している提出後の研究実装 | 運用中 |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | P3 Evidence Graph | 実験段階 |
+
+開発経路を簡潔に示すと、次のとおりです。
+
+```text
+v0.1 reliable SQLite/FTS baseline
+  → v0.2 model-assisted fact extraction and evidence reranking
+  → research-v0.3 dense retrieval and ColBERT
+  → research-v0.4 Qwen reranking and a time-aware key
+  → P1 structured query planning
+  → P3 Evidence Graph research
+```
+
+研究コンポーネントは、範囲を限定した回帰テストに合格した場合にのみ昇格します。エンティティ単位の検索、セッションフィルタリング、ColBERT の派生方式、大規模なリランカー、クエリ書き換えのアイデアは、広範な評価で裏付けられなかった場合に縮小または不採用としました。これらは安定版機能として暗黙に提示せず、研究の来歴として保存しています。
+
+## クイックスタート
+
+ChronoHybridMem は Python 3.11 を対象としています。
+
+```bash
+git clone https://github.com/Tin11Mn/chrono-hybrid-mem.git
+cd chrono-hybrid-mem
+python -m venv .venv
+```
+
+仮想環境を有効化します。
+
+```bash
+# Linux/macOS
+source .venv/bin/activate
+
+# Windows PowerShell
+.venv\Scripts\Activate.ps1
+```
+
+軽量サービスをインストールして起動します。
+
+```bash
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+ヘルスチェックを実行します。
+
+```bash
+curl http://localhost:8000/health
+# {"status":"ok"}
+```
+
+`.env.example` は参照用であり、自動的に読み込まれるファイルではありません。このプロジェクトは `python-dotenv` をインストールしません。変数はシェルでエクスポートするか、Docker の `--env-file` で渡すか、デプロイ先プラットフォームのシークレットマネージャーを使用してください。
+
+## API
+
+### `POST /add`
+
+`request_id`、`user_id`、`session_id` は必須です。完了済みの `request_id` を再利用しても処理はべき等で、メッセージは重複しません。
+
+```bash
+curl -X POST http://localhost:8000/add \
+  -H "Content-Type: application/json" \
+  -d '{
+    "request_id": "run:1:chunk:0",
+    "user_id": "run:1:conversation:0",
+    "session_id": "run:1:session:0",
+    "messages": [
+      {"role": "user", "content": "Alice prefers tea.", "timestamp": 1787068800}
+    ]
+  }'
+```
+
+### `POST /search`
+
+`top_k` のデフォルトは 100 で、1 以上 100 以下である必要があります。`options` は任意です。
+
+```bash
+curl -X POST http://localhost:8000/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What does Alice prefer?",
+    "user_id": "run:1:conversation:0",
+    "top_k": 10
+  }'
+```
+
+レスポンスの形式は次のとおりです。
+
+```json
+{
+  "data": [
+    {
+      "id": "mem_1",
+      "content": "Alice prefers tea.",
+      "score": 0.0164,
+      "created_at": "2026-08-18T00:00:00Z"
+    }
+  ]
+}
+```
+
+`score` は内部の検索・統合スコアであり、較正済みの確率ではありません。また、構成が異なる場合に直接比較することはできません。
+
+## 構成と依存関係
+
+主な変数は次のとおりです。
+
+| 変数 | デフォルト値 / 役割 |
+|---|---|
+| `MEMORY_DB_PATH` | ローカル SQLite のパス。Docker のデフォルトは `/data/chrono_hybrid_mem.db` |
+| `MEMORY_REQUIRE_MODEL` | `false`。モデルを使用する起動時にキーがなければ失敗させる場合は `true` に設定 |
+| `MEMORY_STRUCTURED_QUERY_PLAN` | API サービスでは `true`。フラットプランナーによるアブレーションでは `false` に設定 |
+| `OPENAI_API_KEY` | リモートモデル経路を有効化。実行時シークレットとして注入 |
+| `MEMORY_TEMPORAL_BONUS` | `0`。任意で使用できる、範囲を限定した字句ベースの時間的ボーナス |
+
+ローカル研究用の切り替え設定と、相互排他的なモデルオプションについては、[`.env.example`](.env.example)を参照してください。
+
+依存関係の境界は次のとおりです。
+
+- [`requirements.txt`](requirements.txt)：軽量 API サービスとコアランタイム。
+- [`requirements-test.txt`](requirements-test.txt)：CI が使用するコア / テスト依存関係。モック HTTP 埋め込みアダプタのテスト用に NumPy を追加します。
+- [`requirements-local.txt`](requirements-local.txt)：任意の FastEmbed 研究スタック。モデルの重みはローカルコンポーネントのインスタンス化時にのみダウンロードされ、コミットされることはありません。
+
+## Docker
+
+標準サービスのイメージをビルドします。
+
+```bash
+docker build -t chrono-hybrid-mem:latest .
+docker run --rm -p 8000:8000 \
+  -v chrono-memory-data:/data \
+  chrono-hybrid-mem:latest
+```
+
+コンペティション形式のリモートモデル経路を使用する場合は、実行時に `-e MEMORY_REQUIRE_MODEL=true -e OPENAI_API_KEY=...` を追加してください。キーをイメージに埋め込まないでください。
+
+オプションのローカル研究用イメージは FastEmbed をインストールし、デフォルトで BGE-large と小規模な ColBERT リランカーを使用します。
+
+```bash
+docker build -f Dockerfile.local -t chrono-hybrid-mem:local .
+docker run --rm -p 8000:8000 \
+  -v chrono-memory-data:/data \
+  -v chrono-local-models:/models \
+  chrono-hybrid-mem:local
+```
+
+初回起動時には大容量のモデルファイルがダウンロードされる場合があり、十分なネットワーク帯域、ディスク容量、メモリが必要です。`Dockerfile.local` は v0.3 形式の FastEmbed 研究経路を表します。P1 の Qwen 実行をワンコマンドで再現するものではありません。
+
+## 評価
+
+小規模な架空データのスモークフィクスチャを実行します。
+
+```bash
+python scripts/evaluate_retrieval.py --cases examples/demo_eval.json
+```
+
+承認済みのローカルデータセットパスから、決定論的な LoCoMo の先頭部分または対象全件を実行します。
+
+```bash
+# fixed 20
+python scripts/evaluate_locomo_retrieval.py \
+  --dataset /path/to/locomo10.json --top-k 1,3,10 --max-questions 20
+
+# fixed 200
+python scripts/evaluate_locomo_retrieval.py \
+  --dataset /path/to/locomo10.json --top-k 1,3,10 --max-questions 200
+
+# full set: omit --max-questions
+python scripts/evaluate_locomo_retrieval.py \
+  --dataset /path/to/locomo10.json --top-k 1,3,10
+```
+
+`--max-questions` はランダムサンプルではなく、固定された先頭部分を選択します。P1 の local-Qwen プロトコルには、ループバックサーバー、`--local-search-model-url`、`--structured-query-plan` も必要です。正確な再開可能手順は [docs/P1_LOCAL_EVALUATION.md](docs/P1_LOCAL_EVALUATION.md) を使用してください。
+
+通常の検証では、次を実行します。
+
+```bash
+python -m pip install -r requirements-test.txt
+python -m pytest
+python -m compileall app tests scripts
+```
+
+CI は境界を明確に保ちます。`Verify / core-verification` は主要な軽量 PR ジョブです。`Local Research Smoke` はパス変更時または手動でのみ実行され、モデルのダウンロードを開始することはありません。外部 LoCoMo 評価と、有料の `gpt-4o-mini` 評価は手動ワークフローです。現在このリポジトリにはブランチ保護ルールがないため、GitHub 上で技術的に必須のステータスチェックはありません。
+
+## リポジトリ構成
+
+```text
+app/         FastAPI service, schemas, SQLite storage, retrieval, model adapters
+tests/       API, isolation, retrieval, model-contract, and evaluation tests
+scripts/     deterministic diagnostics and LoCoMo evaluation tools
+evaluation/  AML-like synthetic evaluation material
+docs/        protocol, leaderboard audit, diagnostics, and P1 reports
+assets/      shared project artwork
+```
+
+## 再現性と安全性の境界
+
+- Python 3.11 とバージョン固定済みの依存関係ファイルが、サポート対象環境を定義します。
+- SQLite は生のメッセージを永続的に保存する情報源です。生成されたデータベースと評価出力は無視されます。
+- 厳密な `user_id` 条件で保存レコードを分離しますが、API には認証が組み込まれていません。本番環境では、外側のサービス層で呼び出し元を認証し、その ID を `user_id` に紐づける必要があります。
+- クエリ、オプション、メモリテキストは信頼できないプロンプトデータとして扱います。候補の許可リストはモデル出力を制限しますが、これは緩和策であり、プロンプトインジェクションを完全に防止できるという主張ではありません。
+- OpenAI を使用する経路を有効にすると、関連するメッセージ、クエリ、候補の内容が、設定されたリモートモデルサービスへ送信されます。
+- このリポジトリは、データベースの保存時暗号化、TLS 終端、API レート制限を提供しません。
+- P3 は、宣言済みの昇格ゲートに合格するまで安定版 `main` に含まれません。リポジトリのみに関わる修正は、最小限のコミットとして `main` から P3 へ反映し、実験的な P3 コードを安定版 P1 にマージしてはなりません。
+
+## 引用とライセンス
+
+正式なプロジェクト論文があるとは主張していません。研究で ChronoHybridMem を利用する場合は、このリポジトリまたは該当するリリース / タグを引用してください。
+
+[MIT License](LICENSE) の下で公開されています。Copyright © Haoxuan Meng.
