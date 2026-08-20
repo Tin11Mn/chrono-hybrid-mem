@@ -2,7 +2,7 @@
 
 ## 2026-08-15 leaderboard V2 audit and controlled ablation
 
-- [x] Reconstruct the likely 44.33 leaderboard baseline and label the exact deployment SHA `UNVERIFIED`.
+- [x] Reconstruct the likely 44.33 leaderboard baseline; the exact deployment SHA was not externally verified during this audit and was subsequently organizer-confirmed on 2026-08-20.
 - [x] Separate the v0.2.0 competition path, current public main, current worktree, and local research path.
 - [x] Audit A/B/C/D/E/G/H mechanisms and publish `docs/LEADERBOARD_V2_AUDIT.md`.
 - [x] Build the non-hidden AML-like seven-category synthetic regression harness.

@@ -14,7 +14,7 @@
   <a href="README.ko.md">한국어</a>
 </p>
 
-<!-- README_FACTS: main=stable-post-submission-research; p3=experimental; official-v020-mapping=UNVERIFIED -->
+<!-- README_FACTS: main=stable-post-submission-research; p3=experimental; official-v020-mapping=CONFIRMED -->
 
 <p align="center">
   Agent Memory Challenge · Academic Textual Memory · <strong>Rank 5</strong> · <strong>Overall 44.33</strong>
@@ -94,11 +94,11 @@ P1 复用现有的查询规划调用；它不会新增模型调用，也不会�
 
 ### A. 官方竞赛结果
 
-| 赛道 | 排名 | 总分 | 最可能对应的历史版本 |
+| 赛道 | 排名 | 总分 | 已确认的历史版本 |
 |---|---:|---:|---|
-| Agent Memory Challenge — Academic Textual Memory | **5** | **44.33** | `v0.2.0`（**UNVERIFIED 映射**） |
+| Agent Memory Challenge — Academic Textual Memory | **5** | **44.33** | `v0.2.0`（**主办方已确认**） |
 
-Git 历史最有力地表明，官方 44.33 分的结果对应 [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0)，但竞赛平台没有公开所部署检出版本的 SHA 或镜像摘要。因此，该映射仍未经验证。P1 和 P3 均为赛后研究，不得将其解读为新的官方排行榜提交。
+主办方已正式确认，官方成绩对应 [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0)，提交为 `7cf45c76ea7998554a13386b924627b83aeb3134`。参见[官方评测确认记录](docs/OFFICIAL_EVALUATION_CONFIRMATION.md)。P1 和 P3 均为赛后研究，不得将其解读为新的官方排行榜提交。
 
 ### B. 稳定版赛后本地研究
 
@@ -121,7 +121,7 @@ Hit@K 表示前 K 个结果中至少出现一个已标注的来源轮次。MRR �
 | 引用 | 用途 | 状态 |
 |---|---|---|
 | [`v0.1.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.1.0) | 最小可靠 SQLite/FTS 基线 | 已归档版本 |
-| [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) | 最可能的官方竞赛版本 | 已冻结版本；映射未经验证 |
+| [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) | 官方竞赛版本 | 已冻结版本；主办方已确认 |
 | [`research-v0.3.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.3.0) | BGE + ColBERT 本地混合检索里程碑 | 已冻结研究标签 |
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen 重排序器 + 时间感知键里程碑 | 已冻结研究标签 |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | 结构化查询规划里程碑 | 稳定研究标签 |

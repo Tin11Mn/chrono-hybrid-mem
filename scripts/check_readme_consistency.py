@@ -21,13 +21,14 @@ README_LABELS = {
 
 FACT_MARKER = (
     "<!-- README_FACTS: main=stable-post-submission-research; "
-    "p3=experimental; official-v020-mapping=UNVERIFIED -->"
+    "p3=experimental; official-v020-mapping=CONFIRMED -->"
 )
 
 COMMON_LITERALS = (
     "Rank 5",
     "Overall 44.33",
-    "UNVERIFIED",
+    "CONFIRMED",
+    "7cf45c76ea7998554a13386b924627b83aeb3134",
     "1,977",
     "0.5761",
     "0.7157",

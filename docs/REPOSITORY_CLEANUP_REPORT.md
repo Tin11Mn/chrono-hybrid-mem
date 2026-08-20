@@ -117,7 +117,7 @@ This avoids automatic full-dataset network evaluation and automatic paid API cal
 | Tag | Dereferenced commit | Purpose | Result status |
 |---|---|---|---|
 | `v0.1.0` | `5fd77045c74a5b17876abca30812888587628eaa` | Minimal reliable baseline | Historical release |
-| `v0.2.0` | `7cf45c76ea7998554a13386b924627b83aeb3134` | Most likely official 44.33 version | Official mapping remains **UNVERIFIED** |
+| `v0.2.0` | `7cf45c76ea7998554a13386b924627b83aeb3134` | Official Rank 5 / 44.33 version | Organizer-confirmed on 2026-08-20 |
 | `research-v0.3.0` | `3a0ba8c06722fe53b07d8d251ada1729c390bcdc` | BGE + ColBERT local hybrid milestone | Local research; not official |
 | `research-v0.4.0` | `1b013b93a0f3e6e12366208f20eae1d245889909` | Qwen reranker + time-aware key milestone | Local research; not official |
 | `research-p1-20260816` | `0691afafe4cede21f973efb996b86a29d441ff88` | P1 structured-planning full local milestone | Post-submission local research; not official |
@@ -240,10 +240,18 @@ Each README uses the same owner-supplied logo, language navigation, architecture
 - the current language is bold and the other four navigation links resolve;
 - local documentation and asset links exist and do not escape the repository;
 - fenced code blocks, commands, JSON, inline technical tokens, numeric facts, and content links match the English source;
-- Rank 5, Overall 44.33, the **UNVERIFIED** v0.2 mapping, P1 metrics, stable/P3 status marker, branch/tag names, configuration flags, and dependency files remain consistent;
+- Rank 5, Overall 44.33, the **CONFIRMED** v0.2 mapping, P1 metrics, stable/P3 status marker, branch/tag names, configuration flags, and dependency files remain consistent;
 - all five version tags remain annotated and point to the audited commits.
 
 Result: **passed**.
+
+### Post-cleanup official confirmation
+
+On 2026-08-20, the competition organizer confirmed that the official result
+used `v0.2.0` at commit
+`7cf45c76ea7998554a13386b924627b83aeb3134`. This resolves the uncertainty
+recorded during cleanup without changing any tag target or historical commit.
+See [Official Evaluation Confirmation](OFFICIAL_EVALUATION_CONFIRMATION.md).
 
 ## 13. P3 Safety Verification
 

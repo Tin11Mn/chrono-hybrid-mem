@@ -14,7 +14,7 @@
   <strong>한국어</strong>
 </p>
 
-<!-- README_FACTS: main=stable-post-submission-research; p3=experimental; official-v020-mapping=UNVERIFIED -->
+<!-- README_FACTS: main=stable-post-submission-research; p3=experimental; official-v020-mapping=CONFIRMED -->
 
 <p align="center">
   Agent Memory Challenge · Academic Textual Memory · <strong>Rank 5</strong> · <strong>Overall 44.33</strong>
@@ -94,11 +94,11 @@ P1은 기존 질의 계획 호출을 재사용합니다. 모델 호출 수를 �
 
 ### A. 공식 대회 결과
 
-| 트랙 | 순위 | Overall | 가장 가능성 높은 역사 버전 |
+| 트랙 | 순위 | Overall | 확인된 역사 버전 |
 |---|---:|---:|---|
-| Agent Memory Challenge — Academic Textual Memory | **5** | **44.33** | `v0.2.0` (**UNVERIFIED mapping**) |
+| Agent Memory Challenge — Academic Textual Memory | **5** | **44.33** | `v0.2.0` (**주최 측 확인 완료**) |
 
-Git 기록상 공식 44.33 결과는 [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0)에 대응할 가능성이 가장 높습니다. 그러나 대회 플랫폼은 배포 checkout SHA나 이미지 digest를 공개하지 않았으므로 이 매핑은 여전히 검증되지 않았습니다. P1과 P3는 제출 후 연구이며 새로운 공식 leaderboard 제출로 해석해서는 안 됩니다.
+주최 측은 공식 결과가 [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0), commit `7cf45c76ea7998554a13386b924627b83aeb3134`에 해당함을 공식 확인했습니다. [공식 평가 확인 기록](docs/OFFICIAL_EVALUATION_CONFIRMATION.md)을 참조하십시오. P1과 P3는 제출 후 연구이며 새로운 공식 leaderboard 제출로 해석해서는 안 됩니다.
 
 ### B. 안정적 제출 후 로컬 연구
 
@@ -121,7 +121,7 @@ Hit@K는 상위 K개 결과 안에 주석된 원본 턴이 하나 이상 있음�
 | Ref | 목적 | 상태 |
 |---|---|---|
 | [`v0.1.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.1.0) | 최소 신뢰형 SQLite/FTS baseline | 보관된 release |
-| [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) | 가장 가능성 높은 공식 대회 버전 | 고정 release, 매핑 미검증 |
+| [`v0.2.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) | 공식 대회 버전 | 고정 release, 주최 측 확인 완료 |
 | [`research-v0.3.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.3.0) | BGE + ColBERT 로컬 hybrid milestone | 고정 research tag |
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen reranker + time-aware-key milestone | 고정 research tag |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | Structured query-planning milestone | 안정 research tag |
