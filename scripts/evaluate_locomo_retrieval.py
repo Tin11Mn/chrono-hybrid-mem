@@ -255,7 +255,8 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              include_question_diagnostics: bool = False,
              evidence_need_retrieval: bool = False,
              evidence_need_quota: int = 2,
-             evidence_need_rrf_weight: float = 0.01) -> Dict[str, object]:
+             evidence_need_rrf_weight: float = 0.01,
+             adjacent_turn_expansion: bool = False) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -315,6 +316,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 evidence_need_retrieval=evidence_need_retrieval,
                 evidence_need_quota=evidence_need_quota,
                 evidence_need_rrf_weight=evidence_need_rrf_weight,
+                adjacent_turn_expansion=adjacent_turn_expansion,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -430,6 +432,16 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                                 )
                             )
                         },
+                        "gold_adjacent_positions": _gold_positions(
+                            gold_mem_ids,
+                            retrieval_trace.get("adjacent_candidate_ids", []),
+                        ),
+                        "promoted_adjacent_ids": retrieval_trace.get(
+                            "promoted_adjacent_ids", []
+                        ),
+                        "displaced_p1_for_adjacent_ids": retrieval_trace.get(
+                            "displaced_p1_for_adjacent_ids", []
+                        ),
                         "evidence_need_union_ids": retrieval_trace.get(
                             "evidence_need_union_ids", []
                         ),
@@ -556,6 +568,13 @@ def main() -> None:
     parser.add_argument(
         "--evidence-need-rrf-weight", type=float, default=0.01,
         help="P4-A low RRF weight for evidence-need channels (default 0.01)",
+    )
+    parser.add_argument(
+        "--adjacent-turn-expansion", action="store_true",
+        help=(
+            "Enable default-off P1.1/P4-B same-session +/-1 neighbor recovery "
+            "with a reserved rerank-pool quota"
+        ),
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -1473,6 +1492,7 @@ def main() -> None:
         evidence_need_retrieval=args.evidence_need_retrieval,
         evidence_need_quota=args.evidence_need_quota,
         evidence_need_rrf_weight=args.evidence_need_rrf_weight,
+        adjacent_turn_expansion=args.adjacent_turn_expansion,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)
