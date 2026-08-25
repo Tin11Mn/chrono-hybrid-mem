@@ -157,7 +157,8 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              instruction_rerank_top_n: int = 10,
              instruction_refine_top_n: int = 0,
              include_hit_bitmap: bool = False,
-             structured_query_plan: bool = False) -> Dict[str, object]:
+             structured_query_plan: bool = False,
+             set_aware_rerank: bool = False) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -212,6 +213,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 instruction_rerank_top_n=instruction_rerank_top_n,
                 instruction_refine_top_n=instruction_refine_top_n,
                 structured_query_plan=structured_query_plan,
+                set_aware_rerank=set_aware_rerank,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -344,6 +346,10 @@ def main() -> None:
     parser.add_argument(
         "--structured-query-plan", action="store_true",
         help="Enable P1 structured planning on the selected Search model",
+    )
+    parser.add_argument(
+        "--set-aware-rerank", action="store_true",
+        help="Enable default-off P2 set-aware ordering after candidate ranking",
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -794,6 +800,8 @@ def main() -> None:
         raise ValueError("Use either --search-model or --local-search-model-url")
     if args.structured_query_plan and not (args.search_model or args.local_search_model_url):
         raise ValueError("--structured-query-plan requires a Search model")
+    if args.set_aware_rerank and not args.structured_query_plan:
+        raise ValueError("--set-aware-rerank requires --structured-query-plan")
     if args.search_model:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -1227,6 +1235,7 @@ def main() -> None:
         instruction_refine_top_n=args.instruction_refine_top_n,
         include_hit_bitmap=args.include_hit_bitmap,
         structured_query_plan=args.structured_query_plan,
+        set_aware_rerank=args.set_aware_rerank,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)

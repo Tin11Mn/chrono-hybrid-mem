@@ -23,6 +23,7 @@ from app.main import (
     instruction_refine_top_n_from_environment,
     instruction_speaker_conflict_only_from_environment,
     structured_query_plan_from_environment,
+    set_aware_rerank_from_environment,
     adjacent_turn_expansion_from_environment,
     adjacent_seed_limit_from_environment,
     adjacent_candidate_limit_from_environment,
@@ -101,6 +102,11 @@ def test_structured_query_plan_defaults_on_and_reads_false(monkeypatch):
     assert structured_query_plan_from_environment() is True
     monkeypatch.setenv("MEMORY_STRUCTURED_QUERY_PLAN", "FaLsE")
     assert structured_query_plan_from_environment() is False
+
+
+def test_set_aware_rerank_defaults_off(monkeypatch):
+    monkeypatch.delenv("MEMORY_SET_AWARE_RERANK", raising=False)
+    assert set_aware_rerank_from_environment() is False
 
 
 def test_adjacent_turn_expansion_defaults_off_with_frozen_bounded_defaults(monkeypatch):

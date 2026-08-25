@@ -8,6 +8,7 @@ __pycache__/
 data/
 .env
 .venv/
+.venv-p2/
 .locomo/
 locomo*.json
 *.db

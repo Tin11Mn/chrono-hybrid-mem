@@ -14,6 +14,16 @@
 
 Hard constraints: graph output always resolves to original `source_message_id`; exact `user_id` isolation; no generated benchmark answer; zero added Search LLM calls; feature-flag-off reproduces P1; no automatic merge to `main`.
 
+## 2026-08-25 P2 set-aware reranking
+
+- [x] Phase 1 — write P2 specification, assumptions, safety boundaries, and staged evaluation gates in `docs/P2_SET_AWARE_RERANK_SPEC.md`.
+- [x] Phase 2 — obtain user approval of the P2 specification before implementation. **COMPLETE**
+- [x] Phase 3 — implement default-off, deterministic P2 candidate-set ordering with trace diagnostics and no added model calls. **CODE COMPLETE; TEST EXECUTION PENDING**
+- [x] Phase 4 — add focused configuration, ordering, source-preservation, isolation, and call-parity tests. **COMPLETE: 66 passed locally**
+- [x] Phase 5 — run the full regression suite, then fixed-20 mechanics checks; declare multi-stratum and fixed-200 outcome gates before any local-model outcome run. **COMPLETE: 651 regression tests passed; fixed-20 paired local proxy retained Hit@1 0.40, improved Hit@3 0.45→0.60 and MRR 0.45→0.4833, with all invariants passing.**
+- [x] Phase 5B — implement a frozen-plan paired evaluator, then evaluate P2 on public/synthetic capability strata (explicit recall, multi-hop, temporal, preference, governance, safety) before any fixed-200 local proxy evaluation. **REJECT CURRENT P2: the frozen 35-case local proxy fell from Hit@1/MRR 1.00/1.00 to 0.8571/0.9286 and raised forbidden-top1. Do not run fixed-200.**
+- [ ] Phase 6 — diagnose retained failure cases or design a separately specified successor; commit and push only after tests pass and the user authorizes publication.
+
 ## 2026-08-15 leaderboard V2 audit and controlled ablation
 
 - [x] Reconstruct the likely 44.33 leaderboard baseline; the exact deployment SHA was not externally verified during this audit and was subsequently organizer-confirmed on 2026-08-20.
@@ -119,6 +129,10 @@ Deliver the v0.1.0 Docker-ready evidence retrieval baseline described in `docs/S
 - [ ] Continue bounded iterations until strict full-set Hit@1 >= 0.70, or document a genuine external blocker after exhausting safe local paths.
 
 ## Errors encountered
+
+| `pytest` and `pydantic` were absent from the only available Python 3.9 runtime; an isolated `.venv-p2` dependency installation then failed because the configured package-index proxy could not connect | 1 | Do not retry the identical download command. P2 source compiled successfully, but focused test execution remains pending a reachable package source or a pre-provisioned Python environment. |
+| Conda's `run` wrapper failed with a GBK stdout encoding error before running pytest | 1 | Ran the base environment's Python executable directly instead of retrying through the wrapper. |
+| Direct Conda-base pytest collection found `pytest` and `pydantic`, but not `fastapi`, so `app.main` could not import | 1 | Do not alter application code or add a fake dependency. The storage-level P2 smoke test passed directly; full focused tests remain pending an environment with all declared runtime dependencies. |
 
 | Error | Attempt | Resolution |
 |---|---:|---|

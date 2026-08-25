@@ -98,10 +98,18 @@ def parse_args():
     )
     parser.add_argument("--structured", action="store_true")
     parser.add_argument(
+        "--set-aware-rerank", action="store_true",
+        help="Enable the default-off P2 deterministic final-order reranker (requires --structured)",
+    )
+    parser.add_argument(
         "--support-weight", type=float, default=MemoryStore.STRUCTURED_SUPPORT_RRF_WEIGHT,
         help="Structured expansion/evidence-need RRF weight for P1 calibration",
     )
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--per-category-limit", type=int,
+        help="Select this many deterministic cases from each public category",
+    )
     parser.add_argument("--output")
     return parser.parse_args()
 
@@ -113,6 +121,8 @@ def mean(values):
 def evaluate(
     cases, work_dir, model, structured,
     support_weight=MemoryStore.STRUCTURED_SUPPORT_RRF_WEIGHT,
+    set_aware_rerank=False,
+    include_case_diagnostics=False,
 ):
     work_dir = work_dir / f"run-{time.time_ns()}"
     work_dir.mkdir(parents=True, exist_ok=False)
@@ -126,11 +136,13 @@ def evaluate(
     add_latencies = []
     search_latencies = []
     cross_user_leaks = 0
+    case_diagnostics = []
 
     for position, item in enumerate(cases):
         database_path = work_dir / f"case-{position:04d}.db"
         store = MemoryStore(
-            str(database_path), model=model, structured_query_plan=structured
+            str(database_path), model=model, structured_query_plan=structured,
+            set_aware_rerank=set_aware_rerank,
         )
         store.STRUCTURED_SUPPORT_RRF_WEIGHT = support_weight
         store.initialize()
@@ -178,8 +190,18 @@ def evaluate(
             if memory.get("user_id", "user-main") != "user-main"
         }
         cross_user_leaks += len(other_user_ids & set(ranked_ids))
+        if include_case_diagnostics:
+            case_diagnostics.append({
+                "id": item["id"], "category": item["category"],
+                "query": item["query"], "ranked_ids": ranked_ids,
+                "required_evidence_ids": sorted(required),
+                "forbidden_evidence_ids": sorted(forbidden),
+                "first_required_rank": min(ranks) if ranks else None,
+                "forbidden_at_1": bool(ranked_ids[:1] and ranked_ids[0] in forbidden),
+                "retrieval_trace": store.last_retrieval_trace,
+            })
 
-    return {
+    result = {
         "cases": len(cases),
         "model": (
             "fixture-plan-identity-ranker" if isinstance(model, FixturePlanModel)
@@ -188,6 +210,7 @@ def evaluate(
             else "gpt-4o-mini" if model else None
         ),
         "structured_query_plan": structured,
+        "set_aware_rerank": set_aware_rerank,
         "structured_support_rrf_weight": support_weight if structured else None,
         "hit_at_k": {str(k): mean(values) for k, values in hits.items()},
         "mrr": mean(reciprocal_ranks),
@@ -206,6 +229,9 @@ def evaluate(
         "prompt_tokens": getattr(model, "prompt_tokens", 0),
         "completion_tokens": getattr(model, "completion_tokens", 0),
     }
+    if include_case_diagnostics:
+        result["case_diagnostics"] = case_diagnostics
+    return result
 
 
 def main():
@@ -217,14 +243,29 @@ def main():
         raise SystemExit("use exactly one of --model, --fixture-plans, or --local-base-url")
     if args.structured and selected_models == 0:
         raise SystemExit("--structured requires a planner model")
+    if args.set_aware_rerank and not args.structured:
+        raise SystemExit("--set-aware-rerank requires --structured")
     if args.skip_extraction and not args.local_base_url:
         raise SystemExit("--skip-extraction is only valid with --local-base-url")
     api_key = os.getenv("OPENAI_API_KEY")
     if args.model and not api_key:
         raise SystemExit("--model requires OPENAI_API_KEY")
     cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
+    if args.limit and args.per_category_limit:
+        raise SystemExit("--limit and --per-category-limit are mutually exclusive")
     if args.limit:
         cases = cases[:args.limit]
+    if args.per_category_limit is not None:
+        if args.per_category_limit <= 0:
+            raise SystemExit("--per-category-limit must be positive")
+        selected = []
+        counts = defaultdict(int)
+        for item in cases:
+            category = item["category"]
+            if counts[category] < args.per_category_limit:
+                selected.append(item)
+                counts[category] += 1
+        cases = selected
     if args.model:
         model = MemoryModel(api_key)
     elif args.fixture_plans:
@@ -240,7 +281,8 @@ def main():
     if args.support_weight < 0 or args.support_weight > 1:
         raise SystemExit("--support-weight must be between 0 and 1")
     metrics = evaluate(
-        cases, Path(args.work_dir), model, args.structured, args.support_weight
+        cases, Path(args.work_dir), model, args.structured, args.support_weight,
+        args.set_aware_rerank,
     )
     rendered = json.dumps(metrics, indent=2, ensure_ascii=False)
     if args.output:

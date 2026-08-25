@@ -28,6 +28,10 @@ def structured_query_plan_from_environment() -> bool:
     return os.getenv("MEMORY_STRUCTURED_QUERY_PLAN", "true").lower() == "true"
 
 
+def set_aware_rerank_from_environment() -> bool:
+    return os.getenv("MEMORY_SET_AWARE_RERANK", "false").lower() == "true"
+
+
 def adjacent_turn_expansion_from_environment() -> bool:
     return os.getenv("MEMORY_ADJACENT_TURN_EXPANSION", "false").lower() == "true"
 
@@ -307,6 +311,7 @@ def instruction_refine_top_n_from_environment() -> int:
 def create_app(database_path: str = None) -> FastAPI:
     path = database_path or os.getenv("MEMORY_DB_PATH", "data/chrono_hybrid_mem.db")
     structured_query_plan = structured_query_plan_from_environment()
+    set_aware_rerank = set_aware_rerank_from_environment()
     adjacent_turn_expansion = adjacent_turn_expansion_from_environment()
     evidence_graph = evidence_graph_from_environment()
     evidence_anchors = evidence_anchors_from_environment()
@@ -314,6 +319,10 @@ def create_app(database_path: str = None) -> FastAPI:
     if evidence_graph and evidence_anchors:
         raise RuntimeError(
             "MEMORY_EVIDENCE_ANCHORS cannot be combined with MEMORY_EVIDENCE_GRAPH"
+        )
+    if set_aware_rerank and not structured_query_plan:
+        raise RuntimeError(
+            "MEMORY_SET_AWARE_RERANK requires MEMORY_STRUCTURED_QUERY_PLAN=true"
         )
     if evidence_anchors and adjacent_turn_expansion:
         raise RuntimeError(
@@ -406,6 +415,7 @@ def create_app(database_path: str = None) -> FastAPI:
         instruction_rerank_top_n=instruction_rerank_top_n_from_environment(),
         instruction_refine_top_n=instruction_refine_top_n_from_environment(),
         structured_query_plan=structured_query_plan,
+        set_aware_rerank=set_aware_rerank,
         evidence_graph=evidence_graph,
         evidence_anchors=evidence_anchors,
         **graph_options,

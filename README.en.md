@@ -128,6 +128,10 @@ P3 builds traceable auxiliary evidence structures over original messages without
 | P1.1 adjacent raw-message expansion | Hit@1/3/10/MRR matched the baseline: 0.40/0.45/0.55/0.45. | No gain; not promoted to a larger evaluation. |
 | P3-C explicit temporal-state graph | No independent ablation has been implemented. | Untested; no conclusion about temporal data. |
 
+## P2 set-aware reranking experiment (rejected)
+
+P2 attempts to reorder existing raw candidates after P1 model ranking using evidence-need tokens from the structured plan. It is disabled by default and adds no model calls. On a fixed 20-question local LoCoMo proxy, Hit@1 tied at `0.40` while Hit@3 and MRR improved; however, on 35 frozen-plan public synthetic stratified cases, Hit@1 fell from `1.00` to `0.8571`, MRR from `1.00` to `0.9286`, and forbidden evidence reached rank one more often. P2 is retained only as a reproducible experiment and failure analysis, never as a default path or official-submission claim.
+
 These experiments reject default graph or adjacent expansion on LoCoMo, not graph methods generally. Future activation will be gated only by input-observable relation, multi-hop, or temporal signals—not by private benchmark identity or reference answers.
 
 ## Version map
