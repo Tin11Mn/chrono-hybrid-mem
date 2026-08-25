@@ -6,15 +6,22 @@ Formal evaluator model: `gpt-4o-mini`
 
 ## Executive verdict
 
+> Update (2026-08-20): the competition organizer subsequently confirmed that
+> the official result used `v0.2.0` at commit
+> `7cf45c76ea7998554a13386b924627b83aeb3134`. The reconstruction below records
+> the evidence available during the original 2026-08-15 audit; its uncertainty
+> about the exact deployed revision is now resolved. See
+> [Official Evaluation Confirmation](OFFICIAL_EVALUATION_CONFIRMATION.md).
+
 The score `Overall 44.33` is most plausibly associated with the submitted
 `v0.2.0` release, whose annotated tag resolves to
 `7cf45c76ea7998554a13386b924627b83aeb3134`. The submission record names
-`ChronoHybridMem v0.2.0`, but the platform does not expose the deployed image
-digest or checked-out Git SHA. Therefore the only defensible declaration is:
+`ChronoHybridMem v0.2.0`. Although the platform did not publicly expose the
+deployed image digest or checked-out Git SHA, the organizer later confirmed:
 
 ```text
 LEADERBOARD_BASELINE_COMMIT=
-7cf45c76ea7998554a13386b924627b83aeb3134 (UNVERIFIED)
+7cf45c76ea7998554a13386b924627b83aeb3134 (ORGANIZER-CONFIRMED)
 ```
 
 The current public `main` is
@@ -36,7 +43,7 @@ reuses the existing query-planning call and changes no dependency or API.
 
 | State | Revision | Evidence and status |
 |---|---|---|
-| Leaderboard submission | `7cf45c76…` | `v0.2.0` resolves to this commit; application commit `02f9a9f…` says `ChronoHybridMem v0.2.0` was submitted. Exact platform checkout is **UNVERIFIED**. |
+| Leaderboard submission | `7cf45c76…` | `v0.2.0` resolves to this commit; application commit `02f9a9f…` says `ChronoHybridMem v0.2.0` was submitted; organizer confirmation received on 2026-08-20 resolves the original audit uncertainty. |
 | Post-submission ranking change | `4c4e0d3…` | Merge of PR #3, “Strengthen gpt-4o-mini evidence ranking rubric,” on 2026-08-11, after the 2026-08-07 submission. |
 | Current public `main` | `c7df0cb…` | PR #4 documentation commit on top of `4c4e0d3…`; application code is effectively the PR #3 code. |
 | Current local worktree | `11a3b00…` plus uncommitted files | Contains additional prompt, metadata, bounded-rerank, evaluator, and local-model experiments. It is not an attributable release result. |
@@ -220,8 +227,8 @@ temporal/personalization regression tests are mandatory.
 
 ## 6. Answers to the 12 required questions
 
-1. **Which commit produced 44.33?** Most likely `7cf45c76…` (`v0.2.0`), but
-   exact deployment identity is **UNVERIFIED**.
+1. **Which commit produced 44.33?** Organizer-confirmed:
+   `7cf45c76…` (`v0.2.0`).
 2. **Does current main contain unreflected improvements?** Yes. It contains
    post-submission hybrid retrieval/provenance work and PR #3's stronger
    `gpt-4o-mini` ranking rubric; no valid formal model score demonstrates their
