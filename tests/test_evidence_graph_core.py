@@ -1160,6 +1160,82 @@ def test_explicit_retraction_and_correction_cues_are_normalized():
     assert correction.supersedes_edge_id is None
 
 
+def test_source_backed_relation_carries_a_deterministic_internal_witness():
+    payload = {
+        "entities": [
+            {"name": "Alice", "type": "person"},
+            {"name": "Acme", "type": "organization"},
+        ],
+        "relations": [{
+            "subject": "Alice",
+            "subject_type": "person",
+            "relation": "works_at",
+            "object": "Acme",
+            "object_type": "organization",
+            "explicit": True,
+        }],
+    }
+
+    relation = parse_graph_payload(
+        payload,
+        user_id="user-a",
+        source_message_id="mem-witness-carrier",
+        created_at=CREATED_AT,
+        source_text="Alice works at Acme.",
+    ).relations[0]
+
+    witness = relation.support_witness
+    assert isinstance(witness, SupportWitness)
+    assert witness.spec_id == "works_at:direct"
+    assert witness.binding == "named"
+    assert (witness.state_change, witness.temporal_status) == (
+        relation.state_change,
+        relation.temporal_status,
+    )
+    assert witness.clause == "alice works at acme."
+    assert witness.source_span == (0, len(witness.clause))
+    assert witness.clause[slice(*witness.subject_span)] == "alice"
+    assert witness.clause[slice(*witness.predicate_span)] == "works at"
+    assert witness.clause[slice(*witness.object_span)] == "acme"
+    # The carrier is internal persistence data, not an API graph field.
+    assert "support_witness" not in relation.to_dict()
+
+
+def test_conflicting_source_states_preserve_parser_relation_without_carrier():
+    payload = {
+        "entities": [
+            {"name": "Alice", "type": "person"},
+            {"name": "Paris", "type": "location"},
+        ],
+        "relations": [{
+            "subject": "Alice",
+            "subject_type": "person",
+            "relation": "lives_in",
+            "object": "Paris",
+            "object_type": "location",
+            "explicit": True,
+        }],
+    }
+
+    result = parse_graph_payload(
+        payload,
+        user_id="user-a",
+        source_message_id="mem-state-conflict-carrier",
+        created_at=CREATED_AT,
+        source_text=(
+            "Alice previously lived in Paris. "
+            "Correction: Alice actually lives in Paris, not Rome."
+        ),
+    )
+
+    # The carrier must not retroactively change the parser's historical
+    # state-conflict contract.  Persistence sees None and rejects this edge.
+    assert len(result.relations) == 1
+    relation = result.relations[0]
+    assert (relation.state_change, relation.temporal_status) == ("assert", None)
+    assert relation.support_witness is None
+
+
 @pytest.mark.parametrize("explicit", [False, None, 1, "true", "True"])
 def test_only_literal_boolean_true_is_accepted_as_explicit(explicit):
     payload = basic_payload()
@@ -1277,16 +1353,16 @@ def test_textual_support_does_not_use_speaker_prefix_as_relation_subject():
     )
 
 
-def test_textual_support_requires_one_atomic_subject_relation_object():
+def test_textual_support_requires_the_whole_top_level_container():
     content = "Bob likes tea but Alice likes coffee."
 
-    assert relation_is_textually_supported(
+    assert not relation_is_textually_supported(
         source_text=content,
         subject="Bob",
         predicate="likes",
         object_name="tea",
     )
-    assert relation_is_textually_supported(
+    assert not relation_is_textually_supported(
         source_text=content,
         subject="Alice",
         predicate="likes",
@@ -1369,6 +1445,858 @@ def test_all_controlled_predicates_have_a_complete_positive_frame(
     assert witness.subject_span[1] <= witness.predicate_span[0]
     assert witness.predicate_span[1] <= witness.object_span[0]
     assert witness.source_span[0] <= witness.source_span[1]
+
+
+@pytest.mark.parametrize(
+    ("predicate", "object_name", "positive", "negative"),
+    [
+        ("friend_of", "Bob", "I am a friend of Bob.", "I is a friend of Bob."),
+        ("parent_of", "Bob", "I am a parent of Bob.", "I is a parent of Bob."),
+        ("sibling_of", "Bob", "I am a sibling of Bob.", "I is a sibling of Bob."),
+        ("partner_of", "Bob", "I am a partner of Bob.", "I is a partner of Bob."),
+        ("works_at", "Acme", "I work at Acme.", "I works at Acme."),
+        ("role_at", "Acme", "I have a role at Acme.", "I has a role at Acme."),
+        ("lives_in", "Paris", "I live in Paris.", "I lives in Paris."),
+        ("located_in", "Paris", "I am located in Paris.", "I is located in Paris."),
+        ("likes", "tea", "I like tea.", "I likes tea."),
+        ("prefers", "tea", "I prefer tea.", "I prefers tea."),
+        ("dislikes", "tea", "I hate tea.", "I hates tea."),
+        ("member_of", "Club", "I join Club.", "I joins Club."),
+        ("participated_in", "Expo", "I attend Expo.", "I attends Expo."),
+        ("owns", "Vase", "I own Vase.", "I owns Vase."),
+        ("created", "Vase", "I create Vase.", "I creates Vase."),
+        ("requires", "Badge", "I require Badge.", "I requires Badge."),
+        ("prohibits", "Badge", "I prohibit Badge.", "I prohibits Badge."),
+        ("permits", "Badge", "I permit Badge.", "I permits Badge."),
+        ("changed_to", "Shift B", "I change to Shift B.", "I changes to Shift B."),
+        ("replaces", "Plan B", "I replace Plan B.", "I replaces Plan B."),
+    ],
+)
+def test_all_controlled_predicates_pair_correct_and_third_person_1p_morphology(
+    predicate, object_name, positive, negative
+):
+    positive_witnesses = _relation_support_witnesses(
+        source_text="Alice: {}".format(positive),
+        subject="Alice",
+        predicate=predicate,
+        object_name=object_name,
+        speaker="Alice",
+    )
+    negative_witnesses = _relation_support_witnesses(
+        source_text="Alice: {}".format(negative),
+        subject="Alice",
+        predicate=predicate,
+        object_name=object_name,
+        speaker="Alice",
+    )
+
+    assert positive_witnesses
+    assert {
+        witness.binding for witness in positive_witnesses
+    } == {"trusted_speaker_1p"}
+    assert negative_witnesses == ()
+
+
+@pytest.mark.parametrize(
+    ("source_text", "predicate", "object_name", "expected"),
+    [
+        ("Alice: I'm keen on pottery.", "likes", "pottery", True),
+        ("Alice: I'm likes pottery.", "likes", "pottery", False),
+        ("Alice: I've created the vase.", "created", "vase", True),
+        ("Alice: I've creates the vase.", "created", "vase", False),
+        ("Alice: I'd created the vase.", "created", "vase", True),
+        ("Alice: I'd create the vase.", "created", "vase", False),
+        ("Alice: I written the book.", "created", "book", False),
+    ],
+)
+def test_contracted_first_person_frames_are_positive_and_tense_closed(
+    source_text, predicate, object_name, expected
+):
+    assert relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate=predicate,
+        object_name=object_name,
+        speaker="Alice",
+    ) is expected
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "Alice: I love pottery but not really.",
+        "Alice: I love pottery but I do not.",
+        "Alice: I love pottery but no longer do.",
+        "Alice: I love pottery; actually I do not.",
+        "Alice: I love pottery. Actually I do not.",
+        "Alice: I love pottery. But actually, I do not.",
+        "Alice: I love pottery but I no longer do.",
+        "Alice: I love pottery however I do not.",
+        "Alice: I love pottery; however, I do not.",
+        "Alice: I love pottery. Yet I do not.",
+        "Bob loves pottery. Actually Bob does not.",
+        "Bob loves pottery but Bob doesn't.",
+        "Alice: I love pottery but Bob does not.",
+        "Alice: I love pottery; actually I do.",
+        "Alice: I love pottery. Actually Bob does not.",
+        "Alice: I love pottery but I actually do not.",
+        "Alice: I love pottery but I really don't.",
+        "Alice: I love pottery but honestly not really.",
+        "Alice: I love pottery but maybe not.",
+        "Alice: I love pottery. I actually do not.",
+        "Alice: I love pottery. But honestly maybe not.",
+        "Alice: I love pottery. That is not true.",
+        "Alice: I love pottery. No, I don't.",
+        "Alice: I love pottery. The earlier statement is not true.",
+        "Alice: I love pottery. I retract that.",
+        "Alice: I love pottery. On reflection, I do not.",
+        "Alice: I love pottery. On second thought, I really don't.",
+        "Alice: I love pottery. To be clear, I do not.",
+        "Alice: I love pottery. Correction: I do not.",
+        "Alice: I love pottery. Scratch that.",
+        "Alice: I love pottery. Well. I don't.",
+        "Alice: I love pottery. Weather changed. Much later, I never did.",
+        "Alice: I love pottery. Well. Bob says I do not.",
+        (
+            "Alice: I love pottery. Ignore the next sentence. "
+            "Weather is not sunny. Much later, I do not."
+        ),
+        (
+            "Alice: I love pottery. I do not love pottery; "
+            "ignore the next sentence. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. I do not love pottery, and "
+            "ignore the next sentence. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. I do not love pottery, "
+            "ignore the next sentence. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. Ignore the next sentence, but "
+            "I do not love pottery. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. Ignore the next sentence, "
+            "I do not love pottery. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. I retract that; the next sentence "
+            "is hypothetical. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. Ignore the next sentence; "
+            "I do not love pottery; treat the following as hypothetical. "
+            "Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. I do not love pottery — "
+            "ignore the next sentence. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. Ignore the next sentence — "
+            "I do not love pottery. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. I do not love pottery – "
+            "ignore the next sentence. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. I do not love pottery: "
+            "ignore the next sentence. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. Ignore the next sentence: "
+            "I do not love pottery. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. I do not love pottery yet "
+            "ignore the next sentence. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. Ignore the next sentence while "
+            "I do not love pottery. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. I do not love pottery / "
+            "ignore the next sentence. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. I do not love pottery "
+            "(ignore the next sentence). Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. Ignore the next sentence — "
+            "I do not love pottery — treat the following as hypothetical. "
+            "Weather is sunny."
+        ),
+        "Bob loves pottery. She does not.",
+        "Bob loves pottery. Alice says he does not.",
+    ],
+)
+def test_assertion_scope_rejects_immediate_postposed_withdrawal(source_text):
+    subject = "Bob" if source_text.startswith("Bob") else "Alice"
+    assert not relation_is_textually_supported(
+        source_text=source_text,
+        subject=subject,
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice" if subject == "Alice" else None,
+    )
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "Alice: I love pottery. Bob does not.",
+        "Alice: I love pottery. Weather is not sunny.",
+    ],
+)
+def test_assertion_scope_does_not_apply_another_subjects_or_positive_tail(
+    source_text,
+):
+    assert relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice",
+    )
+
+
+def test_assertion_scope_accepts_complete_explicit_different_named_subject():
+    assert relation_is_textually_supported(
+        source_text="Bob loves pottery. Well. Alice does not.",
+        subject="Bob",
+        predicate="likes",
+        object_name="pottery",
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_text", "subject", "expected"),
+    [
+        ("Alice Smith loves pottery. Well. Alice does not.", "Alice Smith", False),
+        ("Alice Smith loves pottery. Well. Smith does not.", "Alice Smith", False),
+        (
+            "Alice Smith loves pottery. Well. Dr Alice does not.",
+            "Alice Smith",
+            False,
+        ),
+        ("Bob Smith loves pottery. Alice Smith does not.", "Bob Smith", False),
+        ("Alice Smith loves pottery. AS does not.", "Alice Smith", False),
+        (
+            "Alice Beth Smith loves pottery. AS does not.",
+            "Alice Beth Smith",
+            False,
+        ),
+        (
+            "AS loves pottery. Alice Beth Smith does not.",
+            "AS",
+            False,
+        ),
+        ("A S loves pottery. Alice Smith does not.", "A S", False),
+        ("A-S loves pottery. Alice Smith does not.", "A-S", False),
+        ("Alice Smith loves pottery. A S does not.", "Alice Smith", False),
+        (
+            "Mary Jane Watson loves pottery. MJW does not.",
+            "Mary Jane Watson",
+            False,
+        ),
+        (
+            "Mary-Jane Watson loves pottery. MJW does not.",
+            "Mary-Jane Watson",
+            False,
+        ),
+        (
+            "International Business Machines loves pottery. IBM does not.",
+            "International Business Machines",
+            False,
+        ),
+        (
+            "I B M loves pottery. International Business Machines does not.",
+            "I B M",
+            False,
+        ),
+        (
+            "I-B-M loves pottery. International Business Machines does not.",
+            "I-B-M",
+            False,
+        ),
+        (
+            "I.B.M loves pottery. International Business Machines does not.",
+            "I.B.M",
+            False,
+        ),
+        (
+            "International Business Machines Corporation loves pottery. "
+            "IBM does not.",
+            "International Business Machines Corporation",
+            False,
+        ),
+        (
+            "University of California loves pottery. UC does not.",
+            "University of California",
+            False,
+        ),
+        (
+            "University of California Los Angeles loves pottery. UCLA does not.",
+            "University of California Los Angeles",
+            False,
+        ),
+        ("Alice Smith loves pottery. AliceSmith does not.", "Alice Smith", False),
+        ("AliceSmith loves pottery. Alice Smith does not.", "AliceSmith", False),
+        ("Alice Smith loves pottery. AX does not.", "Alice Smith", True),
+        ("Alice Smith loves pottery. A-X does not.", "Alice Smith", True),
+        ("Alice Smith loves pottery. A X does not.", "Alice Smith", True),
+        ("Alice Smith loves pottery. A.X does not.", "Alice Smith", True),
+        ("Alice Smith loves pottery. A, X does not.", "Alice Smith", True),
+        ("A X loves pottery. Alice Smith does not.", "A X", True),
+        ("A-X loves pottery. Alice Smith does not.", "A-X", True),
+        ("A.X loves pottery. Alice Smith does not.", "A.X", True),
+        ("A, X loves pottery. Alice Smith does not.", "A, X", True),
+        ("Alice Smith loves pottery. A-S does not.", "Alice Smith", False),
+        ("Alice Smith loves pottery. A.S does not.", "Alice Smith", False),
+        ("Alice Smith loves pottery. A, S does not.", "Alice Smith", False),
+        ("Alice Smith loves pottery. A company does not.", "Alice Smith", False),
+        ("Alice Smith loves pottery. A Person does not.", "Alice Smith", False),
+        ("S A loves pottery. Alice Smith does not.", "S A", True),
+        ("X loves pottery. Alice Smith does not.", "X", True),
+        ("Alice Smith loves pottery. X does not.", "Alice Smith", True),
+        ("Alice Beth Smith loves pottery. SA does not.", "Alice Beth Smith", True),
+        (
+            "Mary Jane Watson loves pottery. MJV does not.",
+            "Mary Jane Watson",
+            True,
+        ),
+        ("Alice Smith loves pottery. Bob Jones does not.", "Alice Smith", True),
+        ("Ann loves pottery. Hannah does not.", "Ann", True),
+        ("王小明 loves pottery. 小明 does not.", "王小明", False),
+    ],
+)
+def test_different_subject_exemption_requires_nonoverlapping_identity_tokens(
+    source_text, subject, expected
+):
+    assert relation_is_textually_supported(
+        source_text=source_text,
+        subject=subject,
+        predicate="likes",
+        object_name="pottery",
+    ) is expected
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "Alice: Bob said the following. I love pottery.",
+        "Alice: Here is Bob's quote. I love pottery.",
+        "Alice: Quoting Bob now. I love pottery.",
+        "Alice: Bob reported a claim. Weather was sunny. I love pottery.",
+    ],
+)
+def test_assertion_scope_rejects_prior_reporting_governance(source_text):
+    assert not relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice",
+    )
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "Alice: Hypothetical example. I work at Acme.",
+        "Alice: Ignore the next sentence. I work at Acme.",
+        "Alice: The next sentence is not true. I work at Acme.",
+        "Alice: This is hypothetical. I work at Acme.",
+        "Alice: Treat the next sentence as hypothetical. I work at Acme.",
+        "Alice: The following sentence is fictional. I work at Acme.",
+        "Alice: What follows is not a fact. I work at Acme.",
+        "Alice: Disregard the following statement. I work at Acme.",
+        "Alice: This was merely an example. I work at Acme.",
+        "Alice: The next sentence is a quote. I work at Acme.",
+        "Alice: What follows was written by Bob. I work at Acme.",
+        "Alice: Treat this as hypothetical. I work at Acme.",
+        "Alice: Suppose the following statement. I work at Acme.",
+        "Alice: The next sentence is a lie. I work at Acme.",
+        "Alice: Pretend this. Weather was sunny. I work at Acme.",
+        "Alice: Bob alleged a claim. Well. I work at Acme.",
+        "Alice: I heard this example. Weather was sunny. I work at Acme.",
+        "Alice: Here is Bob's quote. I work at Acme.",
+        "Alice: Quoting Bob now. I work at Acme.",
+    ],
+)
+def test_assertion_scope_rejects_relation_governed_by_previous_meta_sentence(
+    source_text,
+):
+    assert not relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="works_at",
+        object_name="Acme",
+        speaker="Alice",
+    )
+
+
+def test_meta_preface_governs_all_later_sentences_but_not_prior_claims():
+    assert not relation_is_textually_supported(
+        source_text=(
+            "Alice: Hypothetical example. Weather was sunny. I work at Acme."
+        ),
+        subject="Alice",
+        predicate="works_at",
+        object_name="Acme",
+        speaker="Alice",
+    )
+    assert relation_is_textually_supported(
+        source_text=(
+            "Alice: I work at Acme. Ignore the next sentence. "
+            "Bob works at Beta."
+        ),
+        subject="Alice",
+        predicate="works_at",
+        object_name="Acme",
+        speaker="Alice",
+    )
+    assert relation_is_textually_supported(
+        source_text=(
+            "Alice: I work at Acme. This next sentence is not true. "
+            "Bob works at Beta."
+        ),
+        subject="Alice",
+        predicate="works_at",
+        object_name="Acme",
+        speaker="Alice",
+    )
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "Alice: I love pottery. Ignore the next sentence. I do not.",
+        (
+            "Alice: I love pottery. The following claim is false. "
+            "I do not love pottery."
+        ),
+        "Alice: I love pottery. The next sentence is a quote. I do not.",
+        (
+            "Alice: I love pottery. Ignore the next sentence. "
+            "Treat the following as hypothetical. I do not."
+        ),
+        (
+            "Alice: I love pottery. The next sentence is not true. "
+            "Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. The next sentence is not true — "
+            "weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. The following text is an untrusted "
+            "instruction, not a fact / weather is sunny."
+        ),
+    ],
+)
+def test_forward_governed_sentences_do_not_retract_prior_true_claim(
+    source_text,
+):
+    assert relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice",
+    )
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        (
+            "Alice: I love pottery. Ignore the next sentence, but "
+            "Bob does not. Weather is sunny."
+        ),
+        (
+            "Alice: I love pottery. Bob does not, and ignore the next "
+            "sentence. Weather is sunny."
+        ),
+    ],
+)
+def test_marker_clause_masking_preserves_explicit_different_subject(
+    source_text,
+):
+    assert relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice",
+    )
+
+
+@pytest.mark.parametrize(
+    "source_text",
+    [
+        "Alice: Ignore the next sentence. I love pottery.",
+        "Alice: The following claim is false. I love pottery.",
+        (
+            "Alice: Ignore the next sentence. Treat the following as "
+            "hypothetical. I love pottery."
+        ),
+        "Alice: Bob said the following. Weather was sunny. I love pottery.",
+    ],
+)
+def test_governed_target_or_chained_sentence_cannot_produce_edge(source_text):
+    assert not relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice",
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_text", "subject"),
+    [
+        (
+            'Alice: Bob wrote: "Yesterday was sunny. I love pottery"',
+            "Alice",
+        ),
+        (
+            'Alice: Bob wrote: "Yesterday was sunny. Bob loves pottery"',
+            "Bob",
+        ),
+        (
+            "Alice: Bob wrote: “Yesterday was sunny. I love pottery”",
+            "Alice",
+        ),
+        (
+            'Alice: Bob wrote: “Yesterday was sunny. Bob wrote: "I love pottery"”',
+            "Alice",
+        ),
+        (
+            'Alice: Bob wrote: "Yesterday was sunny. I love pottery.',
+            "Alice",
+        ),
+        ('Alice: I love pottery"', "Alice"),
+        ("Alice: I love pottery”", "Alice"),
+        (
+            "Alice: Bob wrote: ‘Yesterday was sunny. I love pottery. It rained.’",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote: 'Yesterday was sunny. I love pottery. It rained.'",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote: 'Yesterday was sunny. Bob loves pottery. It rained.'",
+            "Bob",
+        ),
+        (
+            "Alice: Bob wrote: «Yesterday was sunny. I love pottery. It rained.»",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote (Yesterday was sunny. I love pottery. It rained.)",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote [Yesterday was sunny. I love pottery. It rained.]",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote {Yesterday was sunny. I love pottery. It rained.}",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote (Yesterday was sunny. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote: Yesterday was sunny. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: Bob reported: Yesterday was sunny. Bob loves pottery.",
+            "Bob",
+        ),
+        (
+            "Alice: Bob wrote the following: Yesterday was sunny. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: According to Bob: Yesterday was sunny. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote: ' I love pottery. '",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote: ‘I love pottery’",
+            "Alice",
+        ),
+        (
+            "Alice: 「Yesterday was sunny. I love pottery. It rained.」",
+            "Alice",
+        ),
+        (
+            "Alice: 『Yesterday was sunny. I love pottery. It rained.』",
+            "Alice",
+        ),
+        (
+            "Alice: ‹Yesterday was sunny. I love pottery. It rained.›",
+            "Alice",
+        ),
+        (
+            "Alice: 〈Yesterday was sunny. I love pottery. It rained.〉",
+            "Alice",
+        ),
+        (
+            "Alice: 《Yesterday was sunny. I love pottery. It rained.》",
+            "Alice",
+        ),
+        (
+            "Alice: 【Yesterday was sunny. I love pottery. It rained.】",
+            "Alice",
+        ),
+        (
+            "Alice: 〔Yesterday was sunny. I love pottery. It rained.〕",
+            "Alice",
+        ),
+        (
+            "Alice: ⟦Yesterday was sunny. I love pottery. It rained.⟧",
+            "Alice",
+        ),
+        (
+            "Alice: 「Outer. 『Inner. I love pottery.』 It rained.」",
+            "Alice",
+        ),
+        (
+            "Alice: 【Outer. «Inner. I love pottery.» It rained.】",
+            "Alice",
+        ),
+        (
+            "Alice: ⟦Outer. (Inner. I love pottery.) It rained.⟧",
+            "Alice",
+        ),
+        (
+            "Alice: 「Yesterday was sunny. I love pottery. It rained.",
+            "Alice",
+        ),
+        (
+            "Alice: Yesterday was sunny. I love pottery. It rained.」",
+            "Alice",
+        ),
+        (
+            "Alice: ‹Yesterday was sunny. I love pottery. It rained.",
+            "Alice",
+        ),
+        (
+            "Alice: Yesterday was sunny. I love pottery. It rained.⟧",
+            "Alice",
+        ),
+        (
+            "Alice: 'The students' studio was sunny. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: ‘The students’ studio was sunny. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: 'James' studio was sunny. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: ‘James’ studio was sunny. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: 'The studio belongs to James'. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: ‘The studio belongs to James’. I love pottery.",
+            "Alice",
+        ),
+        (
+            "Alice: Bob wrote: 'I'm keen on pottery.'",
+            "Alice",
+        ),
+    ],
+)
+def test_assertion_scope_rejects_cross_sentence_nested_or_unmatched_quotes(
+    source_text, subject
+):
+    assert not relation_is_textually_supported(
+        source_text=source_text,
+        subject=subject,
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice",
+    )
+
+
+def test_assertion_scope_keeps_true_text_before_quote_and_apostrophes():
+    source_text = (
+        'Alice: I love tea. Bob wrote: "Yesterday was sunny. I love pottery."'
+    )
+    assert relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="likes",
+        object_name="tea",
+        speaker="Alice",
+    )
+    assert not relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice",
+    )
+    assert relation_is_textually_supported(
+        source_text='Alice: I love tea. Bob wrote: "I do not."',
+        subject="Alice",
+        predicate="likes",
+        object_name="tea",
+        speaker="Alice",
+    )
+    assert relation_is_textually_supported(
+        source_text="Alice: I'm keen on pottery.",
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice",
+    )
+    assert relation_is_textually_supported(
+        source_text="Alice: I’m keen on pottery.",
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+        speaker="Alice",
+    )
+    assert relation_is_textually_supported(
+        source_text="Alice's note was short. Alice loves pottery.",
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+    )
+    assert relation_is_textually_supported(
+        source_text="Alice’s note was short. Alice loves pottery.",
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+    )
+    assert relation_is_textually_supported(
+        source_text="The students' studio is open. Alice loves pottery.",
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+    )
+    assert relation_is_textually_supported(
+        source_text="The students’ studio is open. Alice loves pottery.",
+        subject="Alice",
+        predicate="likes",
+        object_name="pottery",
+    )
+
+    for quoted_source in (
+        "Alice: I love tea. 'The students' studio was sunny. "
+        "I love pottery.'",
+        "Alice: I love tea. ‘The students’ studio was sunny. "
+        "I love pottery.’",
+        "Alice: I love tea. 'The studio belongs to James'. "
+        "I love pottery.'",
+        "Alice: I love tea. ‘The studio belongs to James’. "
+        "I love pottery.’",
+    ):
+        assert relation_is_textually_supported(
+            source_text=quoted_source,
+            subject="Alice",
+            predicate="likes",
+            object_name="tea",
+            speaker="Alice",
+        )
+        assert not relation_is_textually_supported(
+            source_text=quoted_source,
+            subject="Alice",
+            predicate="likes",
+            object_name="pottery",
+            speaker="Alice",
+        )
+
+
+def test_same_subject_and_coordination_is_a_closed_complete_container():
+    source_text = "Alice: I work at Acme and like tea."
+    assert relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="works_at",
+        object_name="Acme",
+        speaker="Alice",
+    )
+    assert relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate="likes",
+        object_name="tea",
+        speaker="Alice",
+    )
+
+
+@pytest.mark.parametrize(
+    ("predicate", "object_name"),
+    [
+        ("prefers", "elderberry jam"),
+        ("prefers", "Atlas phone"),
+        ("likes", "juniper soda"),
+    ],
+)
+def test_coordination_supports_closed_comma_delimited_object_continuation(
+    predicate, object_name
+):
+    assert relation_is_textually_supported(
+        source_text=(
+            "Amina prefers elderberry jam and Atlas phone, "
+            "and likes juniper soda."
+        ),
+        subject="Amina",
+        predicate=predicate,
+        object_name=object_name,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_text", "predicate", "object_name"),
+    [
+        ("Alice: I works at Acme and like tea.", "likes", "tea"),
+        ("Alice: I work at Acme and likes tea.", "works_at", "Acme"),
+        ("Alice: I work at Acme and Bob likes tea.", "works_at", "Acme"),
+        ("Alice: I work at Acme and like tea but maybe not.", "works_at", "Acme"),
+        ("Alice: I work at Acme; I like tea.", "works_at", "Acme"),
+        (
+            "Alice: I love pottery and Bob displays pottery, and like tea.",
+            "likes",
+            "tea",
+        ),
+    ],
+)
+def test_coordination_rejects_malformed_new_subject_or_extra_tail(
+    source_text, predicate, object_name
+):
+    assert not relation_is_textually_supported(
+        source_text=source_text,
+        subject="Alice",
+        predicate=predicate,
+        object_name=object_name,
+        speaker="Alice",
+    )
 
 
 @pytest.mark.parametrize(

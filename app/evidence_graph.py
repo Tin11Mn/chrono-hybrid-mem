@@ -111,9 +111,15 @@ class GraphRelation:
     supersedes_edge_id: Optional[str]
     created_at: str
     explicit: bool = True
+    # Internal provenance carrier.  It is deliberately omitted from the
+    # serialized public graph contract; storage persists and independently
+    # validates it before an edge can be traversed.
+    support_witness: Optional[SupportWitness] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        result = asdict(self)
+        result.pop("support_witness", None)
+        return result
 
 
 @dataclass(frozen=True)
@@ -618,28 +624,103 @@ _TIME_PRELUDE_PATTERN = (
 _FIRST_PERSON_SUBJECTS = frozenset(
     {"i", "i'm", "i’m", "i've", "i’ve", "i'd", "i’d"}
 )
-_PAST_PARTICIPLE_CUES = frozenset(
-    {
-        "worked", "employed", "lived", "located", "based", "situated",
-        "liked", "loved", "enjoyed", "preferred", "disliked", "hated",
-        "participated", "attended", "joined", "owned", "possessed",
-        "created", "made", "built", "written", "designed", "composed",
-        "produced", "required", "prohibited", "forbade", "permitted",
-        "allowed", "changed", "switched", "transitioned", "replaced",
-    }
-)
+_FIRST_PERSON_I_PREDICATE_FRAMES: Mapping[str, Tuple[str, ...]] = {
+    "friend_of": (r"(?:am|was)\s+(?:a\s+)?friend\s+of",),
+    "parent_of": (r"(?:am|was)\s+(?:a\s+)?(?:parent|mother|father)\s+of",),
+    "sibling_of": (r"(?:am|was)\s+(?:a\s+)?(?:sibling|brother|sister)\s+of",),
+    "partner_of": (r"(?:am|was)\s+(?:a\s+)?(?:partner|spouse|husband|wife)\s+of",),
+    "works_at": (
+        r"(?:work|worked)\s+(?:at|for)",
+        r"(?:am|was)\s+employed\s+by",
+        r"(?:work|worked)\s+as\s+{}\s+at".format(
+            _role_np_frame_pattern()
+        ),
+    ),
+    "role_at": (
+        r"(?:have|had|hold|held)\s+(?:an?\s+|the\s+)?(?:formal\s+)?(?:role|position)\s+at",
+        r"(?:serve|served)\s+(?:in\s+)?{}\s+at".format(
+            _role_np_frame_pattern()
+        ),
+    ),
+    "lives_in": (r"(?:live|lived)\s+in", r"moved\s+from"),
+    "located_in": (r"(?:am|was)\s+(?:located|based|situated)\s+in",),
+    "likes": (
+        r"(?:like|liked|love|loved|enjoy|enjoyed)",
+        r"(?:am|was)\s+(?:keen\s+on|fond\s+of)",
+        r"(?:have|had)\s+(?:always\s+)?(?:had\s+)?(?:a\s+)?love\s+(?:of|for)",
+    ),
+    "prefers": (r"(?:prefer|preferred)",),
+    "dislikes": (r"(?:dislike|disliked|hate|hated)",),
+    "member_of": (
+        r"(?:am|was|became)\s+(?:a\s+)?member\s+of",
+        r"(?:belong|belonged)\s+to",
+        r"(?:join|joined)",
+        r"(?:am|was)\s+no\s+longer\s+(?:a\s+)?member\s+of",
+    ),
+    "participated_in": (
+        r"(?:participate|participated)\s+in",
+        r"(?:take|took)\s+part\s+in",
+        r"(?:attend|attended)",
+        r"(?:join|joined)",
+        r"went\s+to",
+    ),
+    "owns": (r"(?:own|owned|possess|possessed)",),
+    "created": (
+        r"(?:create|created|make|made|build|built|write|wrote|design|designed|"
+        r"compose|composed|produce|produced)",
+    ),
+    "requires": (r"(?:explicitly\s+)?(?:require|required)",),
+    "prohibits": (
+        r"(?:explicitly\s+)?(?:prohibit|prohibited|forbid|forbade)",
+    ),
+    "permits": (
+        r"(?:explicitly\s+)?(?:permit|permitted|allow|allowed)",
+    ),
+    "changed_to": (
+        r"(?:change|changed|switch|switched|transition|transitioned)\s+to",
+        r"became",
+    ),
+    "replaces": (r"(?:replace|replaced)",),
+}
+
+_FIRST_PERSON_PERFECT_PREDICATE_FRAMES: Mapping[str, Tuple[str, ...]] = {
+    "friend_of": (),
+    "parent_of": (),
+    "sibling_of": (),
+    "partner_of": (),
+    "works_at": (r"worked\s+(?:at|for)", r"employed\s+by"),
+    "role_at": (
+        r"(?:had|held)\s+(?:an?\s+|the\s+)?(?:formal\s+)?(?:role|position)\s+at",
+        r"served\s+(?:in\s+)?{}\s+at".format(_role_np_frame_pattern()),
+    ),
+    "lives_in": (r"lived\s+in", r"moved\s+from"),
+    "located_in": (),
+    "likes": (
+        r"(?:liked|loved|enjoyed)",
+        r"had\s+(?:always\s+)?(?:had\s+)?(?:a\s+)?love\s+(?:of|for)",
+    ),
+    "prefers": (r"preferred",),
+    "dislikes": (r"(?:disliked|hated)",),
+    "member_of": (r"(?:belonged\s+to|joined)",),
+    "participated_in": (
+        r"participated\s+in", r"taken\s+part\s+in", r"attended", r"joined",
+    ),
+    "owns": (r"(?:owned|possessed)",),
+    "created": (
+        r"(?:created|made|built|written|designed|composed|produced)",
+    ),
+    "requires": (r"(?:explicitly\s+)?required",),
+    "prohibits": (r"(?:explicitly\s+)?prohibited",),
+    "permits": (r"(?:explicitly\s+)?(?:permitted|allowed)",),
+    "changed_to": (r"(?:changed|switched|transitioned)\s+to",),
+    "replaces": (r"replaced",),
+}
 
 _UNSUPPORTED_CLAIM_PATTERN = re.compile(
     r"\b(ignore|invent|pretend|fabricate|hypothetical|fictional|not a fact|"
     r"not true|false claim|untrusted instruction|example only|merely an example)\b",
     flags=re.IGNORECASE,
 )
-
-_ATOMIC_RELATION_SEPARATOR = re.compile(
-    r"\b(?:but|whereas|however|although|while|yet)\b",
-    flags=re.IGNORECASE,
-)
-
 
 def _entity_spans(text: str, normalized_name: str) -> Tuple[Tuple[int, int], ...]:
     """Find exact entity mentions without Latin partial-name matches."""
@@ -732,6 +813,740 @@ def _normalized_sentences(source_text: str) -> Tuple[Tuple[str, int], ...]:
     return tuple(result)
 
 
+def _surface_sentences(source_text: str) -> Tuple[str, ...]:
+    surface = unicodedata.normalize("NFKC", source_text)
+    surface = re.sub(r"[\t\r\f\v ]+", " ", surface)
+    surface = re.sub(r"\s*\n\s*", "\n", surface).strip()
+    return tuple(
+        " ".join(part.split())
+        for part in re.split(r"(?<=[.!?。！？])\s+|\n+", surface)
+        if part.strip()
+    )
+
+
+def _lexical_word_character(character: str) -> bool:
+    return bool(character) and (character.isalnum() or character == "_")
+
+
+_REPORTING_COLON_PATTERN = re.compile(
+    r"\b(?:said|says|wrote|writes|reported|reports|claimed|claims|"
+    r"asked|asks|replied|replies|noted|notes|stated|states)\b"
+    r"[^:;.!?。！？]{0,80}:|\baccording\s+to\b[^:;.!?。！？]{1,80}:"
+)
+
+
+def _untrusted_source_spans(normalized_source: str) -> Tuple[Tuple[int, int], ...]:
+    """Return lexical quote, bracket, and attributed-reporting scopes.
+
+    The stack spans sentence boundaries.  Straight/smart apostrophes inside a
+    word (and postfix possessives without an opening quote) remain lexical,
+    while paired single quotes are treated exactly like double quotes.  Any
+    unmatched opening delimiter governs the rest of the message fail-closed.
+    """
+
+    paired_openings = {
+        "“": "”",
+        "„": "”",
+        "‘": "’",
+        "‚": "’",
+        "«": "»",
+        "(": ")",
+        "[": "]",
+        "{": "}",
+    }
+    paired_closings = frozenset(paired_openings.values())
+    symmetric = frozenset({'"', "'"})
+    opening_to_closing_category = {"Pi": "Pf", "Ps": "Pe"}
+    closing_categories = frozenset(opening_to_closing_category.values())
+    # Each stack item carries an exact closer when the pair is known.  Unicode
+    # delimiters outside the small ASCII/smart-punctuation pair table instead
+    # carry only the matching closing category.  LIFO category matching keeps
+    # arbitrary Pi/Pf and Ps/Pe nesting scoped across sentence boundaries.
+    stack: list[tuple[Optional[str], Optional[str], int]] = []
+    spans = []
+
+    for index, character in enumerate(normalized_source):
+        previous = normalized_source[index - 1] if index else ""
+        following = (
+            normalized_source[index + 1]
+            if index + 1 < len(normalized_source)
+            else ""
+        )
+        previous_is_word = _lexical_word_character(previous)
+        following_is_word = _lexical_word_character(following)
+        category = unicodedata.category(character)
+
+        if character in {"'", "’"} and previous_is_word:
+            matching_single_quote = bool(
+                stack and stack[-1][0] == character
+            )
+            if following_is_word:
+                # Word-internal contractions and possessives: I'm, don't,
+                # Alice's.  A matching outer quote remains on the stack.
+                continue
+            if matching_single_quote and previous.casefold() == "s":
+                # A terminal/postfix plural or s-ending-name possessive inside
+                # a single-quoted scope is lexically indistinguishable from a
+                # closer.  Keeping the opener active is fail-closed: a real
+                # closer may conservatively govern extra prose, whereas a
+                # possessive can never terminate the untrusted container.
+                continue
+            remainder = normalized_source[index + 1 :]
+            next_nonspace = remainder.lstrip()[:1]
+            if (
+                following.isspace()
+                and _lexical_word_character(next_nonspace)
+            ):
+                # Postfix possessives such as ``students' studio`` remain
+                # lexical even inside a single-quoted container.  Treating the
+                # possessive as the outer closer could expose every later
+                # sentence when the real quote is missing.  If this was
+                # instead a close followed by ordinary prose, retaining the
+                # opener to message end is the conservative outcome.
+                continue
+
+        if character in symmetric:
+            if stack and stack[-1][0] == character:
+                _, _, start = stack.pop()
+                spans.append((start, index + 1))
+            elif following or following_is_word:
+                stack.append((character, None, index))
+            else:
+                # A closing delimiter without a trustworthy opener makes the
+                # preceding source ambiguous; mask the prefix fail-closed.
+                spans.append((0, index + 1))
+            continue
+
+        if character in paired_openings:
+            expected_character = paired_openings[character]
+            stack.append(
+                (
+                    expected_character,
+                    unicodedata.category(expected_character),
+                    index,
+                )
+            )
+            continue
+        if category in opening_to_closing_category:
+            stack.append((None, opening_to_closing_category[category], index))
+            continue
+        if character in paired_closings or category in closing_categories:
+            exact_match = bool(stack and stack[-1][0] == character)
+            category_match = bool(
+                stack
+                and stack[-1][0] is None
+                and stack[-1][1] == category
+            )
+            if exact_match or category_match:
+                _, _, start = stack.pop()
+                spans.append((start, index + 1))
+            else:
+                # Do not search down through a mismatched nesting level: both
+                # the unmatched closer's prefix and any still-open scopes are
+                # untrusted.  This prevents a malformed close from exposing a
+                # complete middle sentence as an assertion.
+                spans.append((0, index + 1))
+
+    spans.extend((start, len(normalized_source)) for _, _, start in stack)
+    # ``Bob wrote: ...`` without a lexical delimiter is still a closed
+    # attributed scope.  It lasts to message end because no trusted boundary
+    # tells us where the reported material stops.
+    for match in _REPORTING_COLON_PATTERN.finditer(normalized_source):
+        remainder = normalized_source[match.end():].lstrip()
+        if remainder and (
+            remainder[0] in symmetric
+            or remainder[0] in paired_openings
+            or unicodedata.category(remainder[0])
+            in opening_to_closing_category
+        ):
+            continue
+        spans.append((match.end() - 1, len(normalized_source)))
+    if not spans:
+        return ()
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+_PRIOR_GOVERNANCE_MARKER_PATTERN = re.compile(
+    r"\b(?:report(?:s|ed|ing)?|say|says|said|saying|write|writes|wrote|"
+    r"written|writing|quote|quotes|quoted|quoting|quotation|claim|claims|"
+    r"claimed|claiming|allege|alleges|alleged|alleging|tell|tells|told|"
+    r"telling|ask|asks|asked|asking|hear|hears|heard|hearing|read|reads|"
+    r"reading|suppose|supposes|supposed|supposing|pretend|pretends|"
+    r"pretended|pretending|imagine|imagines|imagined|imagining|treat|"
+    r"treats|treated|treating|ignore|ignores|ignored|ignoring|disregard|"
+    r"disregards|disregarded|disregarding|hypothetical|fiction|fictional|"
+    r"lie|lies|lied|lying|false|untrue|example|examples|scenario|scenarios|"
+    r"fabricate|fabricates|fabricated|fabricating|invent|invents|invented|"
+    r"inventing|attribut(?:e|es|ed|ing)|according|correction|"
+    r"made[\s-]+up|not\s+(?:a\s+)?fact|not\s+factual|not\s+true)\b"
+)
+
+
+def _spans_overlap(
+    left: Tuple[int, int], right: Tuple[int, int]
+) -> bool:
+    return left[0] < right[1] and right[0] < left[1]
+
+
+def _sentence_index_for_witness(
+    *,
+    witness: SupportWitness,
+    sentences: Sequence[Tuple[str, int]],
+) -> Optional[int]:
+    for index, (sentence, start) in enumerate(sentences):
+        if start <= witness.source_span[0] < start + len(sentence):
+            return index
+    return None
+
+
+def _top_level_sentence_body(
+    *,
+    sentence: str,
+    sentence_start: int,
+    untrusted_spans: Sequence[Tuple[int, int]],
+    normalized_speaker: Optional[str],
+) -> str:
+    masked = _sentence_with_masked_spans(
+        sentence=sentence,
+        sentence_start=sentence_start,
+        spans=untrusted_spans,
+    )
+    body = " ".join(masked.split())
+    body, _ = _strip_speaker_prefix(body, normalized_speaker)
+    return body
+
+
+def _sentence_with_masked_spans(
+    *,
+    sentence: str,
+    sentence_start: int,
+    spans: Sequence[Tuple[int, int]],
+) -> str:
+    characters = list(sentence)
+    sentence_end = sentence_start + len(sentence)
+    for span_start, span_end in spans:
+        overlap_start = max(sentence_start, span_start)
+        overlap_end = min(sentence_end, span_end)
+        if overlap_start >= overlap_end:
+            continue
+        local_start = overlap_start - sentence_start
+        local_end = overlap_end - sentence_start
+        characters[local_start:local_end] = " " * (local_end - local_start)
+    return "".join(characters)
+
+
+_TOKEN_NEGATOR_PATTERN = re.compile(
+    r"(?<![\w])(?:not|no|never)(?![\w])|n['’]t\b"
+)
+_RETRACTION_OR_FALSE_PATTERN = re.compile(
+    r"\bretract(?:ed|s|ing)?\b|"
+    r"\b(?:take|takes|took)\b[^.!?。！？]{0,32}\bback\b|"
+    r"\b(?:withdraw(?:n|s|ing)?|recant(?:ed|s|ing)?|revoke(?:d|s|ing)?|"
+    r"disavow(?:ed|s|ing)?|scratch(?:ed|es|ing)?|correction|correcting|"
+    r"false|untrue|wrong|lie|fiction(?:al)?|made[\s-]+up|"
+    r"not\s+(?:a\s+)?fact|not\s+true)\b"
+)
+_SCOPE_WORD_PATTERN = re.compile(r"[^\W_]+(?:['’][^\W_]+)?", re.UNICODE)
+_FORWARD_TRIGGER_TOKEN_PATTERN = re.compile(
+    r"(?:report(?:s|ed|ing)?|say|says|said|saying|write|writes|wrote|"
+    r"written|writing|quote|quotes|quoted|quoting|quotation|claim|claims|"
+    r"claimed|claiming|allege|alleges|alleged|alleging|tell|tells|told|"
+    r"telling|ask|asks|asked|asking|hear|hears|heard|hearing|read|reads|"
+    r"reading|suppose|supposes|supposed|supposing|pretend|pretends|"
+    r"pretended|pretending|imagine|imagines|imagined|imagining|treat|"
+    r"treats|treated|treating|ignore|ignores|ignored|ignoring|disregard|"
+    r"disregards|disregarded|disregarding|hypothetical|example|examples|"
+    r"scenario|scenarios|fabricate|fabricates|fabricated|fabricating|"
+    r"invent|invents|invented|inventing|attribut(?:e|es|ed|ing)|according)"
+)
+_FORWARD_TARGET_NOUNS = frozenset(
+    {
+        "claim",
+        "example",
+        "instruction",
+        "passage",
+        "sentence",
+        "statement",
+        "text",
+    }
+)
+_FORWARD_SCAFFOLD_TAIL_TOKENS = frozenset(
+    {
+        "a",
+        "allegedly",
+        "an",
+        "are",
+        "as",
+        "attributed",
+        "be",
+        "being",
+        "by",
+        "false",
+        "fact",
+        "factual",
+        "fiction",
+        "fictional",
+        "from",
+        "hypothetical",
+        "is",
+        "lie",
+        "made",
+        "merely",
+        "not",
+        "only",
+        "quote",
+        "quoted",
+        "reported",
+        "said",
+        "the",
+        "true",
+        "untrusted",
+        "up",
+        "was",
+        "were",
+        "will",
+        "written",
+    }
+).union(_FORWARD_TARGET_NOUNS)
+_FIRST_PERSON_ANAPHORA_PATTERN = re.compile(
+    r"\b(?:i|me|my|mine|myself|we|us|our|ours|ourselves)\b"
+)
+_GENERAL_ANAPHORA_PATTERN = re.compile(
+    r"\b(?:i|me|my|mine|myself|we|us|our|ours|ourselves|he|him|his|"
+    r"himself|she|her|hers|herself|they|them|their|theirs|themselves|"
+    r"it|its|itself|this|that|these|those|former|latter)\b"
+)
+_EXPLICIT_NEGATIVE_REMAINDER_PATTERN = re.compile(
+    r"^(?:[^\W_][\w'’\-]*[\s,]+){0,3}(?:"
+    r"(?:do|does|did|am|is|are|was|were|have|has|had|can|could|will|"
+    r"would|should|must)\s+(?:[^\W_][\w'’\-]*\s+){0,2}not\b|"
+    r"(?:don['’]t|doesn['’]t|didn['’]t|isn['’]t|aren['’]t|wasn['’]t|"
+    r"weren['’]t|haven['’]t|hasn['’]t|hadn['’]t|can['’]t|couldn['’]t|"
+    r"won['’]t|wouldn['’]t|shouldn['’]t|mustn['’]t)\b|never\b|"
+    r"(?:have|has|had)\s+no\b)"
+)
+_INITIALS_SURFACE_SUBJECT_PATTERN = re.compile(
+    r"^(?P<name>[A-Z](?![\w])(?:(?:\s*[.,-]\s*|\s+)[A-Z](?![\w]))+)"
+)
+_NAME_HONORIFICS = frozenset(
+    {
+        "capt",
+        "captain",
+        "dame",
+        "dr",
+        "lady",
+        "lord",
+        "miss",
+        "mr",
+        "mrs",
+        "ms",
+        "prof",
+        "professor",
+        "rev",
+        "reverend",
+        "sir",
+    }
+)
+_NAME_SUFFIXES = frozenset({"ii", "iii", "iv", "jr", "sr"})
+
+
+def _substantive_name_tokens(normalized_name: str) -> Tuple[str, ...]:
+    tokens = re.findall(r"[^\W_]+", normalized_name, flags=re.UNICODE)
+    while tokens and tokens[0] in _NAME_HONORIFICS:
+        tokens.pop(0)
+    while tokens and tokens[-1] in _NAME_SUFFIXES:
+        tokens.pop()
+    return tuple(tokens)
+
+
+def _names_have_identity_overlap(left: str, right: str) -> bool:
+    """Conservatively detect full, partial, or alias-like name overlap."""
+
+    left_tokens = _substantive_name_tokens(left)
+    right_tokens = _substantive_name_tokens(right)
+    if not left_tokens or not right_tokens:
+        return True
+    if set(left_tokens).intersection(right_tokens):
+        return True
+    # Ordinary multi-character prefix abbreviations cannot prove a new identity.
+    if any(
+        (
+            len(right_token) >= 2
+            and left_token.startswith(right_token)
+        )
+        or (
+            len(left_token) >= 2
+            and right_token.startswith(left_token)
+        )
+        for left_token in left_tokens
+        for right_token in right_tokens
+    ):
+        return True
+
+    left_compact = "".join(left_tokens)
+    right_compact = "".join(right_tokens)
+    if left_compact == right_compact:
+        return True
+
+    left_acronym = "".join(token[0] for token in left_tokens)
+    right_acronym = "".join(token[0] for token in right_tokens)
+
+    def acronym_abbreviation(tokens: Tuple[str, ...]) -> Optional[str]:
+        if len(tokens) == 1 and len(tokens[0]) >= 2:
+            return tokens[0]
+        if len(tokens) >= 2 and all(len(token) == 1 for token in tokens):
+            return "".join(tokens)
+        return None
+
+    def acronym_is_ordered_subsequence(
+        abbreviation: str, full_initials: str
+    ) -> bool:
+        if len(abbreviation) < 2 or len(abbreviation) > len(full_initials):
+            return False
+        abbreviation_index = 0
+        for initial in full_initials:
+            if abbreviation[abbreviation_index] == initial:
+                abbreviation_index += 1
+                if abbreviation_index == len(abbreviation):
+                    return True
+        return False
+
+    left_abbreviation = acronym_abbreviation(left_tokens)
+    right_abbreviation = acronym_abbreviation(right_tokens)
+    if (
+        left_abbreviation is not None
+        and len(right_tokens) >= 2
+        and acronym_is_ordered_subsequence(
+            left_abbreviation, right_acronym
+        )
+    ) or (
+        right_abbreviation is not None
+        and len(left_tokens) >= 2
+        and acronym_is_ordered_subsequence(
+            right_abbreviation, left_acronym
+        )
+    ):
+        return True
+
+    has_unsegmented_non_latin = (
+        (" " not in left and any(ord(character) > 127 for character in left))
+        or (" " not in right and any(ord(character) > 127 for character in right))
+    )
+    if has_unsegmented_non_latin and (
+        left_compact in right_compact or right_compact in left_compact
+    ):
+        return True
+    return False
+
+
+def _forward_marker_scaffold_spans(
+    sentence: str,
+) -> Tuple[Tuple[int, int], ...]:
+    """Locate minimal forward-governance token scaffolds in one sentence."""
+
+    tokens = tuple(
+        (match.group(0), match.start(), match.end())
+        for match in _SCOPE_WORD_PATTERN.finditer(sentence)
+    )
+    if not tokens:
+        return ()
+
+    def is_trigger(index: int) -> bool:
+        return bool(
+            _FORWARD_TRIGGER_TOKEN_PATTERN.fullmatch(tokens[index][0])
+        )
+
+    def prior_trigger(target_index: int) -> Optional[int]:
+        for index in range(target_index - 1, max(-1, target_index - 8), -1):
+            token = tokens[index][0]
+            if token in {"not", "no", "never"} or token.endswith("n't"):
+                break
+            if is_trigger(index):
+                return index
+        return None
+
+    spans = []
+    for index, (token, _, _) in enumerate(tokens):
+        target_end = None
+        if (
+            token in {"next", "following"}
+            and index + 1 < len(tokens)
+            and tokens[index + 1][0] in _FORWARD_TARGET_NOUNS
+        ):
+            target_end = index + 1
+        elif (
+            token == "what"
+            and index + 1 < len(tokens)
+            and tokens[index + 1][0] == "follows"
+        ):
+            target_end = index + 1
+        elif token in {"this", "that", "following"}:
+            trigger_index = prior_trigger(index)
+            if trigger_index is not None:
+                target_end = index
+        if target_end is None:
+            continue
+
+        trigger_index = prior_trigger(index)
+        scaffold_start = trigger_index if trigger_index is not None else index
+        scaffold_end = target_end
+        while (
+            scaffold_end + 1 < len(tokens)
+            and tokens[scaffold_end + 1][0]
+            in _FORWARD_SCAFFOLD_TAIL_TOKENS
+        ):
+            scaffold_end += 1
+        spans.append(
+            (tokens[scaffold_start][1], tokens[scaffold_end][2])
+        )
+
+    has_backward_signal = bool(
+        _TOKEN_NEGATOR_PATTERN.search(sentence)
+        or _RETRACTION_OR_FALSE_PATTERN.search(sentence)
+    )
+    if not spans and not has_backward_signal:
+        spans.extend(
+            (start, end)
+            for token, start, end in tokens
+            if _FORWARD_TRIGGER_TOKEN_PATTERN.fullmatch(token)
+        )
+
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _sentence_scope_indexes(
+    *,
+    sentences: Sequence[Tuple[str, int]],
+    untrusted_spans: Sequence[Tuple[int, int]],
+    normalized_speaker: Optional[str],
+) -> Tuple[
+    frozenset[int],
+    frozenset[int],
+    Tuple[Tuple[Tuple[int, int], ...], ...],
+]:
+    """Return broad markers, governed targets, and forward clause spans.
+
+    A broad marker blocks witnesses in every later sentence, matching the
+    all-prior positive-grammar contract.  A forward marker clause cannot act
+    as a backward withdrawal and governs its complete immediate target.  Any
+    independent material outside that clause remains eligible to withdraw an
+    earlier assertion.  Chained forward markers each govern their own target.
+    """
+
+    marker_indexes = set()
+    governed_target_indexes = set()
+    marker_spans_by_sentence = [[] for _ in sentences]
+    for index, (sentence, start) in enumerate(sentences):
+        masked_sentence = _sentence_with_masked_spans(
+            sentence=sentence,
+            sentence_start=start,
+            spans=untrusted_spans,
+        )
+        body = " ".join(masked_sentence.split())
+        if _PRIOR_GOVERNANCE_MARKER_PATTERN.search(body):
+            marker_indexes.add(index)
+        for scaffold_start, scaffold_end in _forward_marker_scaffold_spans(
+            masked_sentence
+        ):
+            marker_spans_by_sentence[index].append(
+                (start + scaffold_start, start + scaffold_end)
+            )
+            if index + 1 < len(sentences):
+                governed_target_indexes.add(index + 1)
+    return (
+        frozenset(marker_indexes),
+        frozenset(governed_target_indexes),
+        tuple(tuple(spans) for spans in marker_spans_by_sentence),
+    )
+
+
+def _surface_body_without_speaker(
+    sentence: str, normalized_speaker: Optional[str]
+) -> str:
+    if not normalized_speaker:
+        return sentence
+    match = re.match(
+        r"{}\s*:\s*".format(_escaped_exact_name(normalized_speaker)),
+        sentence,
+        flags=re.IGNORECASE,
+    )
+    if match is None:
+        return sentence
+    return sentence[match.end():].lstrip()
+
+
+def _strip_leading_clause_joiners(value: str) -> str:
+    return re.sub(
+        r"^(?:(?:[;,]\s*)|(?:(?:and|but)\s+))+",
+        "",
+        value.lstrip(),
+        flags=re.IGNORECASE,
+    )
+
+
+def _later_sentence_proves_different_subject(
+    *,
+    normalized_body: str,
+    surface_body: str,
+    witness: SupportWitness,
+    normalized_subject: str,
+) -> bool:
+    if _entity_spans(normalized_body, normalized_subject):
+        return False
+    anaphora_pattern = (
+        _FIRST_PERSON_ANAPHORA_PATTERN
+        if witness.binding == "trusted_speaker_1p"
+        else _GENERAL_ANAPHORA_PATTERN
+    )
+    if anaphora_pattern.search(normalized_body):
+        return False
+    named = _INITIALS_SURFACE_SUBJECT_PATTERN.match(surface_body)
+    if named is None:
+        named = re.match(
+            r"^(?P<name>(?!The\b|A\b|An\b|This\b|That\b|These\b|Those\b)"
+            r"[A-Z][\w'’\-]*(?:\s+[A-Z][\w'’\-]*){0,3})\b",
+            surface_body,
+        )
+    if named is None:
+        return False
+    first_name_token = named.group("name").split(maxsplit=1)[0].casefold()
+    if first_name_token.endswith("ly"):
+        return False
+    explicit_subject = normalize_entity_name(named.group("name"))
+    if not explicit_subject or explicit_subject == normalized_subject:
+        return False
+    if _names_have_identity_overlap(explicit_subject, normalized_subject):
+        return False
+    if not normalized_body.startswith(explicit_subject):
+        return False
+    remainder = normalized_body[len(explicit_subject):].lstrip()
+    return bool(_EXPLICIT_NEGATIVE_REMAINDER_PATTERN.match(remainder))
+
+
+def _later_source_withdraws_assertion(
+    *,
+    witness: SupportWitness,
+    sentences: Sequence[Tuple[str, int]],
+    surface_sentences: Sequence[str],
+    untrusted_spans: Sequence[Tuple[int, int]],
+    governed_target_indexes: frozenset[int],
+    forward_marker_spans_by_sentence: Sequence[
+        Sequence[Tuple[int, int]]
+    ],
+    normalized_subject: str,
+    normalized_speaker: Optional[str],
+) -> bool:
+    if witness.state_change != "assert":
+        return False
+    current_index = _sentence_index_for_witness(
+        witness=witness, sentences=sentences
+    )
+    if current_index is None or current_index + 1 >= len(sentences):
+        return False
+    surfaces_align = len(surface_sentences) == len(sentences)
+    for index in range(current_index + 1, len(sentences)):
+        if index in governed_target_indexes:
+            continue
+        sentence, start = sentences[index]
+        masked_spans = (
+            *untrusted_spans,
+            *forward_marker_spans_by_sentence[index],
+        )
+        body = _top_level_sentence_body(
+            sentence=sentence,
+            sentence_start=start,
+            untrusted_spans=masked_spans,
+            normalized_speaker=normalized_speaker,
+        )
+        body = _strip_leading_clause_joiners(body)
+        if not body or not (
+            _TOKEN_NEGATOR_PATTERN.search(body)
+            or _RETRACTION_OR_FALSE_PATTERN.search(body)
+        ):
+            continue
+        surface_body = ""
+        if (
+            surfaces_align
+            and len(surface_sentences[index]) == len(sentence)
+        ):
+            masked_surface = _sentence_with_masked_spans(
+                sentence=surface_sentences[index],
+                sentence_start=start,
+                spans=masked_spans,
+            )
+            surface_body = _surface_body_without_speaker(
+                " ".join(masked_surface.split()), normalized_speaker
+            )
+            surface_body = _strip_leading_clause_joiners(surface_body)
+        if surface_body and _later_sentence_proves_different_subject(
+            normalized_body=body,
+            surface_body=surface_body,
+            witness=witness,
+            normalized_subject=normalized_subject,
+        ):
+            continue
+        return True
+    return False
+
+
+def _witness_is_in_assertion_scope(
+    *,
+    witness: SupportWitness,
+    sentences: Sequence[Tuple[str, int]],
+    surface_sentences: Sequence[str],
+    untrusted_spans: Sequence[Tuple[int, int]],
+    marker_sentence_indexes: frozenset[int],
+    governed_target_indexes: frozenset[int],
+    forward_marker_spans_by_sentence: Sequence[
+        Sequence[Tuple[int, int]]
+    ],
+    normalized_subject: str,
+    normalized_speaker: Optional[str],
+) -> bool:
+    if any(
+        _spans_overlap(witness.source_span, untrusted_span)
+        for untrusted_span in untrusted_spans
+    ):
+        return False
+    sentence_index = _sentence_index_for_witness(
+        witness=witness, sentences=sentences
+    )
+    if (
+        sentence_index is None
+        or sentence_index in governed_target_indexes
+        or bool(forward_marker_spans_by_sentence[sentence_index])
+        or any(
+            marker_index < sentence_index
+            for marker_index in marker_sentence_indexes
+        )
+    ):
+        return False
+    return not _later_source_withdraws_assertion(
+        witness=witness,
+        sentences=sentences,
+        surface_sentences=surface_sentences,
+        untrusted_spans=untrusted_spans,
+        governed_target_indexes=governed_target_indexes,
+        forward_marker_spans_by_sentence=(
+            forward_marker_spans_by_sentence
+        ),
+        normalized_subject=normalized_subject,
+        normalized_speaker=normalized_speaker,
+    )
+
+
 def _strip_speaker_prefix(
     clause: str, normalized_speaker: Optional[str]
 ) -> Tuple[str, int]:
@@ -759,15 +1574,23 @@ def _appositive_pattern(predicate: str) -> str:
 
 
 def _first_person_frame_is_grammatical(
-    *, subject_text: str, predicate_text: str
+    *, subject_text: str, predicate: str, predicate_text: str
 ) -> bool:
     subject_text = subject_text.casefold()
-    first_cue = predicate_text.casefold().split()[0]
-    if subject_text in {"i'm", "i’m"}:
-        return first_cue in {"keen", "fond"}
-    if subject_text in {"i've", "i’ve", "i'd", "i’d"}:
-        return first_cue in _PAST_PARTICIPLE_CUES
-    return subject_text == "i"
+    predicate_text = " ".join(predicate_text.casefold().split())
+    if subject_text == "i":
+        frames = _FIRST_PERSON_I_PREDICATE_FRAMES.get(predicate, ())
+    elif subject_text in {"i'm", "i’m"}:
+        frames = (
+            (r"(?:keen\s+on|fond\s+of)",)
+            if predicate == "likes"
+            else ()
+        )
+    elif subject_text in {"i've", "i’ve", "i'd", "i’d"}:
+        frames = _FIRST_PERSON_PERFECT_PREDICATE_FRAMES.get(predicate, ())
+    else:
+        return False
+    return any(re.fullmatch(frame, predicate_text) for frame in frames)
 
 
 def _witness_from_match(
@@ -783,17 +1606,12 @@ def _witness_from_match(
 ) -> Optional[SupportWitness]:
     if binding == "trusted_speaker_1p" and not _first_person_frame_is_grammatical(
         subject_text=match.group("subject"),
+        predicate=predicate,
         predicate_text=match.group("predicate"),
     ):
         return None
     first_cue = match.group("predicate").casefold().split()[0]
     if binding == "named" and first_cue in {"am", "keen", "fond", "written"}:
-        return None
-    if (
-        binding == "trusted_speaker_1p"
-        and match.group("subject").casefold() == "i"
-        and first_cue in {"is", "are"}
-    ):
         return None
     return SupportWitness(
         spec_id="{}:{}".format(predicate, spec_suffix),
@@ -951,7 +1769,7 @@ def _match_complete_frame(
 
 
 _COORDINATED_PREDICATE_HEAD = re.compile(
-    r"^(?:(?:used\s+to|formerly|previously|now)\s+)?(?:"
+    r"^(?:"
     r"(?:am|is|are|was|were)\s+(?:a\s+)?(?:friend|parent|mother|father|"
     r"sibling|brother|sister|partner|spouse|husband|wife|member)\s+(?:of)|"
     r"(?:work|works|worked)\s+(?:at|for)|"
@@ -970,6 +1788,109 @@ _COORDINATED_PREDICATE_HEAD = re.compile(
     r"(?:(?:a|an|the|this|that|these|those|my|our|your|his|her|their|another)\s+)?"
     r"[^\W_][\w'’+\-]*(?:\s+[^\W_][\w'’+\-]*){0,11}\s*[.!。！]?$"
 )
+
+_COORDINATED_GENERIC_OBJECT = (
+    r"(?:(?:a|an|the|this|that|these|those|my|our|your|his|her|their|"
+    r"another)\s+)?(?!no\b)[^\W_][\w'’+\-]*"
+    r"(?:\s+[^\W_][\w'’+\-]*){0,11}\s*[.!。！]?"
+)
+_COORDINATED_LIST_OBJECT = (
+    r"(?:(?:a|an|the|this|that|these|those|my|our|your|his|her|their|"
+    r"another)\s+)?(?!no\b)[^\W_][\w'’+\-]*"
+    r"(?:\s+[^\W_][\w'’+\-]*)?"
+)
+_COORDINATED_NON_NOMINAL_TOKEN = re.compile(
+    r"\b(?:and|but|however|yet|although|whereas|while|because|if|unless|"
+    r"except|after|before|since|not|no|never|maybe|perhaps|possibly)\b|"
+    r"n['’]t\b"
+)
+
+
+def _coordinated_predicate_head_is_grammatical(
+    *, conjunct_body: str, binding: str, subject_text: str
+) -> bool:
+    if not _COORDINATED_PREDICATE_HEAD.fullmatch(conjunct_body):
+        return False
+    if _COORDINATED_NON_NOMINAL_TOKEN.search(conjunct_body):
+        return False
+    if binding != "trusted_speaker_1p":
+        return True
+    # Inherited first-person coordination is a closed ``I P O and P O``
+    # grammar.  Contracted auxiliaries do not safely govern an arbitrary next
+    # predicate, so they remain unsupported here.
+    if subject_text != "i":
+        return False
+    return any(
+        re.fullmatch(
+            r"(?:{})\s+{}".format(frame, _COORDINATED_GENERIC_OBJECT),
+            conjunct_body,
+        )
+        for frames in _FIRST_PERSON_I_PREDICATE_FRAMES.values()
+        for frame in frames
+    )
+
+
+def _coordinated_first_predicate(
+    *,
+    first_conjunct: str,
+    subject_span: Tuple[int, int],
+    binding: str,
+    subject_text: str,
+) -> Optional[Tuple[str, str, Tuple[int, int]]]:
+    remainder = first_conjunct[subject_span[1]:]
+    leading = len(remainder) - len(remainder.lstrip())
+    body = remainder.strip()
+    body_offset = subject_span[1] + leading
+    matches = []
+    for predicate, core_templates in _PREDICATE_FRAME_CORES.items():
+        for core_template in core_templates:
+            core = core_template.format(
+                object=_COORDINATED_GENERIC_OBJECT,
+                role=_role_np_frame_pattern(),
+            )
+            match = re.fullmatch(core, body)
+            if match is None:
+                continue
+            predicate_text = match.group("predicate")
+            if binding == "trusted_speaker_1p" and not _first_person_frame_is_grammatical(
+                subject_text=subject_text,
+                predicate=predicate,
+                predicate_text=predicate_text,
+            ):
+                continue
+            first_cue = predicate_text.casefold().split()[0]
+            if binding == "named" and first_cue in {"am", "keen", "fond", "written"}:
+                continue
+            matches.append(
+                (
+                    predicate,
+                    predicate_text,
+                    (
+                        body_offset + match.start("predicate"),
+                        body_offset + match.end("predicate"),
+                    ),
+                )
+            )
+    unique = tuple(dict.fromkeys(matches))
+    if len(unique) != 1:
+        return None
+    return unique[0]
+
+
+def _coordinated_object_continuation(conjunct: str) -> Optional[str]:
+    # An inherited-object list item is accepted only in the explicit
+    # ``P O1 and O2, and P2 O3`` shape.  The terminal comma is the closed
+    # boundary that prevents an arbitrary subject/verb tail from becoming O2.
+    if not conjunct.endswith(","):
+        return None
+    object_text = conjunct[:-1].strip()
+    if (
+        not object_text
+        or _COORDINATED_NON_NOMINAL_TOKEN.search(object_text)
+        or not re.fullmatch(_COORDINATED_LIST_OBJECT, object_text)
+    ):
+        return None
+    return object_text
 
 
 def _coordinating_subject_binding(
@@ -991,13 +1912,38 @@ def _coordinating_subject_binding(
             )
         )
         match = pattern.fullmatch(first_conjunct.strip())
-        if not match or not _COORDINATED_PREDICATE_HEAD.fullmatch(match.group("body")):
+        if not match:
             continue
         subject_text = match.group("subject")
         if binding == "trusted_speaker_1p" and subject_text not in _FIRST_PERSON_SUBJECTS:
             continue
+        if not _coordinated_predicate_head_is_grammatical(
+            conjunct_body=match.group("body"),
+            binding=binding,
+            subject_text=subject_text,
+        ):
+            continue
         return binding, match.span("subject"), subject_text
     return None
+
+
+def _coordinated_conjuncts(body: str) -> Tuple[Tuple[str, int], ...]:
+    separators = tuple(re.finditer(r"\s+and\s+", body))
+    if not separators:
+        return ()
+    result = []
+    raw_start = 0
+    for separator in (*separators, None):
+        raw_end = separator.start() if separator is not None else len(body)
+        raw = body[raw_start:raw_end]
+        leading = len(raw) - len(raw.lstrip())
+        conjunct = raw.strip()
+        if not conjunct:
+            return ()
+        result.append((conjunct, raw_start + leading))
+        if separator is not None:
+            raw_start = separator.end()
+    return tuple(result)
 
 
 def _relation_support_witnesses(
@@ -1018,14 +1964,60 @@ def _relation_support_witnesses(
     if not normalized_predicate or not normalized_subject or not normalized_object:
         return ()
     normalized_speaker = normalize_entity_name(speaker)
+    normalized_source = _normalized_source(source_text)
+    sentences = _normalized_sentences(source_text)
+    surface_sentences = _surface_sentences(source_text)
+    untrusted_spans = _untrusted_source_spans(normalized_source)
+    scope_indexes = _sentence_scope_indexes(
+        sentences=sentences,
+        untrusted_spans=untrusted_spans,
+        normalized_speaker=normalized_speaker,
+    )
+    (
+        marker_sentence_indexes,
+        governed_target_indexes,
+        forward_marker_spans_by_sentence,
+    ) = scope_indexes
     witnesses = []
     seen = set()
-    for sentence, sentence_start in _normalized_sentences(source_text):
+
+    def add_witness(witness: SupportWitness) -> None:
+        if not _witness_is_in_assertion_scope(
+            witness=witness,
+            sentences=sentences,
+            surface_sentences=surface_sentences,
+            untrusted_spans=untrusted_spans,
+            marker_sentence_indexes=marker_sentence_indexes,
+            governed_target_indexes=governed_target_indexes,
+            forward_marker_spans_by_sentence=(
+                forward_marker_spans_by_sentence
+            ),
+            normalized_subject=normalized_subject,
+            normalized_speaker=normalized_speaker,
+        ):
+            return
+        key = (
+            witness.spec_id,
+            witness.source_span,
+            witness.subject_span,
+            witness.predicate_span,
+            witness.object_span,
+            witness.binding,
+            witness.state_change,
+            witness.temporal_status,
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        witnesses.append(witness)
+
+    for sentence, sentence_start in sentences:
         body, prefix_chars = _strip_speaker_prefix(sentence, normalized_speaker)
         body_start = sentence_start + prefix_chars
 
-        # Retraction is the sole semicolon-spanning frame.  All ordinary
-        # assertions below are evaluated one atomic clause at a time.
+        # Every ordinary assertion must full-match this complete top-level
+        # sentence.  The only semicolon-spanning acceptance is the explicit
+        # retraction frame inside ``_match_complete_frame``.
         for witness in _match_complete_frame(
             clause=body,
             source_start=body_start,
@@ -1034,89 +2026,158 @@ def _relation_support_witnesses(
             normalized_speaker=normalized_speaker,
             predicate=normalized_predicate,
         ):
-            key = (witness.spec_id, witness.subject_span, witness.predicate_span, witness.object_span)
-            if key not in seen:
-                seen.add(key)
-                witnesses.append(witness)
+            add_witness(witness)
 
-        for semicolon_clause in re.split(r"\s*;\s*", body):
-            for atomic_clause in _ATOMIC_RELATION_SEPARATOR.split(semicolon_clause):
-                atomic_clause = atomic_clause.strip()
-                if not atomic_clause:
-                    continue
-                atomic_start = body_start + max(0, body.find(atomic_clause))
-                conjunctions = re.split(r"\s+and\s+", atomic_clause)
-                variants = [atomic_clause]
-                if len(conjunctions) > 1:
-                    variants.extend(part.strip() for part in conjunctions)
-                for variant in variants:
-                    variant_start = atomic_start + max(0, atomic_clause.find(variant))
-                    for witness in _match_complete_frame(
-                        clause=variant,
-                        source_start=variant_start,
-                        normalized_subject=normalized_subject,
-                        normalized_object=normalized_object,
-                        normalized_speaker=normalized_speaker,
-                        predicate=normalized_predicate,
-                    ):
-                        key = (
-                            witness.spec_id, witness.source_span,
-                            witness.predicate_span, witness.object_span,
-                        )
-                        if key not in seen:
-                            seen.add(key)
-                            witnesses.append(witness)
+        conjuncts = _coordinated_conjuncts(body)
+        if not conjuncts:
+            continue
+        binding_info = _coordinating_subject_binding(
+            first_conjunct=conjuncts[0][0],
+            normalized_subject=normalized_subject,
+            normalized_speaker=normalized_speaker,
+            predicate=normalized_predicate,
+        )
+        if binding_info is None:
+            continue
+        binding, subject_span, subject_text = binding_info
+        tail_descriptors = []
+        seen_predicate_tail = False
+        invalid_tail = False
+        for conjunct, offset in conjuncts[1:]:
+            if _coordinated_predicate_head_is_grammatical(
+                conjunct_body=conjunct,
+                binding=binding,
+                subject_text=subject_text,
+            ):
+                seen_predicate_tail = True
+                tail_descriptors.append(("predicate", conjunct, offset))
+                continue
+            object_text = _coordinated_object_continuation(conjunct)
+            if object_text is None or seen_predicate_tail:
+                invalid_tail = True
+                break
+            tail_descriptors.append(("object", object_text, offset))
+        if invalid_tail:
+            continue
 
-                if len(conjunctions) <= 1:
+        first_conjunct, first_offset = conjuncts[0]
+        first_predicate = _coordinated_first_predicate(
+            first_conjunct=first_conjunct,
+            subject_span=subject_span,
+            binding=binding,
+            subject_text=subject_text,
+        )
+        if any(kind == "object" for kind, _, _ in tail_descriptors):
+            if first_predicate is None or not seen_predicate_tail:
+                continue
+        for match_witness in _match_complete_frame(
+            clause=first_conjunct,
+            source_start=body_start + first_offset,
+            normalized_subject=normalized_subject,
+            normalized_object=normalized_object,
+            normalized_speaker=normalized_speaker,
+            predicate=normalized_predicate,
+        ):
+            if match_witness.binding != binding or match_witness.state_change != "assert":
+                continue
+            add_witness(
+                SupportWitness(
+                    spec_id="{}:coordinated-first".format(normalized_predicate),
+                    clause=body,
+                    subject_span=match_witness.subject_span,
+                    predicate_span=match_witness.predicate_span,
+                    object_span=match_witness.object_span,
+                    binding=binding,
+                    state_change="assert",
+                    temporal_status=None,
+                    source_span=(body_start, body_start + len(body)),
+                )
+            )
+
+        prefix_length = len(subject_text) + 1
+        if first_predicate is not None:
+            first_predicate_name, predicate_text, predicate_span = first_predicate
+            object_prefix_length = (
+                len(subject_text) + 1 + len(predicate_text) + 1
+            )
+            for kind, object_text, offset in tail_descriptors:
+                if kind != "object" or normalized_predicate != first_predicate_name:
                     continue
-                binding_info = _coordinating_subject_binding(
-                    first_conjunct=conjunctions[0],
+                synthetic = "{} {} {}".format(
+                    subject_text, predicate_text, object_text
+                )
+                for match_witness in _match_complete_frame(
+                    clause=synthetic,
+                    source_start=body_start,
                     normalized_subject=normalized_subject,
+                    normalized_object=normalized_object,
                     normalized_speaker=normalized_speaker,
                     predicate=normalized_predicate,
-                )
-                if binding_info is None:
-                    continue
-                binding, subject_span, subject_text = binding_info
-                for conjunct in conjunctions[1:]:
-                    conjunct = conjunct.strip()
-                    synthetic = "{} {}".format(subject_text, conjunct)
-                    for match_witness in _match_complete_frame(
-                        clause=synthetic,
-                        source_start=atomic_start,
-                        normalized_subject=normalized_subject,
-                        normalized_object=normalized_object,
-                        normalized_speaker=normalized_speaker,
-                        predicate=normalized_predicate,
+                ):
+                    if (
+                        match_witness.binding != binding
+                        or match_witness.state_change != "assert"
                     ):
-                        if match_witness.binding != binding:
-                            continue
-                        offset = max(0, atomic_clause.find(conjunct))
-                        prefix_length = len(subject_text) + 1
-                        witness = SupportWitness(
-                            spec_id="{}:coordinated".format(normalized_predicate),
-                            clause=atomic_clause,
-                            subject_span=subject_span,
-                            predicate_span=(
-                                offset + match_witness.predicate_span[0] - prefix_length,
-                                offset + match_witness.predicate_span[1] - prefix_length,
+                        continue
+                    add_witness(
+                        SupportWitness(
+                            spec_id="{}:coordinated-object".format(
+                                normalized_predicate
                             ),
+                            clause=body,
+                            subject_span=subject_span,
+                            predicate_span=predicate_span,
                             object_span=(
-                                offset + match_witness.object_span[0] - prefix_length,
-                                offset + match_witness.object_span[1] - prefix_length,
+                                offset
+                                + match_witness.object_span[0]
+                                - object_prefix_length,
+                                offset
+                                + match_witness.object_span[1]
+                                - object_prefix_length,
                             ),
                             binding=binding,
-                            state_change=match_witness.state_change,
-                            temporal_status=match_witness.temporal_status,
-                            source_span=(atomic_start, atomic_start + len(atomic_clause)),
+                            state_change="assert",
+                            temporal_status=None,
+                            source_span=(body_start, body_start + len(body)),
                         )
-                        key = (
-                            witness.spec_id, witness.source_span,
-                            witness.predicate_span, witness.object_span,
-                        )
-                        if key not in seen:
-                            seen.add(key)
-                            witnesses.append(witness)
+                    )
+
+        for kind, conjunct, offset in tail_descriptors:
+            if kind != "predicate":
+                continue
+            synthetic = "{} {}".format(subject_text, conjunct)
+            for match_witness in _match_complete_frame(
+                clause=synthetic,
+                source_start=body_start,
+                normalized_subject=normalized_subject,
+                normalized_object=normalized_object,
+                normalized_speaker=normalized_speaker,
+                predicate=normalized_predicate,
+            ):
+                if (
+                    match_witness.binding != binding
+                    or match_witness.state_change != "assert"
+                ):
+                    continue
+                add_witness(
+                    SupportWitness(
+                        spec_id="{}:coordinated".format(normalized_predicate),
+                        clause=body,
+                        subject_span=subject_span,
+                        predicate_span=(
+                            offset + match_witness.predicate_span[0] - prefix_length,
+                            offset + match_witness.predicate_span[1] - prefix_length,
+                        ),
+                        object_span=(
+                            offset + match_witness.object_span[0] - prefix_length,
+                            offset + match_witness.object_span[1] - prefix_length,
+                        ),
+                        binding=binding,
+                        state_change="assert",
+                        temporal_status=None,
+                        source_span=(body_start, body_start + len(body)),
+                    )
+                )
     return tuple(witnesses)
 
 
@@ -2005,6 +3066,34 @@ def parse_graph_payload(
         if relation_key in seen_relations:
             dropped_relations += 1
             continue
+        selected_witness: Optional[SupportWitness] = None
+        if source_text is not None:
+            # Carry one exact parser witness only when its state is identical
+            # to the parser-normalized relation state.  A source can contain
+            # conflicting state frames that the historical parser preserves as
+            # an ordinary relation; do not change that parser contract here.
+            # In that rare case the absent carrier makes storage fail closed
+            # and refuse an edge rather than recomputing support grammar.
+            matching_witnesses = [
+                witness
+                for witness in relation_witnesses
+                if (
+                    witness.state_change == state_change
+                    and witness.temporal_status == temporal_status
+                )
+            ]
+            if matching_witnesses:
+                selected_witness = min(
+                    matching_witnesses,
+                    key=lambda witness: (
+                        witness.source_span,
+                        witness.subject_span,
+                        witness.predicate_span,
+                        witness.object_span,
+                        witness.spec_id,
+                        witness.binding,
+                    ),
+                )
         seen_relations.add(relation_key)
         relations.append(
             GraphRelation(
@@ -2028,6 +3117,7 @@ def parse_graph_payload(
                 supersedes_edge_id=None,
                 created_at=created_at,
                 explicit=True,
+                support_witness=selected_witness,
             )
         )
 
