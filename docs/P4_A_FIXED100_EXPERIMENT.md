@@ -1,5 +1,19 @@
 # P4-A / P4-B / P4-C 固定样本配对实验（2026-08-25，本地 Qwen3-4B 代理）
 
+## 组合实验结论（fixed-200，P4-A q2 + P4-C bridge，不叠加）
+
+运行：`--evidence-need-retrieval --evidence-need-quota 2 --bridge-retrieval --bridge-quota 2`；产物 `.locomo/p4ac-combo-fixed200.json`。
+
+| 配置 | Hit@1 | Hit@3 | Hit@10 | MRR | NewGold | OffMiss→Top10 | Hit1 +/− |
+|---|---|---|---|---|---|---|---|
+| off | 0.565 | 0.685 | 0.730 | 0.6292 | — | — | — |
+| **P4-A q2 单独** | **0.575** | **0.710** | **0.740** | **0.6411** | 8 | **4** | **+2** |
+| P4-C bridge 单独 | 0.565 | 0.685 | 0.740 | 0.6296 | 3 | 3 | 0 |
+| combo (q2+bridge) | 0.560 | 0.705 | 0.735 | 0.6326 | **10** | 3 | **−1** |
+
+- combo 的 recall 空间确实叠加（NewGold 10 = need 8 + bridge 5 去重），但 **Hit@1 反降**（0.560 < off 0.565）：双配额把 rerank pool 压缩到 26 个 P1 候选（30−2−2），更多 P1 正确候选被 displaced，reranker 在更紧的池中表现更差；OffMiss→Top10 从 q2 的 4 降到 3。
+- **最终配置：P4-A q2 单独启用（默认关）**；P4-B REJECT、P4-C CONDITIONAL 但组合负收益，均不作为默认。三组件独立验证完毕。
+
 ## P4-C 结论（fixed-200，CONDITIONAL）
 
 运行：`--structured-query-plan --max-questions 200 --include-question-diagnostics --bridge-retrieval --bridge-max-terms 3 --bridge-quota 2`（P4-A/B 关）；产物 `.locomo/p4c-bridge-fixed200.json`。实现：`app/storage.py`（`extract_bridge_terms` + second-pass 查询 + quota）、`scripts/evaluate_locomo_retrieval.py`（`--bridge-retrieval` 等）、`tests/test_p4c_bridge.py`（5 passed）。
