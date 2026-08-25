@@ -251,7 +251,7 @@
 - Started the same-version fixed-200 P1 baseline in managed evaluation session `80619`; it is running while implementation audit proceeds.
 
 - Completed the required no-code-first audit and created `docs/LEADERBOARD_V2_AUDIT.md`.
-- Established three distinct comparison states: likely leaderboard `v0.2.0`/`7cf45c76…` (`UNVERIFIED`), current public main `c7df0cb…`, and local `11a3b00…` plus uncommitted experiments.
+- Established three distinct comparison states: the then-inferred leaderboard `v0.2.0`/`7cf45c76…` (subsequently organizer-confirmed on 2026-08-20), current public main `c7df0cb…`, and local `11a3b00…` plus uncommitted experiments.
 - Selected P1 structured query planning as the only next method change. The planned flag-off/flag-on ablation will not add an LLM call or alter the formal dependency footprint.
 - Implemented P1 behind `MEMORY_STRUCTURED_QUERY_PLAN=false`, added bounded plan parsing and GPT usage counters, and kept the existing two Search calls (one planner, one ranker).
 - Generated and validated 210 public synthetic cases (30 each for A/B/C/D/E/G/H), plus an evaluator for evidence, coverage, leakage, duplication, latency, calls, and tokens.

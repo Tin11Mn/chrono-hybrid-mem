@@ -219,7 +219,7 @@
 - Existing gold matching is content-based; P3 provenance and chain metrics require an explicit dataset-turn (`dia_id`) to stored-memory-ID mapping plus pre/post-rerank graph diagnostics. Duplicate text cannot be trusted as a provenance identity.
 - The cleaned P1 fixed-20 baseline is reproducible at Hit@1 `0.60`, MRR `0.6125`, and evidence recall@10 `0.4194`; this is the P3 smoke anchor, not an official platform score.
 
-- The 44.33 submission names `v0.2.0`, resolving to `7cf45c76ea7998554a13386b924627b83aeb3134`; the platform does not expose a deployed SHA, so this is `UNVERIFIED` rather than exact.
+- The 44.33 submission names `v0.2.0`, resolving to `7cf45c76ea7998554a13386b924627b83aeb3134`; the platform did not expose a deployed SHA during this audit. The organizer subsequently confirmed this exact mapping on 2026-08-20.
 - Public `main` is `c7df0cb3f436953e450f966fbc60c22727ce806a` and includes post-submission PR #3's stronger `gpt-4o-mini` rubric. Its model workflow failed for missing `OPENAI_API_KEY`, so no formal score validates the change.
 - The deployable path uses `gpt-4o-mini`; optional BGE/ColBERT/Qwen paths are local research and must not drive the next iteration.
 - Current formal query planning returns a flat term list that is merged into one equally weighted OR query. It cannot preserve intent, evidence hops, entity roles, state, or rule structure.
