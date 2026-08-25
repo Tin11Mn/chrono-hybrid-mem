@@ -40,6 +40,18 @@ python -m evaluation.aml_synthetic.evaluate --fixture-plans --output fixture-fla
 python -m evaluation.aml_synthetic.evaluate --fixture-plans --structured --output fixture-structured.json
 ```
 
+Run the P2 mechanical paired comparison using the same frozen fixture plans:
+
+```powershell
+python -m evaluation.aml_synthetic.evaluate --fixture-plans --structured --output p2-p1.json
+python -m evaluation.aml_synthetic.evaluate --fixture-plans --structured --set-aware-rerank --output p2-on.json
+python -m evaluation.aml_synthetic.compare p2-p1.json p2-on.json --p2-non-degradation
+```
+
+For a local-model smoke test that is balanced across all seven public
+categories, use `--per-category-limit 1` (or a higher value); do not use an
+unstratified prefix as a cross-category claim.
+
 Fixture-plan numbers are an engineering ablation, never a substitute for the
 formal `gpt-4o-mini` arms.
 

@@ -1003,6 +1003,7 @@ def load_prepared_database(
     database_path: str | Path,
     *,
     expected_cache_fingerprint: Mapping[str, Any] | None = None,
+    allow_materialization_contract_drift: bool = False,
 ) -> dict[str, Any]:
     path = Path(database_path)
     sidecar = _prepared_sidecar_path(path)
@@ -1020,8 +1021,10 @@ def load_prepared_database(
         raise ValueError("prepared database dataset fingerprint mismatch")
     if prepared.get("manifest_sha256") != manifest.get("manifest_sha256"):
         raise ValueError("prepared database scope manifest mismatch")
-    if prepared.get("materialization_contract_fingerprint") != (
-        materialization_contract_fingerprint()
+    if (
+        not allow_materialization_contract_drift
+        and prepared.get("materialization_contract_fingerprint")
+        != materialization_contract_fingerprint()
     ):
         raise ValueError("prepared database materialization contract mismatch")
     if (

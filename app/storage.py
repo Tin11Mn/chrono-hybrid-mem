@@ -543,6 +543,7 @@ class MemoryStore:
                  instruction_rerank_top_n: int = 10,
                  instruction_refine_top_n: int = 0,
                  structured_query_plan: bool = False,
+                 set_aware_rerank: bool = False,
                  evidence_graph: bool = False,
                  graph_max_hops: int = 1,
                  graph_temporal: bool = False,
@@ -587,6 +588,11 @@ class MemoryStore:
         self.instruction_rerank_top_n = instruction_rerank_top_n
         self.instruction_refine_top_n = instruction_refine_top_n
         self.structured_query_plan = structured_query_plan
+        if not isinstance(set_aware_rerank, bool):
+            raise ValueError("set_aware_rerank must be a boolean")
+        if set_aware_rerank and not structured_query_plan:
+            raise ValueError("set_aware_rerank requires structured_query_plan")
+        self.set_aware_rerank = set_aware_rerank
         self.evidence_graph = evidence_graph
         self.evidence_anchors = evidence_anchors
         if evidence_graph and evidence_anchors:
@@ -720,6 +726,11 @@ class MemoryStore:
             "p1_union_ids": [],
             "p1_pre_rerank_ids": [],
             "p1_counterfactual_top30_ids": [],
+            "p2_enabled": False,
+            "p2_pre_rerank_ids": [],
+            "p2_post_rerank_ids": [],
+            "p2_evidence_need_tokens": [],
+            "p2_newly_covered_tokens": [],
             "adjacent_seed_ids": [],
             "adjacent_candidate_ids": [],
             "adjacent_deduped_ids": [],
@@ -821,6 +832,94 @@ class MemoryStore:
             self._last_graph_only_candidate_ids = list(graph_only_candidate_ids)
             self._last_graph_paths = copy.deepcopy(list(graph_paths))
             self._last_retrieval_trace = copy.deepcopy(retrieval_trace)
+
+    def _normalized_evidence_need_tokens(
+        self, query_plan: Dict[str, Any]
+    ) -> List[str]:
+        """Return bounded, plan-derived lexical coverage tokens for P2."""
+
+        evidence_needs = query_plan.get("evidence_needs", [])
+        if not isinstance(evidence_needs, list):
+            return []
+        tokens: List[str] = []
+        seen = set()
+        for need in evidence_needs[:4]:
+            if not isinstance(need, str):
+                continue
+            for token in re.findall(r"[\w]+", need, flags=re.UNICODE):
+                normalized = token.casefold()
+                if (
+                    normalized
+                    and normalized not in self.QUERY_STOP_WORDS
+                    and normalized not in seen
+                ):
+                    seen.add(normalized)
+                    tokens.append(normalized)
+        return tokens
+
+    def _apply_set_aware_rerank(
+        self,
+        results: Sequence[MemoryResult],
+        *,
+        query_plan: Dict[str, Any],
+        retrieval_trace: Dict[str, Any],
+    ) -> List[MemoryResult]:
+        """Deterministically promote complementary original evidence records."""
+
+        original_results = list(results)
+        need_tokens = self._normalized_evidence_need_tokens(query_plan)
+        retrieval_trace["p2_enabled"] = self.set_aware_rerank
+        retrieval_trace["p2_pre_rerank_ids"] = [
+            result.id for result in original_results
+        ]
+        retrieval_trace["p2_evidence_need_tokens"] = list(need_tokens)
+        if (
+            not self.set_aware_rerank
+            or len(original_results) < 2
+            or not need_tokens
+        ):
+            retrieval_trace["p2_post_rerank_ids"] = list(
+                retrieval_trace["p2_pre_rerank_ids"]
+            )
+            return original_results
+
+        need_token_set = set(need_tokens)
+        token_sets = [
+            set(re.findall(r"[\w]+", result.content.casefold(), flags=re.UNICODE))
+            for result in original_results
+        ]
+        remaining = list(range(len(original_results)))
+        selected_indexes: List[int] = []
+        covered_tokens = set()
+        selected_diagnostics: List[Dict[str, Any]] = []
+        while remaining:
+            best_index = max(
+                remaining,
+                key=lambda index: (
+                    bool((token_sets[index] & need_token_set) - covered_tokens),
+                    len((token_sets[index] & need_token_set) - covered_tokens),
+                    -index,
+                ),
+            )
+            new_tokens = sorted(
+                (token_sets[best_index] & need_token_set) - covered_tokens
+            )
+            if not new_tokens:
+                break
+            selected_indexes.append(best_index)
+            remaining.remove(best_index)
+            covered_tokens.update(new_tokens)
+            selected_diagnostics.append({
+                "candidate_id": original_results[best_index].id,
+                "newly_covered_tokens": new_tokens,
+            })
+        ordered_indexes = selected_indexes + remaining
+        ordered_results = [original_results[index] for index in ordered_indexes]
+        retrieval_trace["p2_post_rerank_ids"] = [
+            result.id for result in ordered_results
+        ]
+        retrieval_trace["p2_newly_covered_tokens"] = selected_diagnostics
+        return ordered_results
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -3718,8 +3817,8 @@ class MemoryStore:
                         ),
                     )
                     fused = refined + fused[refine_count:]
-            dense_results = [candidate["result"] for candidate in fused[:top_k]]
-            dense_ids = [candidate["result"].id for candidate in fused]
+            dense_ranked_results = [candidate["result"] for candidate in fused]
+            dense_ids = [result.id for result in dense_ranked_results]
             retrieval_trace["p1_union_ids"] = list(dense_ids)
             retrieval_trace["p1_pre_rerank_ids"] = list(dense_ids)
             retrieval_trace["p1_counterfactual_top30_ids"] = list(
@@ -3728,6 +3827,12 @@ class MemoryStore:
             retrieval_trace["rerank_pool_ids"] = list(
                 dense_ids[:self.MODEL_RERANK_LIMIT]
             )
+            dense_ranked_results = self._apply_set_aware_rerank(
+                dense_ranked_results,
+                query_plan=query_plan,
+                retrieval_trace=retrieval_trace,
+            )
+            dense_results = dense_ranked_results[:top_k]
             retrieval_trace["final_ids"] = [
                 result.id for result in dense_results
             ]
@@ -4019,6 +4124,11 @@ class MemoryStore:
             retrieval_trace["rerank_pool_ids"] = [
                 result.id for result in deduplicated[:self.MODEL_RERANK_LIMIT]
             ]
+        deduplicated = self._apply_set_aware_rerank(
+            deduplicated,
+            query_plan=query_plan,
+            retrieval_trace=retrieval_trace,
+        )
         final_results = deduplicated[:top_k]
         retrieval_trace["final_ids"] = [
             result.id for result in final_results

@@ -128,6 +128,10 @@ P3 crea estructuras auxiliares trazables sobre mensajes originales sin generar c
 | P1.1 expansión de mensajes originales adyacentes | Hit@1/3/10/MRR igual al baseline: 0.40/0.45/0.55/0.45. | Sin mejora; no se amplía la evaluación. |
 | P3-C grafo explícito de estado temporal | No se ha implementado una ablación independiente. | Sin probar; no hay conclusión sobre datos temporales. |
 
+## Experimento P2 de reordenamiento consciente del conjunto (rechazado)
+
+P2 intenta reordenar candidatos originales existentes después del ranking del modelo P1 usando términos de necesidades de evidencia del plan estructurado. Está desactivado por defecto y no añade llamadas al modelo. En un proxy local LoCoMo fijo de 20 preguntas, Hit@1 empató en `0.40` mientras Hit@3 y MRR mejoraron; sin embargo, en 35 casos públicos estratificados con planes congelados, Hit@1 cayó de `1.00` a `0.8571`, MRR de `1.00` a `0.9286` y aumentaron los casos de evidencia prohibida en primer lugar. P2 se conserva solo como experimento reproducible y análisis de fallos, nunca como ruta predeterminada ni afirmación de envío oficial.
+
 Estos experimentos descartan activar por defecto el grafo o la expansión adyacente en LoCoMo, no los métodos de grafo en general. La activación futura dependerá solo de señales observables de relación, múltiples saltos o temporalidad de la entrada, nunca de la identidad de benchmarks privados ni de respuestas de referencia.
 
 ## Mapa de versiones
