@@ -9,6 +9,8 @@ locomo*.json
 .venv-local/
 .model-cache/
 .pytest-tmp/
+.pytest-tmp*/
+.pytest-*/
 .eval-tmp/
 .local-models/
 .local-tools/

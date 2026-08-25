@@ -1,3 +1,4 @@
+import math
 import os
 
 from fastapi import FastAPI
@@ -25,6 +26,133 @@ def temporal_bonus_from_environment() -> float:
 
 def structured_query_plan_from_environment() -> bool:
     return os.getenv("MEMORY_STRUCTURED_QUERY_PLAN", "true").lower() == "true"
+
+
+def adjacent_turn_expansion_from_environment() -> bool:
+    return os.getenv("MEMORY_ADJACENT_TURN_EXPANSION", "false").lower() == "true"
+
+
+def _adjacent_turn_limit_from_environment(name: str, default: int) -> int:
+    raw_value = os.getenv(name, str(default))
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise RuntimeError(
+            "{} must be an integer between 0 and {}".format(
+                name, MemoryStore.MODEL_RERANK_LIMIT
+            )
+        ) from error
+    if value < 0 or value > MemoryStore.MODEL_RERANK_LIMIT:
+        raise RuntimeError(
+            "{} must be between 0 and {}".format(
+                name, MemoryStore.MODEL_RERANK_LIMIT
+            )
+        )
+    return value
+
+
+def adjacent_seed_limit_from_environment() -> int:
+    return _adjacent_turn_limit_from_environment("MEMORY_ADJACENT_SEED_LIMIT", 4)
+
+
+def adjacent_candidate_limit_from_environment() -> int:
+    return _adjacent_turn_limit_from_environment(
+        "MEMORY_ADJACENT_CANDIDATE_LIMIT", 4
+    )
+
+
+def evidence_graph_from_environment() -> bool:
+    return os.getenv("MEMORY_EVIDENCE_GRAPH", "false").lower() == "true"
+
+
+def evidence_anchors_from_environment() -> bool:
+    """Return whether the isolated P3-B1 mention-anchor experiment is enabled."""
+
+    return os.getenv("MEMORY_EVIDENCE_ANCHORS", "false").lower() == "true"
+
+
+def _frozen_anchor_int_from_environment(name: str, expected: int) -> int:
+    raw_value = os.getenv(name, str(expected))
+    try:
+        value = int(raw_value)
+    except ValueError as error:
+        raise RuntimeError("P3-B1 requires {}={}".format(name, expected)) from error
+    if value != expected:
+        raise RuntimeError("P3-B1 requires {}={}".format(name, expected))
+    return value
+
+
+def anchor_seed_limit_from_environment() -> int:
+    return _frozen_anchor_int_from_environment(
+        "MEMORY_ANCHOR_SEED_LIMIT", MemoryStore.ANCHOR_SEED_LIMIT
+    )
+
+
+def anchor_max_candidates_from_environment() -> int:
+    return _frozen_anchor_int_from_environment(
+        "MEMORY_ANCHOR_MAX_CANDIDATES", MemoryStore.ANCHOR_MAX_CANDIDATES
+    )
+
+
+def anchor_rrf_weight_from_environment() -> float:
+    expected = MemoryStore.ANCHOR_RRF_WEIGHT
+    raw_value = os.getenv("MEMORY_ANCHOR_RRF_WEIGHT", str(expected))
+    try:
+        value = float(raw_value)
+    except ValueError as error:
+        raise RuntimeError(
+            "P3-B1 requires MEMORY_ANCHOR_RRF_WEIGHT={}".format(expected)
+        ) from error
+    if not math.isfinite(value) or value != expected:
+        raise RuntimeError(
+            "P3-B1 requires MEMORY_ANCHOR_RRF_WEIGHT={}".format(expected)
+        )
+    return value
+
+
+def anchor_rerank_quota_from_environment() -> int:
+    return _frozen_anchor_int_from_environment(
+        "MEMORY_ANCHOR_RERANK_QUOTA", MemoryStore.ANCHOR_RERANK_QUOTA
+    )
+
+
+def graph_max_hops_from_environment() -> int:
+    value = int(os.getenv("MEMORY_GRAPH_MAX_HOPS", "1"))
+    if value != 1:
+        raise RuntimeError("P3-A requires MEMORY_GRAPH_MAX_HOPS=1")
+    return value
+
+
+def graph_temporal_from_environment() -> bool:
+    value = os.getenv("MEMORY_GRAPH_TEMPORAL", "false").lower() == "true"
+    if value:
+        raise RuntimeError("P3-A requires MEMORY_GRAPH_TEMPORAL=false")
+    return False
+
+
+def graph_rrf_weight_from_environment() -> float:
+    value = float(os.getenv("MEMORY_GRAPH_RRF_WEIGHT", "0.025"))
+    if not math.isfinite(value) or value < 0 or value > 1:
+        raise RuntimeError("MEMORY_GRAPH_RRF_WEIGHT must be finite and between 0 and 1")
+    return value
+
+
+def graph_max_candidates_from_environment() -> int:
+    value = int(os.getenv("MEMORY_GRAPH_MAX_CANDIDATES", "20"))
+    if value < 0 or value > 100:
+        raise RuntimeError("MEMORY_GRAPH_MAX_CANDIDATES must be between 0 and 100")
+    return value
+
+
+def graph_rerank_quota_from_environment() -> int:
+    value = int(os.getenv("MEMORY_GRAPH_RERANK_QUOTA", "4"))
+    if value < 0 or value > MemoryStore.MODEL_RERANK_LIMIT:
+        raise RuntimeError(
+            "MEMORY_GRAPH_RERANK_QUOTA must be between 0 and {}".format(
+                MemoryStore.MODEL_RERANK_LIMIT
+            )
+        )
+    return value
 
 
 def dense_rrf_weight_from_environment() -> float:
@@ -178,6 +306,63 @@ def instruction_refine_top_n_from_environment() -> int:
 
 def create_app(database_path: str = None) -> FastAPI:
     path = database_path or os.getenv("MEMORY_DB_PATH", "data/chrono_hybrid_mem.db")
+    structured_query_plan = structured_query_plan_from_environment()
+    adjacent_turn_expansion = adjacent_turn_expansion_from_environment()
+    evidence_graph = evidence_graph_from_environment()
+    evidence_anchors = evidence_anchors_from_environment()
+
+    if evidence_graph and evidence_anchors:
+        raise RuntimeError(
+            "MEMORY_EVIDENCE_ANCHORS cannot be combined with MEMORY_EVIDENCE_GRAPH"
+        )
+    if evidence_anchors and adjacent_turn_expansion:
+        raise RuntimeError(
+            "MEMORY_EVIDENCE_ANCHORS cannot be combined with "
+            "MEMORY_ADJACENT_TURN_EXPANSION"
+        )
+    if evidence_graph and not structured_query_plan:
+        raise RuntimeError(
+            "MEMORY_EVIDENCE_GRAPH requires MEMORY_STRUCTURED_QUERY_PLAN=true"
+        )
+    if evidence_anchors and not structured_query_plan:
+        raise RuntimeError(
+            "MEMORY_EVIDENCE_ANCHORS requires MEMORY_STRUCTURED_QUERY_PLAN=true"
+        )
+
+    adjacent_options = {}
+    if adjacent_turn_expansion:
+        adjacent_options = {
+            "adjacent_turn_expansion": True,
+            "adjacent_seed_limit": adjacent_seed_limit_from_environment(),
+            "adjacent_candidate_limit": adjacent_candidate_limit_from_environment(),
+        }
+    graph_options = {}
+    if evidence_graph:
+        graph_options = {
+            "graph_max_hops": graph_max_hops_from_environment(),
+            "graph_temporal": graph_temporal_from_environment(),
+            "graph_rrf_weight": graph_rrf_weight_from_environment(),
+            "graph_max_candidates": graph_max_candidates_from_environment(),
+            "graph_rerank_quota": graph_rerank_quota_from_environment(),
+        }
+    anchor_options = {}
+    if evidence_anchors:
+        anchor_options = {
+            "anchor_seed_limit": anchor_seed_limit_from_environment(),
+            "anchor_max_candidates": anchor_max_candidates_from_environment(),
+            "anchor_rrf_weight": anchor_rrf_weight_from_environment(),
+            "anchor_rerank_quota": anchor_rerank_quota_from_environment(),
+        }
+    dense_fusion_alpha = dense_fusion_alpha_from_environment()
+    if evidence_graph and dense_fusion_alpha is not None:
+        raise RuntimeError(
+            "MEMORY_EVIDENCE_GRAPH cannot be combined with MEMORY_DENSE_FUSION_ALPHA"
+        )
+    if evidence_anchors and dense_fusion_alpha is not None:
+        raise RuntimeError(
+            "MEMORY_EVIDENCE_ANCHORS cannot be combined with "
+            "MEMORY_DENSE_FUSION_ALPHA"
+        )
     yes_no_reranker = local_yes_no_reranker_from_environment()
     has_fastembed_reranker = bool(
         os.getenv("MEMORY_LOCAL_RERANK_MODEL", "").strip()
@@ -195,7 +380,7 @@ def create_app(database_path: str = None) -> FastAPI:
         temporal_bonus=temporal_bonus_from_environment(),
         semantic_retriever=local_semantic_retriever_from_environment(),
         dense_rrf_weight=dense_rrf_weight_from_environment(),
-        dense_fusion_alpha=dense_fusion_alpha_from_environment(),
+        dense_fusion_alpha=dense_fusion_alpha,
         dense_context_weight=dense_context_weight_from_environment(),
         dense_time_weight=dense_time_weight_from_environment(),
         dense_speaker_mask_max=dense_speaker_mask_max_from_environment(),
@@ -220,7 +405,12 @@ def create_app(database_path: str = None) -> FastAPI:
         local_query_expander=local_query_expander_from_environment(),
         instruction_rerank_top_n=instruction_rerank_top_n_from_environment(),
         instruction_refine_top_n=instruction_refine_top_n_from_environment(),
-        structured_query_plan=structured_query_plan_from_environment(),
+        structured_query_plan=structured_query_plan,
+        evidence_graph=evidence_graph,
+        evidence_anchors=evidence_anchors,
+        **graph_options,
+        **anchor_options,
+        **adjacent_options,
     )
     store.initialize()
     app = FastAPI(title="ChronoHybridMem", version="0.4.0-local")
