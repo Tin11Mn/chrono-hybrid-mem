@@ -53,6 +53,24 @@ P1 将现有 `gpt-4o-mini` 查询规划调用改为有界的结构化结果，�
 Hit@1 从 0.55 提升至 0.60，MRR 从 0.5917 提升至 0.6125，Hit@10 保持 0.65；
 exact evidence recall@10 从 0.4839 降至 0.4194。该结果仅用于方法筛选，不是官方成绩。
 
+#### P3 证据图谱实验（LoCoMo 本地代理）
+
+P3 探索在不生成新内容的前提下，为原始消息建立可追溯的辅助证据结构；所有图节点和
+边都必须回指原始消息，最终 `/search` 仍只返回原始证据。该方向目前**默认关闭**，并且
+下列结论仅适用于固定 20 题 LoCoMo 开发切片与 Qwen3-4B 本地代理，不能外推为官方全套
+排行榜结论。
+
+| 子实验 | 方法与结果 | 当前结论 |
+|---|---|---|
+| P3-A 严格关系图 | 419 条原始消息中仅 3 条形成可独立见证的关系边（来源覆盖率 0.72%）。 | 抽取覆盖不足，未进入成对检索评分。 |
+| P3-B1 来源局部实体锚点 | 363/419 条来源消息具有精确实体提及（86.63% 覆盖）；Hit@1 0.40 → 0.35，Hit@3 0.45 → 0.45，Hit@10 0.55 → 0.50，MRR 0.45 → 0.41。 | 在该切片上退化，不作为全局默认能力。 |
+| P1.1 相邻原始消息扩展 | Hit@1/3/10/MRR 均与基线相同：0.40/0.45/0.55/0.45。 | 无增益，不进入后续扩大评测。 |
+| P3-C 显式时序状态图 | 尚未实现独立消融。 | 未测试；不能据此判断时序数据上的效果。 |
+
+这组实验排除了“在 LoCoMo 上默认开启图谱/邻近扩展即可提升”的假设，但不意味着图谱方法
+在 ScriptMem、时序事件或显式关系更密集的数据中无效。后续仅会在可由输入内容判断的关系、
+多跳或时序信号充分时尝试选择性启用；不会按照私有测试集名称或标准答案进行适配。
+
 ### 本地研究方法
 
 仓库还保留可选的本地研究后端，用于离线方法筛选：
@@ -249,6 +267,27 @@ On a fixed 20-question LoCoMo development slice using Qwen3-4B only as a local
 `gpt-4o-mini` proxy, Hit@1 improved from 0.55 to 0.60 and MRR from 0.5917 to 0.6125,
 while Hit@10 remained 0.65. Exact evidence recall@10 decreased from 0.4839 to 0.4194.
 These measurements are method-selection evidence, not an official leaderboard result.
+
+#### P3 evidence-graph experiments (LoCoMo local proxy)
+
+P3 explores traceable auxiliary evidence structures over original messages without generating
+new content. Every node and edge must point back to source messages, and `/search` still
+returns original evidence only. This direction is **off by default**. The results below apply
+only to the fixed 20-question LoCoMo development slice with Qwen3-4B as a local proxy; they
+must not be generalized to the full official leaderboard suite.
+
+| Sub-experiment | Method and result | Current conclusion |
+|---|---|---|
+| P3-A strict relation graph | Only 3 independently witnessed relation edges from 419 raw messages (0.72% source coverage). | Extraction coverage was too low for paired retrieval scoring. |
+| P3-B1 source-local entity anchors | Exact entity mentions covered 363/419 source messages (86.63%); Hit@1 0.40 → 0.35, Hit@3 0.45 → 0.45, Hit@10 0.55 → 0.50, MRR 0.45 → 0.41. | Regressed on this slice; not a global default. |
+| P1.1 adjacent raw-message expansion | Hit@1/3/10/MRR matched the baseline: 0.40/0.45/0.55/0.45. | No gain; not promoted to a larger evaluation. |
+| P3-C explicit temporal-state graph | No independent ablation has been implemented. | Untested; no conclusion about temporal data. |
+
+These experiments reject the hypothesis that graph or adjacent expansion should be enabled by
+default on LoCoMo. They do not show that graph methods are ineffective for relation-dense,
+multi-hop, or temporal data such as ScriptMem. Any future activation will be gated by
+input-observable relation, multi-hop, or temporal signals—not by private benchmark identity
+or reference answers.
 
 ### Optional local research path
 
