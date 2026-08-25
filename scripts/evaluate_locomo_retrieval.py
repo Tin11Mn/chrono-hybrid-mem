@@ -252,7 +252,10 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              include_hit_bitmap: bool = False,
              structured_query_plan: bool = False,
              set_aware_rerank: bool = False,
-             include_question_diagnostics: bool = False) -> Dict[str, object]:
+             include_question_diagnostics: bool = False,
+             evidence_need_retrieval: bool = False,
+             evidence_need_quota: int = 2,
+             evidence_need_rrf_weight: float = 0.01) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -309,6 +312,9 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 instruction_refine_top_n=instruction_refine_top_n,
                 structured_query_plan=structured_query_plan,
                 set_aware_rerank=set_aware_rerank,
+                evidence_need_retrieval=evidence_need_retrieval,
+                evidence_need_quota=evidence_need_quota,
+                evidence_need_rrf_weight=evidence_need_rrf_weight,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -410,6 +416,28 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                         ),
                         "recovered_by_sidecar": bool(
                             set(gold_mem_ids).intersection(sidecar_ids)
+                        ),
+                        "gold_need_channel_presence": {
+                            channel_name: positions
+                            for channel_name, channel_ids in (
+                                retrieval_trace.get(
+                                    "evidence_need_channels", {}
+                                ).items()
+                            )
+                            if (
+                                positions := _gold_positions(
+                                    gold_mem_ids, channel_ids
+                                )
+                            )
+                        },
+                        "evidence_need_union_ids": retrieval_trace.get(
+                            "evidence_need_union_ids", []
+                        ),
+                        "promoted_need_ids": retrieval_trace.get(
+                            "promoted_need_ids", []
+                        ),
+                        "displaced_p1_for_need_ids": retrieval_trace.get(
+                            "displaced_p1_for_need_ids", []
                         ),
                         "plan": retrieval_trace.get("plan", {}),
                         "p1_counterfactual_top30_ids": retrieval_trace.get(
@@ -513,6 +541,21 @@ def main() -> None:
     parser.add_argument(
         "--set-aware-rerank", action="store_true",
         help="Enable default-off P2 set-aware ordering after candidate ranking",
+    )
+    parser.add_argument(
+        "--evidence-need-retrieval", action="store_true",
+        help=(
+            "Enable default-off P4-A per-evidence-need retrieval channels with a "
+            "reserved rerank-pool quota; requires --structured-query-plan"
+        ),
+    )
+    parser.add_argument(
+        "--evidence-need-quota", type=int, default=2,
+        help="P4-A reserved rerank-pool slots for evidence-need candidates (default 2)",
+    )
+    parser.add_argument(
+        "--evidence-need-rrf-weight", type=float, default=0.01,
+        help="P4-A low RRF weight for evidence-need channels (default 0.01)",
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -978,6 +1021,20 @@ def main() -> None:
         raise ValueError("--structured-query-plan requires a Search model")
     if args.set_aware_rerank and not args.structured_query_plan:
         raise ValueError("--set-aware-rerank requires --structured-query-plan")
+    if args.evidence_need_retrieval and not args.structured_query_plan:
+        raise ValueError("--evidence-need-retrieval requires --structured-query-plan")
+    if args.evidence_need_retrieval and args.fusion_alpha is not None:
+        raise ValueError("--evidence-need-retrieval cannot use --fusion-alpha")
+    if (
+        isinstance(args.evidence_need_quota, bool)
+        or not 1 <= args.evidence_need_quota <= 30
+    ):
+        raise ValueError("--evidence-need-quota must be an integer between 1 and 30")
+    if (
+        isinstance(args.evidence_need_rrf_weight, bool)
+        or not 0 <= args.evidence_need_rrf_weight <= 1
+    ):
+        raise ValueError("--evidence-need-rrf-weight must be between 0 and 1")
     if args.search_model:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -1413,6 +1470,9 @@ def main() -> None:
         structured_query_plan=args.structured_query_plan,
         set_aware_rerank=args.set_aware_rerank,
         include_question_diagnostics=args.include_question_diagnostics,
+        evidence_need_retrieval=args.evidence_need_retrieval,
+        evidence_need_quota=args.evidence_need_quota,
+        evidence_need_rrf_weight=args.evidence_need_rrf_weight,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)

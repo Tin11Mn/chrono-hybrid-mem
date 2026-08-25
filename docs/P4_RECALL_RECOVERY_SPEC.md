@@ -70,7 +70,7 @@ D:\ANACONDA3\python.exe -m pytest tests\test_locomo_evaluation.py tests\test_loc
 
 ## 后续 P4 路线（组件独立验证后再组合）
 
-- **P4-A Evidence-Need Independent Retrieval**：`evidence_needs` 目前被 OR 成一条 support 查询（权重 0.01）；改为逐 need 独立通道 + rerank pool 配额（复用 graph/anchor/adjacent 的 `reserved_ids` 模式，`MODEL_RERANK_LIMIT=30` 硬上限），配额 2/4/6 小范围扫描。
+- **P4-A Evidence-Need Independent Retrieval**：**已实现（默认关闭）**。`evidence_need_retrieval / evidence_need_quota（默认 2）/ evidence_need_rrf_weight（默认 0.01）`。开启时每条 `evidence_needs` 独立 term 化查询，走 raw / raw_porter / fact / fact_porter / context / context_porter 六个通道；need 候选以低 RRF 权重参与融合（不进 `p1_counterfactual_top30_ids`，保持 P1 基线可对照），并通过 `reserved_need_ids` 配额保证进入 rerank pool（`MODEL_RERANK_LIMIT=30` 硬上限，base_budget = 30 − special_quota − need_quota）。trace 新增 `evidence_need_diagnostics / evidence_need_channels / evidence_need_union_ids / reserved_need_ids / promoted_need_ids / displaced_p1_for_need_ids`；diagnostics 新增 `gold_need_channel_presence`。测试：`tests/test_p4a_evidence_need.py`（5 passed：默认关闭回归、need 通道运行、配额保留、无 need 跳过、requires structured plan）。配额 2/4/6 小范围扫描待跑。
 - **P4-B Neighbor Recovery**：机制已存在（`adjacent_turn_expansion`，默认关，same-session ±1，seed 4 / quota 4，`_adjacent_turn_candidates`）；工作 = 开启 + 配对验证，验证"Context 窗口命中但 source ID 错位"类失败。
 - **P4-C Bridge Second-Pass**：仅 `intent == multi_hop` 或 `evidence_needs >= 2` 触发；从第一跳原始证据确定性提取 1–3 个 bridge terms（大写 span / speaker / Fact 文本），最大两轮；不引入 Add-time 关系抽取。
 - **P4-D Query Relaxation**：仅当仍存在明显纯 lexical miss 时；有限变体（entity+relation / entity+expansion / 单 evidence need），不做大范围 query rewriting。
