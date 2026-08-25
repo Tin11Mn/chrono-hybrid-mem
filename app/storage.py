@@ -501,6 +501,11 @@ class MemoryStore:
     # A public synthetic sweep retained 0.01; weights >=0.05 caused G/H regressions,
     # while 0.02 could still flip a focused near-neighbor conflict case.
     STRUCTURED_SUPPORT_RRF_WEIGHT = 0.01
+    # P4-A evidence-need channels: each planned evidence need gets its own
+    # bounded lexical query; its candidates enter the rerank pool through a
+    # reserved quota (default 2) instead of competing at core-intent weight.
+    EVIDENCE_NEED_QUOTA_DEFAULT = 2
+    EVIDENCE_NEED_RRF_WEIGHT_DEFAULT = 0.01
     # Kept for controlled ablations; full LoCoMo evaluation showed that
     # hard entity binding harms adversarial cross-speaker questions overall.
     ENTITY_RRF_WEIGHT = 0.0
@@ -557,7 +562,10 @@ class MemoryStore:
                  anchor_rerank_quota: int = ANCHOR_RERANK_QUOTA,
                  adjacent_turn_expansion: bool = False,
                  adjacent_seed_limit: int = ADJACENT_SEED_LIMIT,
-                 adjacent_candidate_limit: int = ADJACENT_CANDIDATE_LIMIT) -> None:
+                 adjacent_candidate_limit: int = ADJACENT_CANDIDATE_LIMIT,
+                 evidence_need_retrieval: bool = False,
+                 evidence_need_quota: int = EVIDENCE_NEED_QUOTA_DEFAULT,
+                 evidence_need_rrf_weight: float = EVIDENCE_NEED_RRF_WEIGHT_DEFAULT) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -707,6 +715,35 @@ class MemoryStore:
         self.adjacent_turn_expansion = adjacent_turn_expansion
         self.adjacent_seed_limit = adjacent_seed_limit
         self.adjacent_candidate_limit = adjacent_candidate_limit
+        if not isinstance(evidence_need_retrieval, bool):
+            raise ValueError("evidence_need_retrieval must be a boolean")
+        if evidence_need_retrieval and not structured_query_plan:
+            raise ValueError("evidence_need_retrieval requires structured_query_plan")
+        if evidence_need_retrieval and dense_fusion_alpha is not None:
+            raise ValueError(
+                "evidence_need_retrieval cannot use dense_fusion_alpha"
+            )
+        if (
+            isinstance(evidence_need_quota, bool)
+            or not isinstance(evidence_need_quota, int)
+            or not 0 <= evidence_need_quota <= self.MODEL_RERANK_LIMIT
+        ):
+            raise ValueError(
+                "evidence_need_quota must be an integer between 0 and {}".format(
+                    self.MODEL_RERANK_LIMIT
+                )
+            )
+        if (
+            not isinstance(evidence_need_rrf_weight, (int, float))
+            or isinstance(evidence_need_rrf_weight, bool)
+            or not 0 <= evidence_need_rrf_weight <= 1
+        ):
+            raise ValueError(
+                "evidence_need_rrf_weight must be a number between 0 and 1"
+            )
+        self.evidence_need_retrieval = evidence_need_retrieval
+        self.evidence_need_quota = evidence_need_quota
+        self.evidence_need_rrf_weight = evidence_need_rrf_weight
         self._retrieval_diagnostics_lock = threading.Lock()
         self._last_query_plan: Dict[str, Any] = {}
         self._last_graph_candidate_ids: List[str] = []
@@ -767,6 +804,17 @@ class MemoryStore:
             "displaced_p1_ids": [],
             "displaced_p1_for_anchor_ids": [],
             "displaced_p1_for_adjacent_ids": [],
+            "reserved_need_ids": [],
+            "promoted_need_ids": [],
+            "displaced_p1_for_need_ids": [],
+            "evidence_need_diagnostics": {
+                "enabled": False,
+                "quota": MemoryStore.EVIDENCE_NEED_QUOTA_DEFAULT,
+                "rrf_weight": MemoryStore.EVIDENCE_NEED_RRF_WEIGHT_DEFAULT,
+                "need_count": 0,
+            },
+            "evidence_need_channels": {},
+            "evidence_need_union_ids": [],
             "rerank_pool_ids": [],
             "final_ids": [],
             "edge_diagnostics": {
@@ -3008,9 +3056,14 @@ class MemoryStore:
                         terms.extend(value for value in values if isinstance(value, str))
                 for key in ("expansion_terms", "evidence_needs"):
                     values = plan.get(key, [])
-                    if isinstance(values, list):
-                        support_terms.extend(
-                            value for value in values if isinstance(value, str)
+                    if not isinstance(values, list):
+                        continue
+                    if key == "evidence_needs" and self.evidence_need_retrieval:
+                        # P4-A gives each evidence need its own bounded retrieval
+                        # channel; they no longer share the low-weight support query.
+                        continue
+                    support_terms.extend(
+                        value for value in values if isinstance(value, str)
                         )
             else:
                 terms.extend(self.model.plan_query(query, options or []))
@@ -3046,6 +3099,30 @@ class MemoryStore:
             )
             if unique_support_terms else None
         )
+        need_match_queries: List[str] = []
+        if self.evidence_need_retrieval:
+            planned_needs = query_plan.get("evidence_needs", [])
+            if isinstance(planned_needs, list):
+                for need in planned_needs:
+                    if not isinstance(need, str):
+                        continue
+                    need_terms = [
+                        term for term in re.findall(r"[\w]+", need, flags=re.UNICODE)
+                        if term.casefold() not in self.QUERY_STOP_WORDS
+                    ]
+                    if not need_terms:
+                        continue
+                    need_match_queries.append(
+                        " OR ".join(
+                            '"{}"'.format(term.replace('"', '')) for term in need_terms
+                        )
+                    )
+            retrieval_trace["evidence_need_diagnostics"] = {
+                "enabled": bool(need_match_queries),
+                "quota": self.evidence_need_quota,
+                "rrf_weight": self.evidence_need_rrf_weight,
+                "need_count": len(need_match_queries),
+            }
         entity_terms = [
             term for index, term in enumerate(raw_terms)
             if index > 0 and len(term) > 1 and term[0].isupper()
@@ -3146,6 +3223,62 @@ class MemoryStore:
                        LIMIT ?""",
                     (support_match_query, user_id, candidate_limit),
                 ).fetchall()
+            need_channel_rows: Dict[str, List[sqlite3.Row]] = {}
+            if need_match_queries:
+                need_query_specs = (
+                    ("raw", "messages_fts", ""),
+                    ("raw_porter", "messages_porter_fts", ""),
+                    ("fact", "facts_fts",
+                     "JOIN facts AS fact ON fact.id = {fts}.fact_id "
+                     "JOIN raw_messages AS raw ON raw.id = fact.source_message_id"),
+                    ("fact_porter", "facts_porter_fts",
+                     "JOIN facts AS fact ON fact.id = {fts}.fact_id "
+                     "JOIN raw_messages AS raw ON raw.id = fact.source_message_id"),
+                    ("context", "context_fts", ""),
+                    ("context_porter", "context_porter_fts", ""),
+                )
+                for need_index, need_query in enumerate(need_match_queries):
+                    for channel_name, fts_table, join_clause in need_query_specs:
+                        raw_alias = "raw" if join_clause else "raw"
+                        select_clause = (
+                            "SELECT raw.id, raw.content, raw.created_at, raw.event_ts"
+                        )
+                        from_clause = "FROM {fts}".format(fts=fts_table)
+                        effective_join = join_clause.format(fts=fts_table)
+                        if effective_join:
+                            from_clause += " " + effective_join
+                        else:
+                            from_clause += " JOIN raw_messages AS raw ON raw.id = {fts}.message_id".format(
+                                fts=fts_table
+                            )
+                        sql = (
+                            "{select} {from_clause} "
+                            "WHERE {fts} MATCH ? AND {fts}.user_id = ? "
+                            "ORDER BY bm25({fts}), raw.id DESC LIMIT ?"
+                        ).format(
+                            select=select_clause,
+                            from_clause=from_clause,
+                            fts=fts_table,
+                        )
+                        rows = connection.execute(
+                            sql, (need_query, user_id, candidate_limit)
+                        ).fetchall()
+                        need_channel_rows[
+                            "need_{}_{}".format(need_index, channel_name)
+                        ] = rows
+            need_union_ids: List[str] = []
+            seen_need_ids = set()
+            for rows in need_channel_rows.values():
+                for row in rows:
+                    candidate_id = "mem_{}".format(row["id"])
+                    if candidate_id not in seen_need_ids:
+                        seen_need_ids.add(candidate_id)
+                        need_union_ids.append(candidate_id)
+            retrieval_trace["evidence_need_channels"] = {
+                name: ["mem_{}".format(row["id"]) for row in rows]
+                for name, rows in need_channel_rows.items()
+            }
+            retrieval_trace["evidence_need_union_ids"] = list(need_union_ids)
             entity_raw_rows = []
             entity_porter_rows = []
             entity_context_rows = []
@@ -3987,8 +4120,16 @@ class MemoryStore:
             ((anchor_rows, self.anchor_rrf_weight),)
             if self.evidence_anchors else ()
         )
+        need_channels = (
+            tuple(
+                (rows, self.evidence_need_rrf_weight)
+                for rows in need_channel_rows.values()
+            )
+            if need_match_queries else ()
+        )
         ranked = fuse_channels(
             p1_channels
+            + need_channels
             + ((graph_rows, self.graph_rrf_weight),)
             + anchor_channel
             + adjacent_channel
@@ -4012,12 +4153,16 @@ class MemoryStore:
                 special_quota = self.anchor_rerank_quota
             else:
                 special_quota = self.graph_rerank_quota
-            base_budget = self.MODEL_RERANK_LIMIT - special_quota
+            need_quota = self.evidence_need_quota if need_match_queries else 0
+            base_budget = (
+                self.MODEL_RERANK_LIMIT - special_quota - need_quota
+            )
             rerank_pool = list(deduplicated[:base_budget])
             pool_ids = {result.id for result in rerank_pool}
             reserved_graph_ids: List[str] = []
             reserved_anchor_ids: List[str] = []
             reserved_adjacent_ids: List[str] = []
+            reserved_need_ids: List[str] = []
             if self.adjacent_turn_expansion:
                 for candidate_id in retrieval_trace["adjacent_candidate_ids"]:
                     if len(reserved_adjacent_ids) >= self.adjacent_candidate_limit:
@@ -4039,12 +4184,20 @@ class MemoryStore:
                     if candidate_id in result_by_id and candidate_id not in pool_ids:
                         reserved_graph_ids.append(candidate_id)
                         pool_ids.add(candidate_id)
+            if need_quota > 0:
+                for candidate_id in need_union_ids:
+                    if len(reserved_need_ids) >= need_quota:
+                        break
+                    if candidate_id in result_by_id and candidate_id not in pool_ids:
+                        reserved_need_ids.append(candidate_id)
+                        pool_ids.add(candidate_id)
             rerank_pool.extend(
                 result_by_id[item]
                 for item in (
                     reserved_graph_ids
                     + reserved_anchor_ids
                     + reserved_adjacent_ids
+                    + reserved_need_ids
                 )
             )
             for result in deduplicated:
@@ -4059,6 +4212,7 @@ class MemoryStore:
             retrieval_trace["reserved_graph_ids"] = list(reserved_graph_ids)
             retrieval_trace["reserved_anchor_ids"] = list(reserved_anchor_ids)
             retrieval_trace["reserved_adjacent_ids"] = list(reserved_adjacent_ids)
+            retrieval_trace["reserved_need_ids"] = list(reserved_need_ids)
             retrieval_trace["rerank_pool_ids"] = rerank_pool_ids
             retrieval_trace["promoted_graph_ids"] = [
                 candidate_id for candidate_id in rerank_pool_ids
@@ -4084,6 +4238,14 @@ class MemoryStore:
                     and candidate_id not in p1_counterfactual_ids
                 )
             ]
+            need_candidate_id_set = set(need_union_ids)
+            retrieval_trace["promoted_need_ids"] = [
+                candidate_id for candidate_id in rerank_pool_ids
+                if (
+                    candidate_id in need_candidate_id_set
+                    and candidate_id not in p1_counterfactual_ids
+                )
+            ]
             rerank_pool_id_set = set(rerank_pool_ids)
             displaced_p1_ids = [
                 candidate_id for candidate_id in p1_counterfactual_ids
@@ -4097,6 +4259,8 @@ class MemoryStore:
                 retrieval_trace["displaced_p1_for_anchor_ids"] = (
                     displaced_p1_ids
                 )
+            elif need_quota > 0:
+                retrieval_trace["displaced_p1_for_need_ids"] = displaced_p1_ids
             else:
                 retrieval_trace["displaced_p1_ids"] = displaced_p1_ids
             paths_by_source: Dict[str, List[Dict[str, Any]]] = {}
