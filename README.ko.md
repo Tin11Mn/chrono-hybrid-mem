@@ -22,7 +22,7 @@
 
 ChronoHybridMem은 대화 턴을 저장하고 질의와 가장 관련 있는 원본 증거를 검색하는 Docker 배포형 장기 메모리 서비스입니다. Agent Memory Challenge를 위해 개발되었으며, 의도적으로 증거 검색까지만 담당합니다. 벤치마크의 최종 답변은 생성하지 않습니다.
 
-기본 브랜치 `main`은 현재 검증된 안정적 제출 후 로컬 연구 구현인 P1입니다. 진행 중인 Evidence Graph 작업은 [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph)에서 별도로 이루어지며 실험 단계이므로 안정 버전 `main`에 포함되지 않습니다.
+기본 브랜치 `main`은 검증된 안정적 제출 후 로컬 연구 경로로 P1을 유지합니다. P3 Evidence Graph 코드는 기본적으로 꺼진 실험 연구 기능으로만 존재하며 안정 검색 경로의 일부가 아닙니다.
 
 ## 시스템이 하는 일
 
@@ -341,7 +341,7 @@ assets/      shared project artwork
 - Query, options, memory text는 prompt에서 신뢰할 수 없는 데이터로 취급하며 candidate allowlisting으로 모델 출력을 제한합니다. 이는 완전한 prompt-injection 방어를 주장하는 것이 아니라 완화책입니다.
 - OpenAI 기반 경로를 활성화하면 관련 message/query/candidate 내용이 구성된 원격 모델 서비스로 전송됩니다.
 - 저장소는 database-at-rest encryption, TLS termination 또는 API rate limiting을 제공하지 않습니다.
-- P3는 선언된 promotion gate를 통과하기 전까지 안정 `main`의 일부가 아닙니다. 저장소 관련 수정은 `main`에서 P3로 최소 commit만 전달해야 하며 실험 P3 코드를 안정 P1로 역병합해서는 안 됩니다.
+- P3는 선언된 promotion gate를 통과하기 전까지 `main`에서 기본적으로 꺼진 실험 연구 기능입니다. 평가 중 안정 P1 동작은 변하지 않아야 합니다.
 
 ## 인용 및 라이선스
 

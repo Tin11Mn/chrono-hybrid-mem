@@ -22,7 +22,7 @@
 
 ChronoHybridMem es un servicio de memoria a largo plazo desplegable con Docker que almacena turnos de conversación y recupera las evidencias originales más pertinentes para una consulta. Se desarrolló para el Agent Memory Challenge y se limita deliberadamente a la recuperación de evidencias: no genera la respuesta final del benchmark.
 
-La rama predeterminada, `main`, contiene P1, la implementación local de investigación estable y validada posterior al envío. El trabajo en curso sobre Evidence Graph se desarrolla por separado en [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph), es experimental y no forma parte de la rama estable `main`.
+La rama predeterminada, `main`, conserva P1 como su ruta de investigación local estable y validada posterior al envío. El código P3 Evidence Graph solo está presente como una capacidad experimental de investigación desactivada por defecto y no forma parte de la ruta de recuperación estable.
 
 ## Qué hace el sistema
 
@@ -341,7 +341,7 @@ assets/      shared project artwork
 - La consulta, las opciones y el texto de la memoria se tratan como datos de prompt no confiables; la lista de candidatos permitidos limita la salida del modelo. Se trata de una mitigación, no de una afirmación de prevención completa de la inyección de prompts.
 - Habilitar la ruta respaldada por OpenAI envía el contenido pertinente de mensajes, consultas y candidatos al servicio de modelo remoto configurado.
 - El repositorio no proporciona cifrado de la base de datos en reposo, terminación TLS ni limitación de frecuencia de la API.
-- P3 no forma parte de la rama estable `main` hasta que supere los filtros de promoción declarados. Las correcciones exclusivas del repositorio deben fluir desde `main` hacia P3 como commits mínimos, sin fusionar nunca el código experimental de P3 de vuelta en P1 estable.
+- Hasta superar los filtros de promoción declarados, P3 sigue siendo una capacidad experimental desactivada por defecto en `main`; el comportamiento estable de P1 debe permanecer sin cambios durante su evaluación.
 
 ## Cita y licencia
 
