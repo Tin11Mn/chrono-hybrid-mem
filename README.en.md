@@ -22,7 +22,7 @@
 
 ChronoHybridMem is a Docker-deployable long-term memory service that stores conversation turns and retrieves the original evidence most relevant to a query. It was developed for the Agent Memory Challenge and deliberately stops at evidence retrieval: it does not generate the benchmark's final answer.
 
-The default branch, `main`, is the current validated stable post-submission local research implementation, P1. Ongoing Evidence Graph work lives separately on [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) and is experimental—not part of stable `main`.
+The default branch, `main`, keeps P1 as its validated stable post-submission local research path. P3 Evidence Graph code is present only as a default-disabled experimental research surface and is not part of the stable retrieval path.
 
 ## What the system does
 
@@ -341,7 +341,7 @@ assets/      shared project artwork
 - Query, options, and memory text are treated as untrusted prompt data; candidate allowlisting limits model output. This is a mitigation, not a claim of complete prompt-injection prevention.
 - Enabling the OpenAI-backed path sends relevant message/query/candidate content to the configured remote model service.
 - The repository does not provide database-at-rest encryption, TLS termination, or API rate limiting.
-- P3 is not part of stable `main` until it passes its declared promotion gates. Repository-only fixes should flow from `main` into P3 as minimal commits, never by merging experimental P3 code back into stable P1.
+- P3 remains a default-disabled experimental research surface in `main` until it passes its declared promotion gates; stable P1 behavior must remain unchanged while it is evaluated.
 
 ## Citation and license
 
