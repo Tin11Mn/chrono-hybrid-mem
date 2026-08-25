@@ -256,7 +256,11 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              evidence_need_retrieval: bool = False,
              evidence_need_quota: int = 2,
              evidence_need_rrf_weight: float = 0.01,
-             adjacent_turn_expansion: bool = False) -> Dict[str, object]:
+             adjacent_turn_expansion: bool = False,
+             bridge_retrieval: bool = False,
+             bridge_max_terms: int = 3,
+             bridge_rrf_weight: float = 0.01,
+             bridge_rerank_quota: int = 2) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -317,6 +321,10 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 evidence_need_quota=evidence_need_quota,
                 evidence_need_rrf_weight=evidence_need_rrf_weight,
                 adjacent_turn_expansion=adjacent_turn_expansion,
+                bridge_retrieval=bridge_retrieval,
+                bridge_max_terms=bridge_max_terms,
+                bridge_rrf_weight=bridge_rrf_weight,
+                bridge_rerank_quota=bridge_rerank_quota,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -441,6 +449,17 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                         ),
                         "displaced_p1_for_adjacent_ids": retrieval_trace.get(
                             "displaced_p1_for_adjacent_ids", []
+                        ),
+                        "gold_bridge_positions": _gold_positions(
+                            gold_mem_ids,
+                            retrieval_trace.get("bridge_union_ids", []),
+                        ),
+                        "bridge_terms": retrieval_trace.get("bridge_terms", []),
+                        "promoted_bridge_ids": retrieval_trace.get(
+                            "promoted_bridge_ids", []
+                        ),
+                        "displaced_p1_for_bridge_ids": retrieval_trace.get(
+                            "displaced_p1_for_bridge_ids", []
                         ),
                         "evidence_need_union_ids": retrieval_trace.get(
                             "evidence_need_union_ids", []
@@ -575,6 +594,25 @@ def main() -> None:
             "Enable default-off P1.1/P4-B same-session +/-1 neighbor recovery "
             "with a reserved rerank-pool quota"
         ),
+    )
+    parser.add_argument(
+        "--bridge-retrieval", action="store_true",
+        help=(
+            "Enable default-off P4-C bridge second-pass retrieval for multi-hop "
+            "plans; requires --structured-query-plan"
+        ),
+    )
+    parser.add_argument(
+        "--bridge-max-terms", type=int, default=3,
+        help="P4-C max deterministic bridge terms (default 3)",
+    )
+    parser.add_argument(
+        "--bridge-rrf-weight", type=float, default=0.01,
+        help="P4-C low RRF weight for bridge candidates (default 0.01)",
+    )
+    parser.add_argument(
+        "--bridge-quota", type=int, default=2,
+        help="P4-C reserved rerank-pool slots for bridge candidates (default 2)",
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -1044,6 +1082,25 @@ def main() -> None:
         raise ValueError("--evidence-need-retrieval requires --structured-query-plan")
     if args.evidence_need_retrieval and args.fusion_alpha is not None:
         raise ValueError("--evidence-need-retrieval cannot use --fusion-alpha")
+    if args.bridge_retrieval and not args.structured_query_plan:
+        raise ValueError("--bridge-retrieval requires --structured-query-plan")
+    if args.bridge_retrieval and args.fusion_alpha is not None:
+        raise ValueError("--bridge-retrieval cannot use --fusion-alpha")
+    if (
+        isinstance(args.bridge_max_terms, bool)
+        or not 1 <= args.bridge_max_terms <= 5
+    ):
+        raise ValueError("--bridge-max-terms must be an integer between 1 and 5")
+    if (
+        isinstance(args.bridge_rrf_weight, bool)
+        or not 0 <= args.bridge_rrf_weight <= 1
+    ):
+        raise ValueError("--bridge-rrf-weight must be between 0 and 1")
+    if (
+        isinstance(args.bridge_quota, bool)
+        or not 0 <= args.bridge_quota <= 30
+    ):
+        raise ValueError("--bridge-quota must be an integer between 0 and 30")
     if (
         isinstance(args.evidence_need_quota, bool)
         or not 1 <= args.evidence_need_quota <= 30
@@ -1493,6 +1550,10 @@ def main() -> None:
         evidence_need_quota=args.evidence_need_quota,
         evidence_need_rrf_weight=args.evidence_need_rrf_weight,
         adjacent_turn_expansion=args.adjacent_turn_expansion,
+        bridge_retrieval=args.bridge_retrieval,
+        bridge_max_terms=args.bridge_max_terms,
+        bridge_rrf_weight=args.bridge_rrf_weight,
+        bridge_rerank_quota=args.bridge_quota,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)

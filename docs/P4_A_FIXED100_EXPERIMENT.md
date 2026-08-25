@@ -1,4 +1,18 @@
-# P4-A / P4-B 固定样本配对实验（2026-08-25，本地 Qwen3-4B 代理）
+# P4-A / P4-B / P4-C 固定样本配对实验（2026-08-25，本地 Qwen3-4B 代理）
+
+## P4-C 结论（fixed-200，CONDITIONAL）
+
+运行：`--structured-query-plan --max-questions 200 --include-question-diagnostics --bridge-retrieval --bridge-max-terms 3 --bridge-quota 2`（P4-A/B 关）；产物 `.locomo/p4c-bridge-fixed200.json`。实现：`app/storage.py`（`extract_bridge_terms` + second-pass 查询 + quota）、`scripts/evaluate_locomo_retrieval.py`（`--bridge-retrieval` 等）、`tests/test_p4c_bridge.py`（5 passed）。
+
+| 配置 | Hit@1 | Hit@3 | Hit@10 | MRR | NewGoldInPool | BridgePromoted | OffMiss→Top10 | Hit1 +/− |
+|---|---|---|---|---|---|---|---|---|
+| off | 0.565 | 0.685 | 0.730 | 0.6292 | — | — | — | — |
+| bridge | 0.565 | 0.685 | **0.740** | 0.6296 | **3** | **3** | **3** | +1/−1 |
+
+- **Bridge second-pass 确实找回 P1 没有的 gold**：3 题 NewGold（由 bridge 通道带入 pool），3 个 off-miss 被拉回 Top-10；Hit@10 +0.010。
+- 但 Hit@1 中性（+1 gained / −1 lost），增益小于 P4-A q2（NewGold 8 / OffMiss→Top10 4 / Hit@1 +0.01）。
+- 触发面小（仅 `intent==multi_hop` 或 `needs>=2`），且确定性提取会带入对话常用大写词（"Shared"/"Thanks"）噪音；第二查询以 bridge OR + need AND 约束，噪音候选影响有限。
+- 判定：**CONDITIONAL**——recall 假设成立、Hit@1 不降，作为可选组件保留（与 P4-A 互补：P4-A 打 fusion_miss，P4-C 打跨消息第二跳）；与 P4-A 的组合待测。
 
 ## P4-B 结论（fixed-200，REJECT）
 

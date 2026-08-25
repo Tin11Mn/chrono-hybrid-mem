@@ -484,6 +484,73 @@ def candidate_ranking_text(
     return "\n".join(parts)
 
 
+_BRIDGE_CAPITALIZED_PATTERN = re.compile(
+    r"\b[A-Z][a-zA-Z]{1,}(?:\s+[A-Z][a-zA-Z]{1,})*\b"
+)
+
+
+def extract_bridge_terms(
+    query: str,
+    candidate_texts: Sequence[str],
+    known_speakers: Sequence[str],
+    max_terms: int = 3,
+) -> List[str]:
+    """Deterministic bridge terms from first-pass evidence.
+
+    P4-C bridge extraction: capitalized spans from the first-pass evidence,
+    excluding the query's own terms, stop words, sentence-initial common words,
+    and the known participant names (their speaker prefixes are prefix noise).
+    The first hop can be a single candidate, so no cross-candidate co-occurrence
+    is required; terms are ordered by frequency then specificity. No model call.
+    """
+    query_lower = set(re.findall(r"[\w]+", query.casefold()))
+    speaker_lower = {
+        speaker.casefold().strip()
+        for speaker in known_speakers
+        if speaker.strip()
+    }
+    stop_words = MemoryStore.QUERY_STOP_WORDS
+    sentence_start_words = {
+        "a", "an", "he", "her", "his", "i", "i'm", "im", "it", "its", "me",
+        "my", "our", "she", "that", "the", "their", "there", "these", "they",
+        "this", "we", "you", "your",
+    }
+    selected: List[str] = []
+    seen: set = set()
+
+    def add_term(term: str) -> bool:
+        normalized = term.casefold().strip()
+        if (
+            not normalized
+            or normalized in stop_words
+            or normalized in query_lower
+            or normalized in speaker_lower
+            or normalized in sentence_start_words
+            or normalized in seen
+        ):
+            return False
+        seen.add(normalized)
+        selected.append(term)
+        return True
+
+    span_counts: Dict[str, int] = {}
+    span_originals: Dict[str, str] = {}
+    for text in candidate_texts:
+        for match in _BRIDGE_CAPITALIZED_PATTERN.finditer(text):
+            normalized = match.group(0).casefold()
+            span_counts[normalized] = span_counts.get(normalized, 0) + 1
+            if normalized not in span_originals:
+                span_originals[normalized] = match.group(0)
+    for normalized, _count in sorted(
+        span_counts.items(),
+        key=lambda item: (-item[1], -len(item[0])),
+    ):
+        if len(selected) >= max_terms:
+            break
+        add_term(span_originals[normalized])
+    return selected
+
+
 class MemoryStore:
     RRF_CONSTANT = 60
     MODEL_RERANK_LIMIT = 30
@@ -506,6 +573,13 @@ class MemoryStore:
     # reserved quota (default 2) instead of competing at core-intent weight.
     EVIDENCE_NEED_QUOTA_DEFAULT = 2
     EVIDENCE_NEED_RRF_WEIGHT_DEFAULT = 0.01
+    # P4-C bridge second-pass: for multi-hop plans, deterministic bridge terms
+    # (capitalized spans / speakers) are extracted from the first-pass evidence
+    # and re-queried together with each evidence need. The bridge channel gets a
+    # reserved pool quota; at most one second pass runs (no recursion).
+    BRIDGE_MAX_TERMS_DEFAULT = 3
+    BRIDGE_RRF_WEIGHT_DEFAULT = 0.01
+    BRIDGE_RERANK_QUOTA_DEFAULT = 2
     # Kept for controlled ablations; full LoCoMo evaluation showed that
     # hard entity binding harms adversarial cross-speaker questions overall.
     ENTITY_RRF_WEIGHT = 0.0
@@ -565,7 +639,11 @@ class MemoryStore:
                  adjacent_candidate_limit: int = ADJACENT_CANDIDATE_LIMIT,
                  evidence_need_retrieval: bool = False,
                  evidence_need_quota: int = EVIDENCE_NEED_QUOTA_DEFAULT,
-                 evidence_need_rrf_weight: float = EVIDENCE_NEED_RRF_WEIGHT_DEFAULT) -> None:
+                 evidence_need_rrf_weight: float = EVIDENCE_NEED_RRF_WEIGHT_DEFAULT,
+                 bridge_retrieval: bool = False,
+                 bridge_max_terms: int = BRIDGE_MAX_TERMS_DEFAULT,
+                 bridge_rrf_weight: float = BRIDGE_RRF_WEIGHT_DEFAULT,
+                 bridge_rerank_quota: int = BRIDGE_RERANK_QUOTA_DEFAULT) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -744,6 +822,38 @@ class MemoryStore:
         self.evidence_need_retrieval = evidence_need_retrieval
         self.evidence_need_quota = evidence_need_quota
         self.evidence_need_rrf_weight = evidence_need_rrf_weight
+        if not isinstance(bridge_retrieval, bool):
+            raise ValueError("bridge_retrieval must be a boolean")
+        if bridge_retrieval and not structured_query_plan:
+            raise ValueError("bridge_retrieval requires structured_query_plan")
+        if bridge_retrieval and dense_fusion_alpha is not None:
+            raise ValueError("bridge_retrieval cannot use dense_fusion_alpha")
+        if (
+            isinstance(bridge_max_terms, bool)
+            or not isinstance(bridge_max_terms, int)
+            or not 1 <= bridge_max_terms <= 5
+        ):
+            raise ValueError("bridge_max_terms must be an integer between 1 and 5")
+        if (
+            not isinstance(bridge_rrf_weight, (int, float))
+            or isinstance(bridge_rrf_weight, bool)
+            or not 0 <= bridge_rrf_weight <= 1
+        ):
+            raise ValueError("bridge_rrf_weight must be a number between 0 and 1")
+        if (
+            isinstance(bridge_rerank_quota, bool)
+            or not isinstance(bridge_rerank_quota, int)
+            or not 0 <= bridge_rerank_quota <= self.MODEL_RERANK_LIMIT
+        ):
+            raise ValueError(
+                "bridge_rerank_quota must be an integer between 0 and {}".format(
+                    self.MODEL_RERANK_LIMIT
+                )
+            )
+        self.bridge_retrieval = bridge_retrieval
+        self.bridge_max_terms = bridge_max_terms
+        self.bridge_rrf_weight = bridge_rrf_weight
+        self.bridge_rerank_quota = bridge_rerank_quota
         self._retrieval_diagnostics_lock = threading.Lock()
         self._last_query_plan: Dict[str, Any] = {}
         self._last_graph_candidate_ids: List[str] = []
@@ -799,14 +909,26 @@ class MemoryStore:
             "reserved_anchor_ids": [],
             "reserved_adjacent_ids": [],
             "reserved_need_ids": [],
+            "reserved_bridge_ids": [],
             "promoted_graph_ids": [],
             "promoted_anchor_ids": [],
             "promoted_adjacent_ids": [],
             "promoted_need_ids": [],
+            "promoted_bridge_ids": [],
             "displaced_p1_ids": [],
             "displaced_p1_for_anchor_ids": [],
             "displaced_p1_for_adjacent_ids": [],
             "displaced_p1_for_need_ids": [],
+            "displaced_p1_for_bridge_ids": [],
+            "bridge_diagnostics": {
+                "enabled": False,
+                "max_terms": MemoryStore.BRIDGE_MAX_TERMS_DEFAULT,
+                "rrf_weight": MemoryStore.BRIDGE_RRF_WEIGHT_DEFAULT,
+                "quota": MemoryStore.BRIDGE_RERANK_QUOTA_DEFAULT,
+            },
+            "bridge_terms": [],
+            "bridge_channels": {},
+            "bridge_union_ids": [],
             "evidence_need_diagnostics": {
                 "enabled": False,
                 "quota": MemoryStore.EVIDENCE_NEED_QUOTA_DEFAULT,
@@ -4141,12 +4263,142 @@ class MemoryStore:
         retrieval_trace["anchor_channel_only_ids"] = list(
             anchor_only_candidate_ids
         )
+        bridge_channel_rows: Dict[str, List[sqlite3.Row]] = {}
+        bridge_union_ids: List[str] = []
+        bridge_triggered = False
+        if self.bridge_retrieval:
+            planned_intent = query_plan.get("intent")
+            planned_needs = query_plan.get("evidence_needs", [])
+            if isinstance(planned_needs, list):
+                planned_needs = [
+                    value for value in planned_needs if isinstance(value, str)
+                ]
+            bridge_triggered = (
+                planned_intent == "multi_hop"
+                or len(planned_needs) >= 2
+            ) and bool(deduplicated)
+            retrieval_trace["bridge_diagnostics"] = {
+                "enabled": bridge_triggered,
+                "max_terms": self.bridge_max_terms,
+                "rrf_weight": self.bridge_rrf_weight,
+                "quota": self.bridge_rerank_quota,
+            }
+            if bridge_triggered:
+                first_pass_texts = [
+                    candidate.content for candidate in deduplicated[:8]
+                ]
+                with self._connection() as bridge_connection:
+                    speaker_rows = bridge_connection.execute(
+                        "SELECT DISTINCT role FROM raw_messages WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchall()
+                    known_speakers = [
+                        str(row["role"]).strip()
+                        for row in speaker_rows
+                        if str(row["role"]).strip()
+                    ]
+                    bridge_terms = extract_bridge_terms(
+                        query,
+                        first_pass_texts,
+                        known_speakers,
+                        max_terms=self.bridge_max_terms,
+                    )
+                    retrieval_trace["bridge_terms"] = list(bridge_terms)
+                    if bridge_terms:
+                        bridge_query_specs = (
+                            ("raw", "messages_fts", ""),
+                            ("raw_porter", "messages_porter_fts", ""),
+                            ("context", "context_fts", ""),
+                            ("context_porter", "context_porter_fts", ""),
+                        )
+                        bridge_clause = " OR ".join(
+                            '"{}"'.format(term.replace('"', ''))
+                            for term in bridge_terms
+                        )
+                        for need_index, need in enumerate(planned_needs[:2]):
+                            need_terms = [
+                                term
+                                for term in re.findall(
+                                    r"[\w]+", need, flags=re.UNICODE
+                                )
+                                if term.casefold() not in self.QUERY_STOP_WORDS
+                            ]
+                            if not need_terms:
+                                continue
+                            need_clause = " OR ".join(
+                                '"{}"'.format(term.replace('"', ''))
+                                for term in need_terms
+                            )
+                            second_query = (
+                                "({}) AND ({})".format(
+                                    bridge_clause, need_clause
+                                )
+                            )
+                            for channel_name, fts_table, join_clause in (
+                                bridge_query_specs
+                            ):
+                                from_clause = "FROM {fts}".format(fts=fts_table)
+                                if join_clause:
+                                    from_clause += " " + join_clause.format(
+                                        fts=fts_table
+                                    )
+                                else:
+                                    from_clause += (
+                                        " JOIN raw_messages AS raw ON raw.id = "
+                                        "{fts}.message_id"
+                                    ).format(fts=fts_table)
+                                sql = (
+                                    "{select} {from_clause} "
+                                    "WHERE {fts} MATCH ? AND {fts}.user_id = ? "
+                                    "ORDER BY bm25({fts}), raw.id DESC LIMIT ?"
+                                ).format(
+                                    select=(
+                                        "SELECT raw.id, raw.content, "
+                                        "raw.created_at, raw.event_ts"
+                                    ),
+                                    from_clause=from_clause,
+                                    fts=fts_table,
+                                )
+                                rows = bridge_connection.execute(
+                                    sql,
+                                    (second_query, user_id, candidate_limit),
+                                ).fetchall()
+                                bridge_channel_rows[
+                                    "bridge_{}_{}".format(
+                                        need_index, channel_name
+                                    )
+                                ] = rows
+                seen_bridge_ids = set()
+                for rows in bridge_channel_rows.values():
+                    for row in rows:
+                        candidate_id = "mem_{}".format(row["id"])
+                        if candidate_id not in seen_bridge_ids:
+                            seen_bridge_ids.add(candidate_id)
+                            bridge_union_ids.append(candidate_id)
+                retrieval_trace["bridge_channels"] = {
+                    name: ["mem_{}".format(row["id"]) for row in rows]
+                    for name, rows in bridge_channel_rows.items()
+                }
+                retrieval_trace["bridge_union_ids"] = list(bridge_union_ids)
         if self.model and deduplicated:
             message_ids = {
                 candidate["result"].id: candidate["message_id"]
                 for candidate in ranked
             }
             result_by_id = {result.id: result for result in deduplicated}
+            if bridge_union_ids:
+                for rows in bridge_channel_rows.values():
+                    for row in rows:
+                        candidate_id = "mem_{}".format(row["id"])
+                        if candidate_id in result_by_id:
+                            continue
+                        message_ids[candidate_id] = int(row["id"])
+                        result_by_id[candidate_id] = MemoryResult(
+                            id=candidate_id,
+                            content=str(row["content"]),
+                            score=0.0,
+                            created_at=row["created_at"],
+                        )
             if self.adjacent_turn_expansion:
                 special_quota = self.adjacent_candidate_limit
             elif self.evidence_anchors:
@@ -4154,8 +4406,12 @@ class MemoryStore:
             else:
                 special_quota = self.graph_rerank_quota
             need_quota = self.evidence_need_quota if need_match_queries else 0
+            bridge_quota = self.bridge_rerank_quota if bridge_union_ids else 0
             base_budget = (
-                self.MODEL_RERANK_LIMIT - special_quota - need_quota
+                self.MODEL_RERANK_LIMIT
+                - special_quota
+                - need_quota
+                - bridge_quota
             )
             rerank_pool = list(deduplicated[:base_budget])
             pool_ids = {result.id for result in rerank_pool}
@@ -4163,6 +4419,7 @@ class MemoryStore:
             reserved_anchor_ids: List[str] = []
             reserved_adjacent_ids: List[str] = []
             reserved_need_ids: List[str] = []
+            reserved_bridge_ids: List[str] = []
             if self.adjacent_turn_expansion:
                 for candidate_id in retrieval_trace["adjacent_candidate_ids"]:
                     if len(reserved_adjacent_ids) >= self.adjacent_candidate_limit:
@@ -4191,6 +4448,13 @@ class MemoryStore:
                     if candidate_id in result_by_id and candidate_id not in pool_ids:
                         reserved_need_ids.append(candidate_id)
                         pool_ids.add(candidate_id)
+            if bridge_quota > 0:
+                for candidate_id in bridge_union_ids:
+                    if len(reserved_bridge_ids) >= bridge_quota:
+                        break
+                    if candidate_id in result_by_id and candidate_id not in pool_ids:
+                        reserved_bridge_ids.append(candidate_id)
+                        pool_ids.add(candidate_id)
             rerank_pool.extend(
                 result_by_id[item]
                 for item in (
@@ -4198,6 +4462,7 @@ class MemoryStore:
                     + reserved_anchor_ids
                     + reserved_adjacent_ids
                     + reserved_need_ids
+                    + reserved_bridge_ids
                 )
             )
             for result in deduplicated:
@@ -4213,6 +4478,7 @@ class MemoryStore:
             retrieval_trace["reserved_anchor_ids"] = list(reserved_anchor_ids)
             retrieval_trace["reserved_adjacent_ids"] = list(reserved_adjacent_ids)
             retrieval_trace["reserved_need_ids"] = list(reserved_need_ids)
+            retrieval_trace["reserved_bridge_ids"] = list(reserved_bridge_ids)
             retrieval_trace["rerank_pool_ids"] = rerank_pool_ids
             retrieval_trace["promoted_graph_ids"] = [
                 candidate_id for candidate_id in rerank_pool_ids
@@ -4246,6 +4512,14 @@ class MemoryStore:
                     and candidate_id not in p1_counterfactual_ids
                 )
             ]
+            bridge_candidate_id_set = set(bridge_union_ids)
+            retrieval_trace["promoted_bridge_ids"] = [
+                candidate_id for candidate_id in rerank_pool_ids
+                if (
+                    candidate_id in bridge_candidate_id_set
+                    and candidate_id not in p1_counterfactual_ids
+                )
+            ]
             rerank_pool_id_set = set(rerank_pool_ids)
             displaced_p1_ids = [
                 candidate_id for candidate_id in p1_counterfactual_ids
@@ -4261,6 +4535,8 @@ class MemoryStore:
                 )
             elif need_quota > 0:
                 retrieval_trace["displaced_p1_for_need_ids"] = displaced_p1_ids
+            elif bridge_quota > 0:
+                retrieval_trace["displaced_p1_for_bridge_ids"] = displaced_p1_ids
             else:
                 retrieval_trace["displaced_p1_ids"] = displaced_p1_ids
             paths_by_source: Dict[str, List[Dict[str, Any]]] = {}
