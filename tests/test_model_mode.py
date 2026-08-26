@@ -24,6 +24,7 @@ from app.main import (
     instruction_speaker_conflict_only_from_environment,
     structured_query_plan_from_environment,
     set_aware_rerank_from_environment,
+    evidence_need_retrieval_from_environment,
     adjacent_turn_expansion_from_environment,
     adjacent_seed_limit_from_environment,
     adjacent_candidate_limit_from_environment,
@@ -107,6 +108,13 @@ def test_structured_query_plan_defaults_on_and_reads_false(monkeypatch):
 def test_set_aware_rerank_defaults_off(monkeypatch):
     monkeypatch.delenv("MEMORY_SET_AWARE_RERANK", raising=False)
     assert set_aware_rerank_from_environment() is False
+
+
+def test_evidence_need_retrieval_defaults_to_p4a_q2_and_can_be_disabled(monkeypatch):
+    monkeypatch.delenv("MEMORY_EVIDENCE_NEED_RETRIEVAL", raising=False)
+    assert evidence_need_retrieval_from_environment() is True
+    monkeypatch.setenv("MEMORY_EVIDENCE_NEED_RETRIEVAL", "false")
+    assert evidence_need_retrieval_from_environment() is False
 
 
 def test_adjacent_turn_expansion_defaults_off_with_frozen_bounded_defaults(monkeypatch):
