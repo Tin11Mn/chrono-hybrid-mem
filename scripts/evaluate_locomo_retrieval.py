@@ -267,7 +267,8 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              relax_quota: int = 2,
              p5_gate: bool = False,
              p5_near_tie_epsilon: float = 0.0005,
-             p5_min_evidence_channels: int = 2) -> Dict[str, object]:
+             p5_min_evidence_channels: int = 2,
+             p5_strata: str = "temporal,correction") -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -339,6 +340,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 p5_gate=p5_gate,
                 p5_near_tie_epsilon=p5_near_tie_epsilon,
                 p5_min_evidence_channels=p5_min_evidence_channels,
+                p5_strata=p5_strata,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -713,6 +715,14 @@ def main() -> None:
     parser.add_argument(
         "--p5-min-evidence-channels", type=int, default=2,
         help="P5 minimum P1-channel hits required for the runner-up to be promoted (default 2)",
+    )
+    parser.add_argument(
+        "--p5-strata", default="temporal,correction",
+        help=(
+            "P5 gate strata: comma-separated subset of all/temporal/correction "
+            "(default temporal,correction); the gate only fires for queries "
+            "matching the strata language"
+        ),
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -1238,6 +1248,11 @@ def main() -> None:
         or not 1 <= args.p5_min_evidence_channels <= 30
     ):
         raise ValueError("--p5-min-evidence-channels must be an integer between 1 and 30")
+    if not isinstance(args.p5_strata, str) or not args.p5_strata.strip():
+        raise ValueError("--p5-strata must be a non-empty string")
+    strata_parts = {part.strip() for part in args.p5_strata.split(",") if part.strip()}
+    if not strata_parts or not strata_parts.issubset({"all", "temporal", "correction"}):
+        raise ValueError("--p5-strata must be a comma-separated subset of all/temporal/correction")
     if (
         isinstance(args.evidence_need_quota, bool)
         or not 1 <= args.evidence_need_quota <= 30
@@ -1698,6 +1713,7 @@ def main() -> None:
         p5_gate=args.p5_gate,
         p5_near_tie_epsilon=args.p5_near_tie_epsilon,
         p5_min_evidence_channels=args.p5_min_evidence_channels,
+        p5_strata=args.p5_strata,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)

@@ -86,16 +86,18 @@ def test_p5_gate_requires_structured_plan():
 def test_p5_never_swaps_when_gap_is_wide():
     # With a large epsilon the near-tie condition fails (gap < eps is required,
     # so a huge epsilon makes every pair "near-tied"); use epsilon=0 so the gap
-    # is never < 0 -> never triggers.
+    # is never < 0 -> never triggers. Strata may exclude first.
     report = _run(p5_gate=True, epsilon=0.0)
     record = report["question_diagnostics"][0]
     assert record["p5_swapped"] is False
-    assert record["p5_gate"]["reason"] in ("not_near_tie", "missing_fusion_score")
+    assert record["p5_gate"]["reason"] in (
+        "not_near_tie", "missing_fusion_score", "strata_excluded",
+    )
 
 
 def test_p5_gate_recorded_without_swap_on_insufficient_evidence():
     # min_channels=30 forces insufficient evidence unless a fact exists:
-    # query-token overlap can never reach 30.
+    # query-token overlap can never reach 30. Strata may exclude first.
     report = _run(p5_gate=True, min_channels=30)
     record = report["question_diagnostics"][0]
     # Diagnostics must exist; swap must not happen without strong evidence.
@@ -104,6 +106,7 @@ def test_p5_gate_recorded_without_swap_on_insufficient_evidence():
     assert record["p5_gate"]["reason"] in (
         "runner_up_not_strictly_stronger",
         "not_near_tie",
+        "strata_excluded",
     )
 
 
@@ -118,3 +121,41 @@ def test_p5_swaps_only_when_runner_up_is_strictly_stronger():
             assert gate["top2_query_overlap"] > gate["top1_query_overlap"]
         elif gate.get("reason") == "runner_up_not_strictly_stronger":
             assert gate["top2_query_overlap"] <= gate["top1_query_overlap"]
+
+
+def test_p5_strata_excludes_non_matching_queries():
+    # Default strata = temporal,correction. The test query ("Which campus has
+    # the new building?") carries no temporal/correction language, so the gate
+    # must be excluded by strata before any evidence check.
+    report = _run(p5_gate=True, min_channels=1, epsilon=0.01)
+    record = report["question_diagnostics"][0]
+    gate = record["p5_gate"]
+    assert gate["strata_matched"] is False
+    assert gate["reason"] == "strata_excluded"
+    assert record["p5_swapped"] is False
+
+
+def test_p5_strata_all_allows_gate():
+    # --p5-strata all removes the strata restriction.
+    report = locomo_evaluation.evaluate(
+        SAMPLE_P5, [1, 3, 10], None,
+        model=P5PlanModel(), structured_query_plan=True,
+        p5_gate=True, p5_min_evidence_channels=1,
+        p5_near_tie_epsilon=0.01, p5_strata="all",
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    gate = record["p5_gate"]
+    assert gate["strata_matched"] is True
+    assert gate["reason"] not in ("strata_excluded",)
+
+
+def test_p5_strata_rejects_unknown_values():
+    import pytest
+
+    with pytest.raises(ValueError):
+        locomo_evaluation.evaluate(
+            SAMPLE_P5, [1], None,
+            model=P5PlanModel(), structured_query_plan=True,
+            p5_gate=True, p5_strata="bogus",
+        )
