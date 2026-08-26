@@ -95,7 +95,7 @@ def test_p5_never_swaps_when_gap_is_wide():
 
 def test_p5_gate_recorded_without_swap_on_insufficient_evidence():
     # min_channels=30 forces insufficient evidence unless a fact exists:
-    # top2 can never reach 30 P1 channels.
+    # query-token overlap can never reach 30.
     report = _run(p5_gate=True, min_channels=30)
     record = report["question_diagnostics"][0]
     # Diagnostics must exist; swap must not happen without strong evidence.
@@ -108,13 +108,13 @@ def test_p5_gate_recorded_without_swap_on_insufficient_evidence():
 
 
 def test_p5_swaps_only_when_runner_up_is_strictly_stronger():
-    # With min_channels=1 the runner-up must still exceed the Top-1 channel
-    # count; a swap requires strict dominance, not mere threshold.
+    # A swap requires the runner-up to exceed the Top-1 query-token overlap;
+    # strict dominance, not mere threshold.
     report = _run(p5_gate=True, min_channels=1, epsilon=0.01)
     record = report["question_diagnostics"][0]
     gate = record["p5_gate"]
-    if gate.get("top1_evidence_channels") is not None:
+    if gate.get("top1_query_overlap") is not None:
         if gate.get("reason") == "near_tie_with_stronger_evidence":
-            assert gate["top2_evidence_channels"] > gate["top1_evidence_channels"]
+            assert gate["top2_query_overlap"] > gate["top1_query_overlap"]
         elif gate.get("reason") == "runner_up_not_strictly_stronger":
-            assert gate["top2_evidence_channels"] <= gate["top1_evidence_channels"]
+            assert gate["top2_query_overlap"] <= gate["top1_query_overlap"]
