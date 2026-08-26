@@ -142,3 +142,29 @@ def test_p4a_requires_structured_plan():
             model=NeedPlanModel(["need"]),
             evidence_need_retrieval=True,
         )
+
+
+class _Args:
+    """argparse.Namespace stand-in for apply_baseline_mode."""
+
+    def __init__(self, quota=None):
+        self.baseline_mode = True
+        self.structured_query_plan = False
+        self.evidence_need_retrieval = False
+        self.evidence_need_quota = quota
+
+
+def test_baseline_mode_enables_p4a_q2_defaults():
+    args = _Args(quota=None)
+    locomo_evaluation.apply_baseline_mode(args)
+    assert args.structured_query_plan is True
+    assert args.evidence_need_retrieval is True
+    assert args.evidence_need_quota == 2
+
+
+def test_baseline_mode_keeps_explicit_quota():
+    args = _Args(quota=4)
+    locomo_evaluation.apply_baseline_mode(args)
+    assert args.structured_query_plan is True
+    assert args.evidence_need_retrieval is True
+    assert args.evidence_need_quota == 4
