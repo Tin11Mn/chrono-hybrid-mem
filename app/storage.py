@@ -585,6 +585,15 @@ class MemoryStore:
     # prevents combos from over-compressing the P1 base budget (fixed-200 showed
     # need 2 + bridge 2 pushed P1 to 26 and dropped Hit@1 below baseline).
     SIDECAR_SHARED_QUOTA_DEFAULT = 0
+    # P4-D query relaxation: only fires when every evidence-need channel returns
+    # zero hits (a pure lexical-miss signal). The relaxed query ORs FTS5 prefix
+    # forms (term*) of plan core terms + entities + query terms across the two
+    # raw channels at low weight with a reserved quota. Audit (fixed-200 +
+    # full 1977) found channel_miss cases are inference-type with zero lexical
+    # overlap, so this is expected to add little; kept default-off for a
+    # controlled ablation.
+    RELAX_RRF_WEIGHT_DEFAULT = 0.01
+    RELAX_QUOTA_DEFAULT = 2
     # Kept for controlled ablations; full LoCoMo evaluation showed that
     # hard entity binding harms adversarial cross-speaker questions overall.
     ENTITY_RRF_WEIGHT = 0.0
@@ -649,7 +658,10 @@ class MemoryStore:
                  bridge_max_terms: int = BRIDGE_MAX_TERMS_DEFAULT,
                  bridge_rrf_weight: float = BRIDGE_RRF_WEIGHT_DEFAULT,
                  bridge_rerank_quota: int = BRIDGE_RERANK_QUOTA_DEFAULT,
-                 sidecar_shared_quota: int = SIDECAR_SHARED_QUOTA_DEFAULT) -> None:
+                 sidecar_shared_quota: int = SIDECAR_SHARED_QUOTA_DEFAULT,
+                 query_relaxation: bool = False,
+                 relax_rrf_weight: float = RELAX_RRF_WEIGHT_DEFAULT,
+                 relax_quota: int = RELAX_QUOTA_DEFAULT) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -877,6 +889,31 @@ class MemoryStore:
                 "sidecar_shared_quota requires evidence_need_retrieval or bridge_retrieval"
             )
         self.sidecar_shared_quota = sidecar_shared_quota
+        if not isinstance(query_relaxation, bool):
+            raise ValueError("query_relaxation must be a boolean")
+        if query_relaxation and not evidence_need_retrieval:
+            raise ValueError(
+                "query_relaxation requires evidence_need_retrieval"
+            )
+        if (
+            not isinstance(relax_rrf_weight, (int, float))
+            or isinstance(relax_rrf_weight, bool)
+            or not 0 <= relax_rrf_weight <= 1
+        ):
+            raise ValueError("relax_rrf_weight must be a number between 0 and 1")
+        if (
+            isinstance(relax_quota, bool)
+            or not isinstance(relax_quota, int)
+            or not 0 <= relax_quota <= self.MODEL_RERANK_LIMIT
+        ):
+            raise ValueError(
+                "relax_quota must be an integer between 0 and {}".format(
+                    self.MODEL_RERANK_LIMIT
+                )
+            )
+        self.query_relaxation = query_relaxation
+        self.relax_rrf_weight = relax_rrf_weight
+        self.relax_quota = relax_quota
         self._retrieval_diagnostics_lock = threading.Lock()
         self._last_query_plan: Dict[str, Any] = {}
         self._last_graph_candidate_ids: List[str] = []
@@ -933,6 +970,7 @@ class MemoryStore:
             "reserved_adjacent_ids": [],
             "reserved_need_ids": [],
             "reserved_bridge_ids": [],
+            "reserved_relax_ids": [],
             "promoted_graph_ids": [],
             "promoted_anchor_ids": [],
             "promoted_adjacent_ids": [],
@@ -960,6 +998,15 @@ class MemoryStore:
             },
             "evidence_need_channels": {},
             "evidence_need_union_ids": [],
+            "relax_diagnostics": {
+                "enabled": False,
+                "rrf_weight": MemoryStore.RELAX_RRF_WEIGHT_DEFAULT,
+                "quota": MemoryStore.RELAX_QUOTA_DEFAULT,
+            },
+            "relax_channels": {},
+            "relax_union_ids": [],
+            "promoted_relax_ids": [],
+            "displaced_p1_for_relax_ids": [],
             "rerank_pool_ids": [],
             "final_ids": [],
             "edge_diagnostics": {
@@ -3424,6 +3471,88 @@ class MemoryStore:
                 for name, rows in need_channel_rows.items()
             }
             retrieval_trace["evidence_need_union_ids"] = list(need_union_ids)
+            relax_channel_rows: Dict[str, List[sqlite3.Row]] = {}
+            relax_union_ids: List[str] = []
+            relax_triggered = False
+            if (
+                self.query_relaxation
+                and need_match_queries
+                and not need_union_ids
+            ):
+                # Pure lexical-miss signal: every evidence-need channel came back
+                # empty. One bounded relaxation pass: OR FTS5 prefix forms
+                # (word*) of plan core terms + entities + query words across the
+                # two raw channels. No extra Search call; candidate_limit keeps
+                # the pass bounded.
+                relax_words: List[str] = []
+                seen_relax_words = set()
+                for key in ("core_terms", "entities", "expansion_terms"):
+                    values = query_plan.get(key, [])
+                    if not isinstance(values, list):
+                        continue
+                    for value in values:
+                        if not isinstance(value, str):
+                            continue
+                        for word in re.findall(r"[\w]+", value, flags=re.UNICODE):
+                            normalized = word.casefold()
+                            if (
+                                len(word) >= 3
+                                and normalized not in self.QUERY_STOP_WORDS
+                                and normalized not in seen_relax_words
+                            ):
+                                seen_relax_words.add(normalized)
+                                relax_words.append(word)
+                for word in raw_terms:
+                    normalized = word.casefold()
+                    if (
+                        len(word) >= 3
+                        and normalized not in self.QUERY_STOP_WORDS
+                        and normalized not in seen_relax_words
+                    ):
+                        seen_relax_words.add(normalized)
+                        relax_words.append(word)
+                if relax_words:
+                    relax_triggered = True
+                    relax_clause = " OR ".join(
+                        '"{}*"'.format(word.replace('"', '')) for word in relax_words
+                    )
+                    relax_query_specs = (
+                        ("raw", "messages_fts", ""),
+                        ("raw_porter", "messages_porter_fts", ""),
+                    )
+                    for channel_name, fts_table, _join in relax_query_specs:
+                        sql = (
+                            "SELECT raw.id, raw.content, raw.created_at, raw.event_ts "
+                            "FROM {fts} JOIN raw_messages AS raw "
+                            "ON raw.id = {fts}.message_id "
+                            "WHERE {fts} MATCH ? AND {fts}.user_id = ? "
+                            "ORDER BY bm25({fts}), raw.id DESC LIMIT ?"
+                        ).format(fts=fts_table)
+                        rows = connection.execute(
+                            sql, (relax_clause, user_id, candidate_limit)
+                        ).fetchall()
+                        relax_channel_rows[channel_name] = rows
+                    seen_relax_ids = set()
+                    for rows in relax_channel_rows.values():
+                        for row in rows:
+                            candidate_id = "mem_{}".format(row["id"])
+                            if candidate_id not in seen_relax_ids:
+                                seen_relax_ids.add(candidate_id)
+                                relax_union_ids.append(candidate_id)
+            retrieval_trace["relax_diagnostics"] = {
+                "enabled": relax_triggered,
+                "rrf_weight": self.relax_rrf_weight,
+                "quota": self.relax_quota,
+                "relax_clause": (
+                    " OR ".join('"{}*"'.format(word.replace('"', '')) for word in relax_words)
+                    if relax_triggered else None
+                ),
+            }
+            retrieval_trace["relax_channels"] = {
+                name: ["mem_{}".format(row["id"]) for row in rows]
+                for name, rows in relax_channel_rows.items()
+            }
+            retrieval_trace["relax_union_ids"] = list(relax_union_ids)
             entity_raw_rows = []
             entity_porter_rows = []
             entity_context_rows = []
@@ -4272,9 +4401,17 @@ class MemoryStore:
             )
             if need_match_queries else ()
         )
+        relax_channels = (
+            tuple(
+                (rows, self.relax_rrf_weight)
+                for rows in relax_channel_rows.values()
+            )
+            if relax_channel_rows else ()
+        )
         ranked = fuse_channels(
             p1_channels
             + need_channels
+            + relax_channels
             + ((graph_rows, self.graph_rrf_weight),)
             + anchor_channel
             + adjacent_channel
@@ -4430,10 +4567,11 @@ class MemoryStore:
                 special_quota = self.graph_rerank_quota
             need_quota = self.evidence_need_quota if need_match_queries else 0
             bridge_quota = self.bridge_rerank_quota if bridge_union_ids else 0
+            relax_quota = self.relax_quota if relax_union_ids else 0
             if self.sidecar_shared_quota > 0:
-                # Shared sidecar pool: need and bridge candidates compete for
-                # ONE total reservation, so the P1 base budget is compressed by
-                # at most sidecar_shared_quota slots regardless of how many
+                # Shared sidecar pool: need, bridge and relax candidates compete
+                # for ONE total reservation, so the P1 base budget is compressed
+                # by at most sidecar_shared_quota slots regardless of how many
                 # sidecar components are active.
                 base_budget = (
                     self.MODEL_RERANK_LIMIT
@@ -4446,6 +4584,7 @@ class MemoryStore:
                     - special_quota
                     - need_quota
                     - bridge_quota
+                    - relax_quota
                 )
             rerank_pool = list(deduplicated[:base_budget])
             pool_ids = {result.id for result in rerank_pool}
@@ -4454,6 +4593,7 @@ class MemoryStore:
             reserved_adjacent_ids: List[str] = []
             reserved_need_ids: List[str] = []
             reserved_bridge_ids: List[str] = []
+            reserved_relax_ids: List[str] = []
             if self.adjacent_turn_expansion:
                 for candidate_id in retrieval_trace["adjacent_candidate_ids"]:
                     if len(reserved_adjacent_ids) >= self.adjacent_candidate_limit:
@@ -4502,6 +4642,19 @@ class MemoryStore:
                         reserved_bridge_ids.append(candidate_id)
                         pool_ids.add(candidate_id)
                         sidecar_reserved += 1
+            if relax_quota > 0:
+                relax_limit = (
+                    self.sidecar_shared_quota
+                    if self.sidecar_shared_quota > 0
+                    else relax_quota
+                )
+                for candidate_id in relax_union_ids:
+                    if sidecar_reserved >= relax_limit:
+                        break
+                    if candidate_id in result_by_id and candidate_id not in pool_ids:
+                        reserved_relax_ids.append(candidate_id)
+                        pool_ids.add(candidate_id)
+                        sidecar_reserved += 1
             rerank_pool.extend(
                 result_by_id[item]
                 for item in (
@@ -4510,6 +4663,7 @@ class MemoryStore:
                     + reserved_adjacent_ids
                     + reserved_need_ids
                     + reserved_bridge_ids
+                    + reserved_relax_ids
                 )
             )
             for result in deduplicated:
@@ -4526,6 +4680,7 @@ class MemoryStore:
             retrieval_trace["reserved_adjacent_ids"] = list(reserved_adjacent_ids)
             retrieval_trace["reserved_need_ids"] = list(reserved_need_ids)
             retrieval_trace["reserved_bridge_ids"] = list(reserved_bridge_ids)
+            retrieval_trace["reserved_relax_ids"] = list(reserved_relax_ids)
             retrieval_trace["rerank_pool_ids"] = rerank_pool_ids
             retrieval_trace["promoted_graph_ids"] = [
                 candidate_id for candidate_id in rerank_pool_ids
@@ -4567,6 +4722,14 @@ class MemoryStore:
                     and candidate_id not in p1_counterfactual_ids
                 )
             ]
+            relax_candidate_id_set = set(relax_union_ids)
+            retrieval_trace["promoted_relax_ids"] = [
+                candidate_id for candidate_id in rerank_pool_ids
+                if (
+                    candidate_id in relax_candidate_id_set
+                    and candidate_id not in p1_counterfactual_ids
+                )
+            ]
             rerank_pool_id_set = set(rerank_pool_ids)
             displaced_p1_ids = [
                 candidate_id for candidate_id in p1_counterfactual_ids
@@ -4584,6 +4747,8 @@ class MemoryStore:
                 retrieval_trace["displaced_p1_for_need_ids"] = displaced_p1_ids
             elif bridge_quota > 0:
                 retrieval_trace["displaced_p1_for_bridge_ids"] = displaced_p1_ids
+            elif relax_quota > 0:
+                retrieval_trace["displaced_p1_for_relax_ids"] = displaced_p1_ids
             else:
                 retrieval_trace["displaced_p1_ids"] = displaced_p1_ids
             paths_by_source: Dict[str, List[Dict[str, Any]]] = {}

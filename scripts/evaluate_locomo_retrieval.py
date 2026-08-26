@@ -261,7 +261,10 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              bridge_max_terms: int = 3,
              bridge_rrf_weight: float = 0.01,
              bridge_rerank_quota: int = 2,
-             sidecar_shared_quota: int = 0) -> Dict[str, object]:
+             sidecar_shared_quota: int = 0,
+             query_relaxation: bool = False,
+             relax_rrf_weight: float = 0.01,
+             relax_quota: int = 2) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -327,6 +330,9 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 bridge_rrf_weight=bridge_rrf_weight,
                 bridge_rerank_quota=bridge_rerank_quota,
                 sidecar_shared_quota=sidecar_shared_quota,
+                query_relaxation=query_relaxation,
+                relax_rrf_weight=relax_rrf_weight,
+                relax_quota=relax_quota,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -465,6 +471,19 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                         ),
                         "evidence_need_union_ids": retrieval_trace.get(
                             "evidence_need_union_ids", []
+                        ),
+                        "relax_union_ids": retrieval_trace.get(
+                            "relax_union_ids", []
+                        ),
+                        "reserved_relax_ids": retrieval_trace.get(
+                            "reserved_relax_ids", []
+                        ),
+                        "promoted_relax_ids": retrieval_trace.get(
+                            "promoted_relax_ids", []
+                        ),
+                        "gold_relax_positions": _gold_positions(
+                            gold_mem_ids,
+                            retrieval_trace.get("relax_union_ids", []),
                         ),
                         "reserved_need_ids": retrieval_trace.get(
                             "reserved_need_ids", []
@@ -650,6 +669,22 @@ def main() -> None:
             "share ONE total rerank-pool reservation instead of each holding its "
             "own fixed quota (default 0 = disabled, independent quotas)"
         ),
+    )
+    parser.add_argument(
+        "--query-relaxation", action="store_true",
+        help=(
+            "Enable default-off P4-D query relaxation: when every evidence-need "
+            "channel returns zero hits, run one bounded FTS5 prefix (word*) pass "
+            "over raw channels; requires --evidence-need-retrieval"
+        ),
+    )
+    parser.add_argument(
+        "--relax-rrf-weight", type=float, default=0.01,
+        help="P4-D low RRF weight for relaxed candidates (default 0.01)",
+    )
+    parser.add_argument(
+        "--relax-quota", type=int, default=2,
+        help="P4-D reserved rerank-pool slots for relaxed candidates (default 2)",
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -1151,6 +1186,18 @@ def main() -> None:
         and not args.bridge_retrieval
     ):
         raise ValueError("--sidecar-shared-quota requires --evidence-need-retrieval or --bridge-retrieval")
+    if args.query_relaxation and not args.evidence_need_retrieval:
+        raise ValueError("--query-relaxation requires --evidence-need-retrieval")
+    if (
+        isinstance(args.relax_rrf_weight, bool)
+        or not 0 <= args.relax_rrf_weight <= 1
+    ):
+        raise ValueError("--relax-rrf-weight must be between 0 and 1")
+    if (
+        isinstance(args.relax_quota, bool)
+        or not 0 <= args.relax_quota <= 30
+    ):
+        raise ValueError("--relax-quota must be an integer between 0 and 30")
     if (
         isinstance(args.evidence_need_quota, bool)
         or not 1 <= args.evidence_need_quota <= 30
@@ -1605,6 +1652,9 @@ def main() -> None:
         bridge_rrf_weight=args.bridge_rrf_weight,
         bridge_rerank_quota=args.bridge_quota,
         sidecar_shared_quota=args.sidecar_shared_quota,
+        query_relaxation=args.query_relaxation,
+        relax_rrf_weight=args.relax_rrf_weight,
+        relax_quota=args.relax_quota,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)
