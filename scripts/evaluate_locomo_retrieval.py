@@ -531,6 +531,19 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
     return result
 
 
+def apply_baseline_mode(args) -> None:
+    """Enable the validated P4-A q2 baseline flags in place.
+
+    Structured planning plus evidence-need retrieval at quota 2 (weight 0.01).
+    Explicit --evidence-need-quota / --evidence-need-rrf-weight were parsed
+    before this runs, so their values always win over the shorthand defaults.
+    """
+    args.structured_query_plan = True
+    args.evidence_need_retrieval = True
+    if args.evidence_need_quota is None:
+        args.evidence_need_quota = 2
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run retrieval-only LoCoMo evaluation.")
     parser.add_argument("--dataset", required=True, help="Local path to LoCoMo locomo10.json")
@@ -587,6 +600,14 @@ def main() -> None:
     parser.add_argument(
         "--evidence-need-rrf-weight", type=float, default=0.01,
         help="P4-A low RRF weight for evidence-need channels (default 0.01)",
+    )
+    parser.add_argument(
+        "--baseline-mode", action="store_true",
+        help=(
+            "One-flag shorthand for the validated P4-A q2 baseline: enables "
+            "--structured-query-plan and --evidence-need-retrieval with quota 2. "
+            "Explicit --evidence-need-quota / --evidence-need-rrf-weight still win."
+        ),
     )
     parser.add_argument(
         "--adjacent-turn-expansion", action="store_true",
@@ -757,6 +778,8 @@ def main() -> None:
         default="direct",
     )
     args = parser.parse_args()
+    if args.baseline_mode:
+        apply_baseline_mode(args)
     if args.question_offset < 0:
         raise ValueError("--question-offset must be non-negative")
     if sum(bool(value) for value in (
