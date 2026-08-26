@@ -264,7 +264,10 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              sidecar_shared_quota: int = 0,
              query_relaxation: bool = False,
              relax_rrf_weight: float = 0.01,
-             relax_quota: int = 2) -> Dict[str, object]:
+             relax_quota: int = 2,
+             p5_gate: bool = False,
+             p5_near_tie_epsilon: float = 0.0005,
+             p5_min_evidence_channels: int = 2) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -333,6 +336,9 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 query_relaxation=query_relaxation,
                 relax_rrf_weight=relax_rrf_weight,
                 relax_quota=relax_quota,
+                p5_gate=p5_gate,
+                p5_near_tie_epsilon=p5_near_tie_epsilon,
+                p5_min_evidence_channels=p5_min_evidence_channels,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -484,6 +490,12 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                         "gold_relax_positions": _gold_positions(
                             gold_mem_ids,
                             retrieval_trace.get("relax_union_ids", []),
+                        ),
+                        "p5_gate": retrieval_trace.get("p5_diagnostics", {}),
+                        "p5_swapped": bool(
+                            retrieval_trace.get("p5_diagnostics", {}).get(
+                                "swapped_ids", []
+                            )
                         ),
                         "reserved_need_ids": retrieval_trace.get(
                             "reserved_need_ids", []
@@ -685,6 +697,22 @@ def main() -> None:
     parser.add_argument(
         "--relax-quota", type=int, default=2,
         help="P4-D reserved rerank-pool slots for relaxed candidates (default 2)",
+    )
+    parser.add_argument(
+        "--p5-gate", action="store_true",
+        help=(
+            "Enable default-off P5 selective rerank gate: swap Top-1/Top-2 only "
+            "when near-tied on fusion score AND the runner-up carries strictly "
+            "stronger P1-channel evidence (evidence-preserving, never unconditional)"
+        ),
+    )
+    parser.add_argument(
+        "--p5-near-tie-epsilon", type=float, default=0.0005,
+        help="P5 fusion-score gap below which Top-1/Top-2 count as near-tied (default 0.0005)",
+    )
+    parser.add_argument(
+        "--p5-min-evidence-channels", type=int, default=2,
+        help="P5 minimum P1-channel hits required for the runner-up to be promoted (default 2)",
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -1198,6 +1226,18 @@ def main() -> None:
         or not 0 <= args.relax_quota <= 30
     ):
         raise ValueError("--relax-quota must be an integer between 0 and 30")
+    if args.p5_gate and not args.structured_query_plan:
+        raise ValueError("--p5-gate requires --structured-query-plan")
+    if (
+        isinstance(args.p5_near_tie_epsilon, bool)
+        or not 0 <= args.p5_near_tie_epsilon <= 1
+    ):
+        raise ValueError("--p5-near-tie-epsilon must be between 0 and 1")
+    if (
+        isinstance(args.p5_min_evidence_channels, bool)
+        or not 1 <= args.p5_min_evidence_channels <= 30
+    ):
+        raise ValueError("--p5-min-evidence-channels must be an integer between 1 and 30")
     if (
         isinstance(args.evidence_need_quota, bool)
         or not 1 <= args.evidence_need_quota <= 30
@@ -1655,6 +1695,9 @@ def main() -> None:
         query_relaxation=args.query_relaxation,
         relax_rrf_weight=args.relax_rrf_weight,
         relax_quota=args.relax_quota,
+        p5_gate=args.p5_gate,
+        p5_near_tie_epsilon=args.p5_near_tie_epsilon,
+        p5_min_evidence_channels=args.p5_min_evidence_channels,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)

@@ -594,6 +594,14 @@ class MemoryStore:
     # controlled ablation.
     RELAX_RRF_WEIGHT_DEFAULT = 0.01
     RELAX_QUOTA_DEFAULT = 2
+    # P5 selective rerank gate: default-off deterministic reordering that only
+    # acts when the Search model's Top-1 vs Top-2 are near-tied on the fusion
+    # score AND the runner-up carries strictly stronger P1-channel evidence.
+    # Full-1977 paired diagnostics showed P4-A converts 56 rank-2/3 cases to
+    # Top-1 but displaces 71 Top-1 hits; P5 must gate on evidence and never
+    # promote unconditionally. Fusion scores live on MemoryResult.score.
+    P5_NEAR_TIE_EPSILON_DEFAULT = 0.0005
+    P5_MIN_EVIDENCE_CHANNELS = 2
     # Kept for controlled ablations; full LoCoMo evaluation showed that
     # hard entity binding harms adversarial cross-speaker questions overall.
     ENTITY_RRF_WEIGHT = 0.0
@@ -661,7 +669,10 @@ class MemoryStore:
                  sidecar_shared_quota: int = SIDECAR_SHARED_QUOTA_DEFAULT,
                  query_relaxation: bool = False,
                  relax_rrf_weight: float = RELAX_RRF_WEIGHT_DEFAULT,
-                 relax_quota: int = RELAX_QUOTA_DEFAULT) -> None:
+                 relax_quota: int = RELAX_QUOTA_DEFAULT,
+                 p5_gate: bool = False,
+                 p5_near_tie_epsilon: float = P5_NEAR_TIE_EPSILON_DEFAULT,
+                 p5_min_evidence_channels: int = P5_MIN_EVIDENCE_CHANNELS) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -914,6 +925,27 @@ class MemoryStore:
         self.query_relaxation = query_relaxation
         self.relax_rrf_weight = relax_rrf_weight
         self.relax_quota = relax_quota
+        if not isinstance(p5_gate, bool):
+            raise ValueError("p5_gate must be a boolean")
+        if p5_gate and not structured_query_plan:
+            raise ValueError("p5_gate requires structured_query_plan")
+        if (
+            not isinstance(p5_near_tie_epsilon, (int, float))
+            or isinstance(p5_near_tie_epsilon, bool)
+            or not 0 <= p5_near_tie_epsilon <= 1
+        ):
+            raise ValueError("p5_near_tie_epsilon must be a number between 0 and 1")
+        if (
+            isinstance(p5_min_evidence_channels, bool)
+            or not isinstance(p5_min_evidence_channels, int)
+            or not 1 <= p5_min_evidence_channels <= 30
+        ):
+            raise ValueError(
+                "p5_min_evidence_channels must be an integer between 1 and 30"
+            )
+        self.p5_gate = p5_gate
+        self.p5_near_tie_epsilon = p5_near_tie_epsilon
+        self.p5_min_evidence_channels = p5_min_evidence_channels
         self._retrieval_diagnostics_lock = threading.Lock()
         self._last_query_plan: Dict[str, Any] = {}
         self._last_graph_candidate_ids: List[str] = []
@@ -1007,6 +1039,20 @@ class MemoryStore:
             "relax_union_ids": [],
             "promoted_relax_ids": [],
             "displaced_p1_for_relax_ids": [],
+            "p5_diagnostics": {
+                "enabled": False,
+                "near_tie_epsilon": MemoryStore.P5_NEAR_TIE_EPSILON_DEFAULT,
+                "min_evidence_channels": MemoryStore.P5_MIN_EVIDENCE_CHANNELS,
+                "triggered": False,
+                "swapped_ids": [],
+                "top1_id": None,
+                "top1_score": None,
+                "top2_id": None,
+                "top2_score": None,
+                "top2_evidence_channels": 0,
+                "top2_has_fact": False,
+                "reason": None,
+            },
             "rerank_pool_ids": [],
             "final_ids": [],
             "edge_diagnostics": {
@@ -1160,6 +1206,98 @@ class MemoryStore:
         ]
         retrieval_trace["p2_newly_covered_tokens"] = selected_diagnostics
         return ordered_results
+
+    def _apply_selective_rerank_gate(
+        self,
+        results: Sequence[MemoryResult],
+        *,
+        query_plan: Dict[str, Any],
+        retrieval_trace: Dict[str, Any],
+        ranking_metadata: Optional[Dict[Any, Dict[str, Any]]] = None,
+        message_ids: Optional[Dict[str, int]] = None,
+    ) -> List[MemoryResult]:
+        """P5 selective gate: swap Top-1/Top-2 only when they are near-tied on
+        the fusion score AND the runner-up carries strictly stronger P1-channel
+        evidence. Default-off; never promotes unconditionally."""
+
+        diagnostics = retrieval_trace["p5_diagnostics"]
+        diagnostics.update({
+            "enabled": self.p5_gate,
+            "near_tie_epsilon": self.p5_near_tie_epsilon,
+            "min_evidence_channels": self.p5_min_evidence_channels,
+        })
+        original = list(results)
+        if (
+            not self.p5_gate
+            or len(original) < 2
+            or not retrieval_trace.get("p1_channels")
+        ):
+            return original
+
+        top1, top2 = original[0], original[1]
+        top1_score = getattr(top1, "score", None)
+        top2_score = getattr(top2, "score", None)
+        if top1_score is None or top2_score is None:
+            diagnostics["reason"] = "missing_fusion_score"
+            return original
+        score_gap = top1_score - top2_score
+        if score_gap >= self.p5_near_tie_epsilon:
+            diagnostics.update({
+                "top1_id": top1.id,
+                "top1_score": top1_score,
+                "top2_id": top2.id,
+                "top2_score": top2_score,
+                "reason": "not_near_tie",
+            })
+            return original
+
+        # Evidence strength: count P1-channel hits for BOTH candidates. P1
+        # channels are multi-view projections of the same content, so an
+        # absolute threshold has no discrimination (almost every candidate
+        # hits >=2 channels). The gate must require the runner-up to be
+        # STRICTLY stronger than the current Top-1, plus an optional fact
+        # annotation as an independent signal.
+        top1_channel_count = 0
+        top2_channel_count = 0
+        for rows in retrieval_trace.get("p1_channels", {}).values():
+            if not isinstance(rows, list):
+                continue
+            if top1.id in rows:
+                top1_channel_count += 1
+            if top2.id in rows:
+                top2_channel_count += 1
+        has_fact = False
+        if ranking_metadata and message_ids:
+            raw_message_id = message_ids.get(top2.id)
+            if raw_message_id is not None and ranking_metadata.get(raw_message_id, {}).get("facts"):
+                has_fact = True
+
+        diagnostics.update({
+            "top1_id": top1.id,
+            "top1_score": top1_score,
+            "top2_id": top2.id,
+            "top2_score": top2_score,
+            "top1_evidence_channels": top1_channel_count,
+            "top2_evidence_channels": top2_channel_count,
+            "top2_has_fact": has_fact,
+        })
+        strictly_stronger = (
+            top2_channel_count > top1_channel_count
+            and top2_channel_count >= self.p5_min_evidence_channels
+        ) or has_fact
+        if not strictly_stronger:
+            diagnostics["reason"] = "runner_up_not_strictly_stronger"
+            return original
+
+        # Both conditions met: swap Top-1/Top-2. The loser keeps rank 2 so no
+        # Top-1 evidence is lost from the visible set.
+        swapped = [top2, top1] + original[2:]
+        diagnostics.update({
+            "triggered": True,
+            "swapped_ids": [top2.id, top1.id],
+            "reason": "near_tie_with_stronger_evidence",
+        })
+        return swapped
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -3209,6 +3347,8 @@ class MemoryStore:
                top_k: int) -> List[MemoryResult]:
         speaker_conflict = False
         retrieval_trace = self._empty_retrieval_trace()
+        message_ids: Dict[str, int] = {}
+        ranking_metadata: Dict[Any, Dict[str, Any]] = {}
         retrieval_trace["edge_diagnostics"][
             "candidate_limit"
         ] = self.graph_max_candidates
@@ -4780,6 +4920,13 @@ class MemoryStore:
             deduplicated,
             query_plan=query_plan,
             retrieval_trace=retrieval_trace,
+        )
+        deduplicated = self._apply_selective_rerank_gate(
+            deduplicated,
+            query_plan=query_plan,
+            retrieval_trace=retrieval_trace,
+            ranking_metadata=ranking_metadata,
+            message_ids=message_ids if self.model else None,
         )
         final_results = deduplicated[:top_k]
         retrieval_trace["final_ids"] = [
