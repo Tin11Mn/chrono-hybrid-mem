@@ -1211,14 +1211,16 @@ class MemoryStore:
         self,
         results: Sequence[MemoryResult],
         *,
+        query: str,
         query_plan: Dict[str, Any],
         retrieval_trace: Dict[str, Any],
         ranking_metadata: Optional[Dict[Any, Dict[str, Any]]] = None,
         message_ids: Optional[Dict[str, int]] = None,
     ) -> List[MemoryResult]:
         """P5 selective gate: swap Top-1/Top-2 only when they are near-tied on
-        the fusion score AND the runner-up carries strictly stronger P1-channel
-        evidence. Default-off; never promotes unconditionally."""
+        the fusion score AND the runner-up has strictly more query-token
+        overlap with the question than the current Top-1 (plus an optional fact
+        annotation). Default-off; never promotes unconditionally."""
 
         diagnostics = retrieval_trace["p5_diagnostics"]
         diagnostics.update({
@@ -1251,12 +1253,30 @@ class MemoryStore:
             })
             return original
 
-        # Evidence strength: count P1-channel hits for BOTH candidates. P1
-        # channels are multi-view projections of the same content, so an
-        # absolute threshold has no discrimination (almost every candidate
-        # hits >=2 channels). The gate must require the runner-up to be
-        # STRICTLY stronger than the current Top-1, plus an optional fact
-        # annotation as an independent signal.
+        # Query-token overlap: how many non-stopword query tokens appear in each
+        # candidate's content. This is a correctness-adjacent signal (a runner-up
+        # that literally restates more of the question is more likely the answer),
+        # unlike P1 channel counts, which are multi-view projections of the same
+        # content and carry no discrimination.
+        query_tokens = {
+            token.casefold()
+            for token in re.findall(r"[\w]+", query, flags=re.UNICODE)
+            if token.casefold() not in self.QUERY_STOP_WORDS
+        }
+
+        def overlap_count(result: MemoryResult) -> int:
+            content_tokens = {
+                token.casefold()
+                for token in re.findall(
+                    r"[\w]+", result.content, flags=re.UNICODE
+                )
+            }
+            return len(query_tokens & content_tokens)
+
+        top1_overlap = overlap_count(top1)
+        top2_overlap = overlap_count(top2)
+
+        # P1-channel counts stay as diagnostics only (multi-view, no signal).
         top1_channel_count = 0
         top2_channel_count = 0
         for rows in retrieval_trace.get("p1_channels", {}).values():
@@ -1277,13 +1297,15 @@ class MemoryStore:
             "top1_score": top1_score,
             "top2_id": top2.id,
             "top2_score": top2_score,
+            "top1_query_overlap": top1_overlap,
+            "top2_query_overlap": top2_overlap,
             "top1_evidence_channels": top1_channel_count,
             "top2_evidence_channels": top2_channel_count,
             "top2_has_fact": has_fact,
         })
         strictly_stronger = (
-            top2_channel_count > top1_channel_count
-            and top2_channel_count >= self.p5_min_evidence_channels
+            top2_overlap > top1_overlap
+            and top2_overlap >= self.p5_min_evidence_channels
         ) or has_fact
         if not strictly_stronger:
             diagnostics["reason"] = "runner_up_not_strictly_stronger"
@@ -4923,6 +4945,7 @@ class MemoryStore:
         )
         deduplicated = self._apply_selective_rerank_gate(
             deduplicated,
+            query=query,
             query_plan=query_plan,
             retrieval_trace=retrieval_trace,
             ranking_metadata=ranking_metadata,
