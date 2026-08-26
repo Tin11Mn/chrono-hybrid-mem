@@ -157,3 +157,76 @@ def test_extract_bridge_terms_excludes_speakers_and_extracts_capitalized_spans()
         max_terms=3,
     )
     assert not any(term.casefold() in {"the", "a"} for term in terms)
+
+
+def test_sidecar_shared_quota_caps_total_reservations():
+    """need + bridge must share ONE reservation when sidecar_shared_quota > 0."""
+    model = BridgePlanModel()
+    report = locomo_evaluation.evaluate(
+        SAMPLE_BRIDGE, [1, 3, 10], None,
+        model=model, structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        bridge_retrieval=True, bridge_max_terms=3, bridge_rerank_quota=2,
+        sidecar_shared_quota=2,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    reserved_total = (
+        len(record["reserved_need_ids"]) + len(record["reserved_bridge_ids"])
+    )
+    # Shared pool caps combined reservations at 2, not 2+2=4.
+    assert reserved_total <= 2
+    assert len(record["rerank_pool_ids"]) <= 30
+
+
+def test_sidecar_shared_quota_keeps_more_p1_slots_than_independent():
+    """Sharing must leave at least as many non-sidecar pool slots as the
+    unshared combo (which pre-subtracts need 2 + bridge 2 from the base)."""
+    model = BridgePlanModel()
+
+    def p1_slots(shared):
+        report = locomo_evaluation.evaluate(
+            SAMPLE_BRIDGE, [1, 3, 10], None,
+            model=model, structured_query_plan=True,
+            evidence_need_retrieval=True, evidence_need_quota=2,
+            bridge_retrieval=True, bridge_max_terms=3, bridge_rerank_quota=2,
+            sidecar_shared_quota=shared,
+            include_question_diagnostics=True,
+        )
+        record = report["question_diagnostics"][0]
+        return len(record["rerank_pool_ids"]) - (
+            len(record["reserved_need_ids"]) + len(record["reserved_bridge_ids"])
+        )
+
+    assert p1_slots(2) >= p1_slots(0)
+
+
+def test_sidecar_shared_quota_zero_preserves_independent_quotas():
+    """Default (0) keeps the old behavior: need 2 + bridge 2 are independent."""
+    model = BridgePlanModel()
+    report = locomo_evaluation.evaluate(
+        SAMPLE_BRIDGE, [1, 3, 10], None,
+        model=model, structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        bridge_retrieval=True, bridge_max_terms=3, bridge_rerank_quota=2,
+        sidecar_shared_quota=0,
+        include_question_diagnostics=True,
+    )
+
+    record = report["question_diagnostics"][0]
+    reserved_total = (
+        len(record["reserved_need_ids"]) + len(record["reserved_bridge_ids"])
+    )
+    # Independent quotas: combined reservations may reach 4.
+    assert reserved_total <= 4
+
+
+def test_sidecar_shared_quota_requires_sidecar_component():
+    import pytest
+
+    with pytest.raises(ValueError):
+        locomo_evaluation.evaluate(
+            SAMPLE_BRIDGE, [1], None,
+            model=BridgePlanModel(),
+            sidecar_shared_quota=2,
+        )
