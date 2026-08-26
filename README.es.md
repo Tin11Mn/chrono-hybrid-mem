@@ -22,7 +22,7 @@
 
 ChronoHybridMem es un servicio de memoria a largo plazo desplegable con Docker que almacena turnos de conversación y recupera las evidencias originales más pertinentes para una consulta. Se desarrolló para el Agent Memory Challenge y se limita deliberadamente a la recuperación de evidencias: no genera la respuesta final del benchmark.
 
-La rama predeterminada, `main`, conserva P1 como su ruta de investigación local estable y validada posterior al envío. El código P3 Evidence Graph solo está presente como una capacidad experimental de investigación desactivada por defecto y no forma parte de la ruta de recuperación estable.
+La rama predeterminada, `main`, utiliza P4-A q2 como su línea base estable y validada de investigación local posterior al envío. El código P3 Evidence Graph sigue siendo una capacidad experimental desactivada por defecto y no forma parte de la ruta de recuperación estable.
 
 ## Qué hace el sistema
 
@@ -66,7 +66,9 @@ El servicio estable se rige por seis principios:
 - La búsqueda en memoria nunca genera la respuesta del benchmark.
 - La reproducibilidad y las pruebas de regresión acotadas tienen prioridad sobre la complejidad adicional.
 
-## Canalización estable actual: P1
+## Canalización estable actual: P4-A q2
+
+La ruta estable predeterminada combina la planificación estructurada P1 con la recuperación independiente evidence-need de P4-A. P4-A recupera cada `evidence_need` mediante un canal independiente acotado y reserva 2 candidatos en el pool de reranking; no añade llamadas al modelo Search ni genera respuestas. Use `MEMORY_EVIDENCE_NEED_RETRIEVAL=false` para reproducir la ruta P1 histórica.
 
 ### Add
 
@@ -102,13 +104,14 @@ La organización ha confirmado formalmente que el resultado oficial corresponde 
 
 ### B. Investigación local estable posterior al envío
 
-El repositorio registra la siguiente ejecución local completa de P1 sobre 1,977 preguntas de LoCoMo aptas:
+El repositorio registra las siguientes ejecuciones locales completas sobre 1,977 preguntas de LoCoMo aptas:
 
 | Método | Hit@1 | Hit@3 | Hit@10 | MRR |
 |---|---:|---:|---:|---:|
 | Planificador estructurado P1 + proxy local Qwen3-4B | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
+| **P4-A q2 (línea base actual más fuerte con proxy local)** | **0.5776** | **0.7198** | **0.7643** | **0.6501** |
 
-Este es un resultado completo histórico registrado el 2026-08-16: investigación local de LoCoMo posterior al envío, no un resultado oficial del leaderboard. La ejecución utilizó un servidor Qwen3-4B en loopback para la planificación de Search y la ordenación de evidencias, con P1 habilitado explícitamente. No se ejecutó un control de planificador plano sobre las 1,977 preguntas completas, por lo que la tabla no demuestra una diferencia entre el planificador plano y P1 para el conjunto completo. Consulte [Evaluación de P1 con un modelo local](docs/P1_LOCAL_EVALUATION.md) para conocer el protocolo, las métricas por categoría y los detalles de reproducción.
+Estos son resultados de investigación local de LoCoMo posterior al envío, no resultados oficiales del leaderboard. P4-A q2 utilizó un servidor Qwen3-4B en loopback para planificación de Search y ordenación de evidencias; frente a la línea base proxy P1 emparejada, Hit@1 aumentó 0.0015, Hit@3 0.0041, Hit@10 0.0025 y MRR 0.0022, recuperando 8 fallos previos de Top-10 hacia Top-10. Consulte la [validación completa de P4-A](docs/P4_A_FULL1977_VALIDATION.md) y la [Evaluación de P1 con un modelo local](docs/P1_LOCAL_EVALUATION.md) para el protocolo y los límites.
 
 ### C. Evidencia proxy y experimental
 
