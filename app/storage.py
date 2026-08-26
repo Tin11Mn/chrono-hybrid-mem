@@ -580,6 +580,11 @@ class MemoryStore:
     BRIDGE_MAX_TERMS_DEFAULT = 3
     BRIDGE_RRF_WEIGHT_DEFAULT = 0.01
     BRIDGE_RERANK_QUOTA_DEFAULT = 2
+    # Shared sidecar pool: when >0, P4-A need and P4-C bridge candidates share
+    # one total reservation instead of each holding its own fixed quota. This
+    # prevents combos from over-compressing the P1 base budget (fixed-200 showed
+    # need 2 + bridge 2 pushed P1 to 26 and dropped Hit@1 below baseline).
+    SIDECAR_SHARED_QUOTA_DEFAULT = 0
     # Kept for controlled ablations; full LoCoMo evaluation showed that
     # hard entity binding harms adversarial cross-speaker questions overall.
     ENTITY_RRF_WEIGHT = 0.0
@@ -643,7 +648,8 @@ class MemoryStore:
                  bridge_retrieval: bool = False,
                  bridge_max_terms: int = BRIDGE_MAX_TERMS_DEFAULT,
                  bridge_rrf_weight: float = BRIDGE_RRF_WEIGHT_DEFAULT,
-                 bridge_rerank_quota: int = BRIDGE_RERANK_QUOTA_DEFAULT) -> None:
+                 bridge_rerank_quota: int = BRIDGE_RERANK_QUOTA_DEFAULT,
+                 sidecar_shared_quota: int = SIDECAR_SHARED_QUOTA_DEFAULT) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -854,6 +860,23 @@ class MemoryStore:
         self.bridge_max_terms = bridge_max_terms
         self.bridge_rrf_weight = bridge_rrf_weight
         self.bridge_rerank_quota = bridge_rerank_quota
+        if (
+            isinstance(sidecar_shared_quota, bool)
+            or not isinstance(sidecar_shared_quota, int)
+            or not 0 <= sidecar_shared_quota <= self.MODEL_RERANK_LIMIT
+        ):
+            raise ValueError(
+                "sidecar_shared_quota must be an integer between 0 and {}".format(
+                    self.MODEL_RERANK_LIMIT
+                )
+            )
+        if sidecar_shared_quota > 0 and not (
+            evidence_need_retrieval or bridge_retrieval
+        ):
+            raise ValueError(
+                "sidecar_shared_quota requires evidence_need_retrieval or bridge_retrieval"
+            )
+        self.sidecar_shared_quota = sidecar_shared_quota
         self._retrieval_diagnostics_lock = threading.Lock()
         self._last_query_plan: Dict[str, Any] = {}
         self._last_graph_candidate_ids: List[str] = []
@@ -4407,12 +4430,23 @@ class MemoryStore:
                 special_quota = self.graph_rerank_quota
             need_quota = self.evidence_need_quota if need_match_queries else 0
             bridge_quota = self.bridge_rerank_quota if bridge_union_ids else 0
-            base_budget = (
-                self.MODEL_RERANK_LIMIT
-                - special_quota
-                - need_quota
-                - bridge_quota
-            )
+            if self.sidecar_shared_quota > 0:
+                # Shared sidecar pool: need and bridge candidates compete for
+                # ONE total reservation, so the P1 base budget is compressed by
+                # at most sidecar_shared_quota slots regardless of how many
+                # sidecar components are active.
+                base_budget = (
+                    self.MODEL_RERANK_LIMIT
+                    - special_quota
+                    - self.sidecar_shared_quota
+                )
+            else:
+                base_budget = (
+                    self.MODEL_RERANK_LIMIT
+                    - special_quota
+                    - need_quota
+                    - bridge_quota
+                )
             rerank_pool = list(deduplicated[:base_budget])
             pool_ids = {result.id for result in rerank_pool}
             reserved_graph_ids: List[str] = []
@@ -4441,20 +4475,33 @@ class MemoryStore:
                     if candidate_id in result_by_id and candidate_id not in pool_ids:
                         reserved_graph_ids.append(candidate_id)
                         pool_ids.add(candidate_id)
+            sidecar_reserved = 0
             if need_quota > 0:
+                need_limit = (
+                    self.sidecar_shared_quota
+                    if self.sidecar_shared_quota > 0
+                    else need_quota
+                )
                 for candidate_id in need_union_ids:
-                    if len(reserved_need_ids) >= need_quota:
+                    if sidecar_reserved >= need_limit:
                         break
                     if candidate_id in result_by_id and candidate_id not in pool_ids:
                         reserved_need_ids.append(candidate_id)
                         pool_ids.add(candidate_id)
+                        sidecar_reserved += 1
             if bridge_quota > 0:
+                bridge_limit = (
+                    self.sidecar_shared_quota
+                    if self.sidecar_shared_quota > 0
+                    else bridge_quota
+                )
                 for candidate_id in bridge_union_ids:
-                    if len(reserved_bridge_ids) >= bridge_quota:
+                    if sidecar_reserved >= bridge_limit:
                         break
                     if candidate_id in result_by_id and candidate_id not in pool_ids:
                         reserved_bridge_ids.append(candidate_id)
                         pool_ids.add(candidate_id)
+                        sidecar_reserved += 1
             rerank_pool.extend(
                 result_by_id[item]
                 for item in (

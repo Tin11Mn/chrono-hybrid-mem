@@ -260,7 +260,8 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              bridge_retrieval: bool = False,
              bridge_max_terms: int = 3,
              bridge_rrf_weight: float = 0.01,
-             bridge_rerank_quota: int = 2) -> Dict[str, object]:
+             bridge_rerank_quota: int = 2,
+             sidecar_shared_quota: int = 0) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -325,6 +326,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 bridge_max_terms=bridge_max_terms,
                 bridge_rrf_weight=bridge_rrf_weight,
                 bridge_rerank_quota=bridge_rerank_quota,
+                sidecar_shared_quota=sidecar_shared_quota,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -463,6 +465,12 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                         ),
                         "evidence_need_union_ids": retrieval_trace.get(
                             "evidence_need_union_ids", []
+                        ),
+                        "reserved_need_ids": retrieval_trace.get(
+                            "reserved_need_ids", []
+                        ),
+                        "reserved_bridge_ids": retrieval_trace.get(
+                            "reserved_bridge_ids", []
                         ),
                         "promoted_need_ids": retrieval_trace.get(
                             "promoted_need_ids", []
@@ -634,6 +642,14 @@ def main() -> None:
     parser.add_argument(
         "--bridge-quota", type=int, default=2,
         help="P4-C reserved rerank-pool slots for bridge candidates (default 2)",
+    )
+    parser.add_argument(
+        "--sidecar-shared-quota", type=int, default=0,
+        help=(
+            "Shared sidecar pool: when >0, P4-A need and P4-C bridge candidates "
+            "share ONE total rerank-pool reservation instead of each holding its "
+            "own fixed quota (default 0 = disabled, independent quotas)"
+        ),
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -1125,6 +1141,17 @@ def main() -> None:
     ):
         raise ValueError("--bridge-quota must be an integer between 0 and 30")
     if (
+        isinstance(args.sidecar_shared_quota, bool)
+        or not 0 <= args.sidecar_shared_quota <= 30
+    ):
+        raise ValueError("--sidecar-shared-quota must be an integer between 0 and 30")
+    if (
+        args.sidecar_shared_quota > 0
+        and not args.evidence_need_retrieval
+        and not args.bridge_retrieval
+    ):
+        raise ValueError("--sidecar-shared-quota requires --evidence-need-retrieval or --bridge-retrieval")
+    if (
         isinstance(args.evidence_need_quota, bool)
         or not 1 <= args.evidence_need_quota <= 30
     ):
@@ -1577,6 +1604,7 @@ def main() -> None:
         bridge_max_terms=args.bridge_max_terms,
         bridge_rrf_weight=args.bridge_rrf_weight,
         bridge_rerank_quota=args.bridge_quota,
+        sidecar_shared_quota=args.sidecar_shared_quota,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)
