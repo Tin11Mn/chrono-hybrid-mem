@@ -8,11 +8,12 @@ import argparse
 import json
 import os
 import re
+import sqlite3
 import tempfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import sys
 
@@ -132,6 +133,98 @@ def released_v020_search(store: MemoryStore, user_id: str, query: str, top_k: in
     return [str(row["content"]) for row in rows]
 
 
+def _failure_bucket(first_rank: int | None) -> str:
+    """Map the first gold rank to the deterministic P4-0 bucket."""
+    if first_rank == 1:
+        return "top1_hit"
+    if first_rank is not None and first_rank <= 3:
+        return "ranking_top3"
+    if first_rank is not None and first_rank <= 10:
+        return "ranking_top10"
+    return "recall_miss_top10"
+
+
+def _gold_positions(
+    gold_mem_ids: List[str], ordered_ids: Sequence[str]
+) -> Dict[str, int]:
+    """Return 1-based positions of gold memory IDs inside an ordered ID list."""
+    positions = {
+        candidate_id: index + 1 for index, candidate_id in enumerate(ordered_ids)
+    }
+    return {
+        candidate_id: positions[candidate_id]
+        for candidate_id in gold_mem_ids
+        if candidate_id in positions
+    }
+
+
+def _classify_recall_failure(
+    gold_mem_ids: List[str], retrieval_trace: Dict[str, object]
+) -> str | None:
+    """Classify why gold evidence stayed outside the final Top-10.
+
+    Buckets (mutually exclusive, defined on the P1 pipeline):
+    - channel_miss: no P1 retrieval channel returned the gold memory ID.
+    - fusion_miss: at least one channel returned it, but RRF kept it out of the
+      P1-only counterfactual Top-30 (``p1_counterfactual_top30_ids``).
+    - quota_displacement: it reached the counterfactual Top-30, but a graph /
+      anchor / adjacent quota reservation displaced it from the actual rerank
+      pool (``rerank_pool_ids``).
+    - reranker_drop: it entered the rerank pool but the ranker kept it out of
+      the final Top-10. Without a Search model this reduces to the structural
+      pool-to-Top-K cut, because no reordering happens.
+
+    Returns None when no gold memory ID can be located or the trace has no data.
+    """
+    if not gold_mem_ids:
+        return None
+    gold_set = set(gold_mem_ids)
+    p1_channels = retrieval_trace.get("p1_channels", {})
+    if not isinstance(p1_channels, dict) or not p1_channels:
+        # No channel data means the trace is absent (no search ran): the
+        # failure cause is unknown, not a channel miss.
+        return None
+    gold_in_channel = any(
+        gold_set.intersection(channel_ids)
+        for channel_ids in p1_channels.values()
+        if isinstance(channel_ids, list)
+    )
+    if not gold_in_channel:
+        return "channel_miss"
+    counterfactual_ids = set(retrieval_trace.get("p1_counterfactual_top30_ids", []))
+    if not gold_set.intersection(counterfactual_ids):
+        return "fusion_miss"
+    pool_ids = set(retrieval_trace.get("rerank_pool_ids", []))
+    if not gold_set.intersection(pool_ids):
+        return "quota_displacement"
+    return "reranker_drop"
+
+
+def _load_mem_by_content(
+    database_path: str, user_id: str
+) -> Dict[str, str]:
+    """Map casefolded raw message content to its ``mem_<id>`` identifier.
+
+    Read-only, diagnostics-only helper: the evaluation pipeline matches gold
+    evidence by content while the retrieval trace identifies candidates by
+    memory ID, so the audit needs this bridge.
+    """
+    mem_by_content: Dict[str, str] = {}
+    connection = sqlite3.connect(database_path)
+    try:
+        rows = connection.execute(
+            "SELECT id, content FROM raw_messages WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+    for row_id, content in rows:
+        content_key = str(content).casefold()
+        if content_key not in mem_by_content:
+            mem_by_content[content_key] = "mem_{}".format(int(row_id))
+    return mem_by_content
+
+
 def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questions: int | None,
              question_offset: int = 0,
              retriever: str = "current", model: object = None,
@@ -158,7 +251,11 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              instruction_refine_top_n: int = 0,
              include_hit_bitmap: bool = False,
              structured_query_plan: bool = False,
-             set_aware_rerank: bool = False) -> Dict[str, object]:
+             set_aware_rerank: bool = False,
+             include_question_diagnostics: bool = False,
+             evidence_need_retrieval: bool = False,
+             evidence_need_quota: int = 2,
+             evidence_need_rrf_weight: float = 0.01) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -174,6 +271,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
     reciprocal_rank_sum = 0.0
     speaker_conflict_triggers = 0
     hit_at_1_bitmap = []
+    question_diagnostics = []
     instruction_failures_before = getattr(
         local_instruction_reranker, "invalid_response_count", 0
     )
@@ -214,6 +312,9 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 instruction_refine_top_n=instruction_refine_top_n,
                 structured_query_plan=structured_query_plan,
                 set_aware_rerank=set_aware_rerank,
+                evidence_need_retrieval=evidence_need_retrieval,
+                evidence_need_quota=evidence_need_quota,
+                evidence_need_rrf_weight=evidence_need_rrf_weight,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -224,6 +325,12 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                     session_id="locomo:{}:{}".format(sample_index, session_key),
                     messages=messages,
                 ))
+            mem_by_content: Dict[str, str] = {}
+            if include_question_diagnostics and retriever == "current":
+                mem_by_content = _load_mem_by_content(
+                    str(Path(temporary_directory) / "sample_{}.db".format(sample_index)),
+                    user_id,
+                )
             for qa in sample.get("qa", []):
                 if max_questions is not None and question_count >= max_questions:
                     break
@@ -265,6 +372,80 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                     if matches:
                         hit_counts[top_k] += 1
                         category_counts[category]["hit_counts"][top_k] += 1
+                if include_question_diagnostics and retriever == "current":
+                    gold_mem_ids = [
+                        mem_by_content[item.casefold()]
+                        for item in expected
+                        if item.casefold() in mem_by_content
+                    ]
+                    retrieval_trace = store.last_retrieval_trace
+                    p1_channels = retrieval_trace.get("p1_channels", {})
+                    gold_channel_presence: Dict[str, Dict[str, int]] = {}
+                    for channel_name, channel_ids in p1_channels.items():
+                        if not isinstance(channel_ids, list):
+                            continue
+                        positions = _gold_positions(gold_mem_ids, channel_ids)
+                        if positions:
+                            gold_channel_presence[channel_name] = positions
+                    sidecar_ids = (
+                        set(retrieval_trace.get("graph_candidate_ids", []))
+                        | set(retrieval_trace.get("anchor_candidate_ids", []))
+                        | set(retrieval_trace.get("adjacent_candidate_ids", []))
+                    )
+                    question_diagnostics.append({
+                        "question_offset": eligible_question_count - 1,
+                        "category": category,
+                        "first_gold_rank": first_rank,
+                        "failure_bucket": _failure_bucket(first_rank),
+                        "recall_bucket": (
+                            _classify_recall_failure(gold_mem_ids, retrieval_trace)
+                            if max(top_ks) >= 10
+                            and (first_rank is None or first_rank > 10)
+                            else None
+                        ),
+                        "result_ids": [result.id for result in results],
+                        "gold_mem_ids": gold_mem_ids,
+                        "gold_channel_presence": gold_channel_presence,
+                        "gold_counterfactual_positions": _gold_positions(
+                            gold_mem_ids,
+                            retrieval_trace.get("p1_counterfactual_top30_ids", []),
+                        ),
+                        "gold_pool_positions": _gold_positions(
+                            gold_mem_ids,
+                            retrieval_trace.get("rerank_pool_ids", []),
+                        ),
+                        "recovered_by_sidecar": bool(
+                            set(gold_mem_ids).intersection(sidecar_ids)
+                        ),
+                        "gold_need_channel_presence": {
+                            channel_name: positions
+                            for channel_name, channel_ids in (
+                                retrieval_trace.get(
+                                    "evidence_need_channels", {}
+                                ).items()
+                            )
+                            if (
+                                positions := _gold_positions(
+                                    gold_mem_ids, channel_ids
+                                )
+                            )
+                        },
+                        "evidence_need_union_ids": retrieval_trace.get(
+                            "evidence_need_union_ids", []
+                        ),
+                        "promoted_need_ids": retrieval_trace.get(
+                            "promoted_need_ids", []
+                        ),
+                        "displaced_p1_for_need_ids": retrieval_trace.get(
+                            "displaced_p1_for_need_ids", []
+                        ),
+                        "plan": retrieval_trace.get("plan", {}),
+                        "p1_counterfactual_top30_ids": retrieval_trace.get(
+                            "p1_counterfactual_top30_ids", []
+                        ),
+                        "rerank_pool_ids": retrieval_trace.get("rerank_pool_ids", []),
+                        "final_ids": retrieval_trace.get("final_ids", []),
+                    })
             speaker_conflict_triggers += store.speaker_conflict_trigger_count
 
     result = {
@@ -314,7 +495,22 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
         result["speaker_conflict_triggers"] = speaker_conflict_triggers
     if include_hit_bitmap:
         result["hit_at_1_bitmap"] = hit_at_1_bitmap
+    if include_question_diagnostics:
+        result["question_diagnostics"] = question_diagnostics
     return result
+
+
+def apply_baseline_mode(args) -> None:
+    """Enable the validated P4-A q2 baseline flags in place.
+
+    Structured planning plus evidence-need retrieval at quota 2 (weight 0.01).
+    Explicit --evidence-need-quota / --evidence-need-rrf-weight were parsed
+    before this runs, so their values always win over the shorthand defaults.
+    """
+    args.structured_query_plan = True
+    args.evidence_need_retrieval = True
+    if args.evidence_need_quota is None:
+        args.evidence_need_quota = 2
 
 
 def main() -> None:
@@ -333,6 +529,14 @@ def main() -> None:
         "--include-hit-bitmap", action="store_true",
         help="Include only per-question Hit@1 bits for local complementarity analysis",
     )
+    parser.add_argument(
+        "--include-question-diagnostics", action="store_true",
+        help=(
+            "Export default-off per-question retrieval diagnostics: rank bucket, "
+            "trace-derived recall bucket (channel_miss / fusion_miss / "
+            "quota_displacement / reranker_drop) and gold channel presence"
+        ),
+    )
     parser.add_argument("--compare-v020", action="store_true", help="Also reproduce v0.2.0 no-model retrieval")
     parser.add_argument(
         "--search-model", action="store_true",
@@ -350,6 +554,29 @@ def main() -> None:
     parser.add_argument(
         "--set-aware-rerank", action="store_true",
         help="Enable default-off P2 set-aware ordering after candidate ranking",
+    )
+    parser.add_argument(
+        "--evidence-need-retrieval", action="store_true",
+        help=(
+            "Enable default-off P4-A per-evidence-need retrieval channels with a "
+            "reserved rerank-pool quota; requires --structured-query-plan"
+        ),
+    )
+    parser.add_argument(
+        "--evidence-need-quota", type=int, default=2,
+        help="P4-A reserved rerank-pool slots for evidence-need candidates (default 2)",
+    )
+    parser.add_argument(
+        "--evidence-need-rrf-weight", type=float, default=0.01,
+        help="P4-A low RRF weight for evidence-need channels (default 0.01)",
+    )
+    parser.add_argument(
+        "--baseline-mode", action="store_true",
+        help=(
+            "One-flag shorthand for the validated P4-A q2 baseline: enables "
+            "--structured-query-plan and --evidence-need-retrieval with quota 2. "
+            "Explicit --evidence-need-quota / --evidence-need-rrf-weight still win."
+        ),
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -494,6 +721,8 @@ def main() -> None:
         default="direct",
     )
     args = parser.parse_args()
+    if args.baseline_mode:
+        apply_baseline_mode(args)
     if args.question_offset < 0:
         raise ValueError("--question-offset must be non-negative")
     if sum(bool(value) for value in (
@@ -540,6 +769,19 @@ def main() -> None:
         args.dense_speaker_coref_weights,
     )):
         raise ValueError("--question-offset is supported for one configuration, not sweeps")
+    if args.include_question_diagnostics and any((
+        args.fusion_alphas, args.rerank_top_ns, args.session_weights,
+        args.rerank_fusion_weights, args.dense_context_weights,
+        args.dense_time_weights, args.session_top_ns,
+        args.dense_speaker_conflict_margins,
+        args.dense_sentence_weights,
+        args.rerank_near_tie_epsilons,
+        args.dense_image_carry_weights,
+        args.dense_speaker_coref_weights,
+    )):
+        raise ValueError(
+            "--include-question-diagnostics is supported for one configuration, not sweeps"
+        )
     fusion_alphas = None
     if args.fusion_alphas:
         fusion_alphas = [float(value) for value in args.fusion_alphas.split(",")]
@@ -802,6 +1044,20 @@ def main() -> None:
         raise ValueError("--structured-query-plan requires a Search model")
     if args.set_aware_rerank and not args.structured_query_plan:
         raise ValueError("--set-aware-rerank requires --structured-query-plan")
+    if args.evidence_need_retrieval and not args.structured_query_plan:
+        raise ValueError("--evidence-need-retrieval requires --structured-query-plan")
+    if args.evidence_need_retrieval and args.fusion_alpha is not None:
+        raise ValueError("--evidence-need-retrieval cannot use --fusion-alpha")
+    if (
+        isinstance(args.evidence_need_quota, bool)
+        or not 1 <= args.evidence_need_quota <= 30
+    ):
+        raise ValueError("--evidence-need-quota must be an integer between 1 and 30")
+    if (
+        isinstance(args.evidence_need_rrf_weight, bool)
+        or not 0 <= args.evidence_need_rrf_weight <= 1
+    ):
+        raise ValueError("--evidence-need-rrf-weight must be between 0 and 1")
     if args.search_model:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -1236,6 +1492,10 @@ def main() -> None:
         include_hit_bitmap=args.include_hit_bitmap,
         structured_query_plan=args.structured_query_plan,
         set_aware_rerank=args.set_aware_rerank,
+        include_question_diagnostics=args.include_question_diagnostics,
+        evidence_need_retrieval=args.evidence_need_retrieval,
+        evidence_need_quota=args.evidence_need_quota,
+        evidence_need_rrf_weight=args.evidence_need_rrf_weight,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)

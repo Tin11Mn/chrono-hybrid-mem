@@ -22,7 +22,7 @@
 
 ChronoHybridMem is a Docker-deployable long-term memory service that stores conversation turns and retrieves the original evidence most relevant to a query. It was developed for the Agent Memory Challenge and deliberately stops at evidence retrieval: it does not generate the benchmark's final answer.
 
-The default branch, `main`, keeps P1 as its validated stable post-submission local research path. P3 Evidence Graph code is present only as a default-disabled experimental research surface and is not part of the stable retrieval path.
+The default branch, `main`, uses P4-A q2 as its validated stable post-submission local research baseline. P3 Evidence Graph code remains a default-disabled experimental research surface and is not part of the stable retrieval path.
 
 ## What the system does
 
@@ -66,7 +66,9 @@ The stable service follows six principles:
 - Memory Search never generates the benchmark answer.
 - Reproducibility and bounded regression tests come before added complexity.
 
-## Current stable pipeline: P1
+## Current stable pipeline: P4-A q2
+
+The stable default combines P1 structured query planning with P4-A evidence-need independent retrieval. P4-A retrieves each `evidence_need` through a bounded independent channel and reserves 2 candidates in the rerank pool; it adds no Search-model call and never generates answers. Set `MEMORY_EVIDENCE_NEED_RETRIEVAL=false` to reproduce the historical P1 path.
 
 ### Add
 
@@ -102,13 +104,14 @@ The organizer has formally confirmed that the official result corresponds to [`v
 
 ### B. Stable post-submission local research
 
-The repository records the following full local P1 run on 1,977 eligible LoCoMo questions:
+The repository records the following full local runs on 1,977 eligible LoCoMo questions:
 
 | Method | Hit@1 | Hit@3 | Hit@10 | MRR |
 |---|---:|---:|---:|---:|
 | P1 structured planner + local Qwen3-4B proxy | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
+| **P4-A q2 (current strongest local-proxy baseline)** | **0.5776** | **0.7198** | **0.7643** | **0.6501** |
 
-This is a historical recorded full result from 2026-08-16: local post-submission LoCoMo research, not an official leaderboard result. The run used a loopback Qwen3-4B server for Search planning and evidence ordering, with P1 explicitly enabled. A full 1,977-question flat-planner control was not run, so the table is not evidence of a full-set flat-to-P1 delta. See [P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md) for protocol, category metrics, and reproduction details.
+These are local post-submission LoCoMo research results, not official leaderboard results. P4-A q2 used a loopback Qwen3-4B server for Search planning and evidence ordering; versus the matched P1 proxy baseline, Hit@1 increased by 0.0015, Hit@3 by 0.0041, Hit@10 by 0.0025, and MRR by 0.0022, with 8 former Top-10 misses recovered to Top-10. See [P4-A full validation](docs/P4_A_FULL1977_VALIDATION.md) and [P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md) for protocol and boundaries.
 
 ### C. Proxy and experimental evidence
 
