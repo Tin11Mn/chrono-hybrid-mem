@@ -602,6 +602,18 @@ class MemoryStore:
     # promote unconditionally. Fusion scores live on MemoryResult.score.
     P5_NEAR_TIE_EPSILON_DEFAULT = 0.0005
     P5_MIN_EVIDENCE_CHANNELS = 2
+    # P5 strata: gate only fires for queries in the configured strata (default
+    # temporal + correction), where the latest-valid-state rule is most
+    # defensible. "all" restores the un-stratified gate.
+    P5_STRATA_DEFAULT = "temporal,correction"
+    # Correction/state-change language cues (query side).
+    P5_CORRECTION_QUERY_PATTERN = re.compile(
+        r"\b(change|changes|changed|update|updates|updated|correction|corrected|"
+        r"revision|revised|no longer|used to|instead|currently|now|latest|"
+        r"recent|newest|previous|earlier|before|after)\b|"
+        r"改成|变为|更改|之前|后来|最新|现在|目前",
+        flags=re.IGNORECASE,
+    )
     # Kept for controlled ablations; full LoCoMo evaluation showed that
     # hard entity binding harms adversarial cross-speaker questions overall.
     ENTITY_RRF_WEIGHT = 0.0
@@ -672,7 +684,8 @@ class MemoryStore:
                  relax_quota: int = RELAX_QUOTA_DEFAULT,
                  p5_gate: bool = False,
                  p5_near_tie_epsilon: float = P5_NEAR_TIE_EPSILON_DEFAULT,
-                 p5_min_evidence_channels: int = P5_MIN_EVIDENCE_CHANNELS) -> None:
+                 p5_min_evidence_channels: int = P5_MIN_EVIDENCE_CHANNELS,
+                 p5_strata: str = P5_STRATA_DEFAULT) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -946,6 +959,19 @@ class MemoryStore:
         self.p5_gate = p5_gate
         self.p5_near_tie_epsilon = p5_near_tie_epsilon
         self.p5_min_evidence_channels = p5_min_evidence_channels
+        if not isinstance(p5_strata, str) or not p5_strata.strip():
+            raise ValueError("p5_strata must be a non-empty string")
+        allowed_strata = {"all", "temporal", "correction"}
+        strata_set = {
+            part.strip()
+            for part in p5_strata.split(",")
+            if part.strip()
+        }
+        if not strata_set or not strata_set.issubset(allowed_strata):
+            raise ValueError(
+                "p5_strata must be a comma-separated subset of all/temporal/correction"
+            )
+        self.p5_strata = ",".join(sorted(strata_set))
         self._retrieval_diagnostics_lock = threading.Lock()
         self._last_query_plan: Dict[str, Any] = {}
         self._last_graph_candidate_ids: List[str] = []
@@ -1043,6 +1069,8 @@ class MemoryStore:
                 "enabled": False,
                 "near_tie_epsilon": MemoryStore.P5_NEAR_TIE_EPSILON_DEFAULT,
                 "min_evidence_channels": MemoryStore.P5_MIN_EVIDENCE_CHANNELS,
+                "strata": MemoryStore.P5_STRATA_DEFAULT,
+                "strata_matched": False,
                 "triggered": False,
                 "swapped_ids": [],
                 "top1_id": None,
@@ -1227,6 +1255,7 @@ class MemoryStore:
             "enabled": self.p5_gate,
             "near_tie_epsilon": self.p5_near_tie_epsilon,
             "min_evidence_channels": self.p5_min_evidence_channels,
+            "strata": self.p5_strata,
         })
         original = list(results)
         if (
@@ -1234,6 +1263,35 @@ class MemoryStore:
             or len(original) < 2
             or not retrieval_trace.get("p1_channels")
         ):
+            return original
+
+        # Strata gate: only act for queries whose language (or plan intent)
+        # matches the configured strata. This is a pre-registration of where the
+        # latest-valid-state rule is defensible; outside the strata the gate
+        # never fires regardless of near-tie or evidence.
+        strata_parts = {
+            part.strip()
+            for part in self.p5_strata.split(",")
+            if part.strip()
+        }
+        plan_intent = str(query_plan.get("intent", "")).casefold()
+        temporal_match = bool(
+            self.TEMPORAL_QUERY_PATTERN.search(query)
+            or self.HISTORICAL_QUERY_PATTERN.search(query)
+            or plan_intent == "temporal"
+        )
+        correction_match = bool(
+            self.P5_CORRECTION_QUERY_PATTERN.search(query)
+            or plan_intent == "correction"
+        )
+        strata_matched = (
+            ("all" in strata_parts)
+            or ("temporal" in strata_parts and temporal_match)
+            or ("correction" in strata_parts and correction_match)
+        )
+        diagnostics["strata_matched"] = strata_matched
+        if not strata_matched:
+            diagnostics["reason"] = "strata_excluded"
             return original
 
         top1, top2 = original[0], original[1]
