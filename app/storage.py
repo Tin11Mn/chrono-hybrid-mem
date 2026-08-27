@@ -602,6 +602,11 @@ class MemoryStore:
     # promote unconditionally. Fusion scores live on MemoryResult.score.
     P5_NEAR_TIE_EPSILON_DEFAULT = 0.0005
     P5_MIN_EVIDENCE_CHANNELS = 2
+    # Confidence scale is 0-1, so the dominance margin differs from the fusion
+    # score epsilon. Default 0.05: the runner-up must be at least 5 points more
+    # confident than the Top-1 for a swap (a conservative, evidence-preserving
+    # threshold).
+    P5_CONFIDENCE_MARGIN_DEFAULT = 0.05
     # P5 strata: gate only fires for queries in the configured strata (default
     # temporal + correction), where the latest-valid-state rule is most
     # defensible. "all" restores the un-stratified gate.
@@ -685,6 +690,7 @@ class MemoryStore:
                  p5_gate: bool = False,
                  p5_near_tie_epsilon: float = P5_NEAR_TIE_EPSILON_DEFAULT,
                  p5_min_evidence_channels: int = P5_MIN_EVIDENCE_CHANNELS,
+                 p5_confidence_margin: float = P5_CONFIDENCE_MARGIN_DEFAULT,
                  p5_strata: str = P5_STRATA_DEFAULT) -> None:
         self.database_path = database_path
         self.model = model
@@ -959,6 +965,13 @@ class MemoryStore:
         self.p5_gate = p5_gate
         self.p5_near_tie_epsilon = p5_near_tie_epsilon
         self.p5_min_evidence_channels = p5_min_evidence_channels
+        if (
+            not isinstance(p5_confidence_margin, (int, float))
+            or isinstance(p5_confidence_margin, bool)
+            or not 0 <= p5_confidence_margin <= 1
+        ):
+            raise ValueError("p5_confidence_margin must be a number between 0 and 1")
+        self.p5_confidence_margin = p5_confidence_margin
         if not isinstance(p5_strata, str) or not p5_strata.strip():
             raise ValueError("p5_strata must be a non-empty string")
         allowed_strata = {"all", "temporal", "correction"}
@@ -1069,8 +1082,10 @@ class MemoryStore:
                 "enabled": False,
                 "near_tie_epsilon": MemoryStore.P5_NEAR_TIE_EPSILON_DEFAULT,
                 "min_evidence_channels": MemoryStore.P5_MIN_EVIDENCE_CHANNELS,
+                "confidence_margin": MemoryStore.P5_CONFIDENCE_MARGIN_DEFAULT,
                 "strata": MemoryStore.P5_STRATA_DEFAULT,
                 "strata_matched": False,
+                "rank_confidence": {},
                 "triggered": False,
                 "swapped_ids": [],
                 "top1_id": None,
@@ -1255,6 +1270,7 @@ class MemoryStore:
             "enabled": self.p5_gate,
             "near_tie_epsilon": self.p5_near_tie_epsilon,
             "min_evidence_channels": self.p5_min_evidence_channels,
+            "confidence_margin": self.p5_confidence_margin,
             "strata": self.p5_strata,
         })
         original = list(results)
@@ -1300,16 +1316,33 @@ class MemoryStore:
         if top1_score is None or top2_score is None:
             diagnostics["reason"] = "missing_fusion_score"
             return original
-        score_gap = top1_score - top2_score
-        if score_gap >= self.p5_near_tie_epsilon:
-            diagnostics.update({
-                "top1_id": top1.id,
-                "top1_score": top1_score,
-                "top2_id": top2.id,
-                "top2_score": top2_score,
-                "reason": "not_near_tie",
-            })
-            return original
+        # LLM's own confidence (0-1) for the two leading candidates. This is
+        # the model's near-tie signal: if the model ranks A first but gives A
+        # and B nearly equal confidence, and B is the one it is more sure of,
+        # a swap reflects the model's own uncertainty. When confidence is
+        # available it REPLACES the fusion-score near-tie gate (the fusion gap
+        # is a retrieval-layer proxy that already failed three times); the
+        # fusion gap only gates when confidence is absent.
+        rank_confidence = retrieval_trace.get("p5_diagnostics", {}).get(
+            "rank_confidence", {}
+        )
+        top1_confidence = rank_confidence.get(top1.id)
+        top2_confidence = rank_confidence.get(top2.id)
+        confidence_available = (
+            isinstance(top1_confidence, (int, float))
+            and isinstance(top2_confidence, (int, float))
+        )
+        if not confidence_available:
+            score_gap = top1_score - top2_score
+            if score_gap >= self.p5_near_tie_epsilon:
+                diagnostics.update({
+                    "top1_id": top1.id,
+                    "top1_score": top1_score,
+                    "top2_id": top2.id,
+                    "top2_score": top2_score,
+                    "reason": "not_near_tie",
+                })
+                return original
 
         # Query-token overlap: how many non-stopword query tokens appear in each
         # candidate's content. This is a correctness-adjacent signal (a runner-up
@@ -1350,6 +1383,7 @@ class MemoryStore:
             if raw_message_id is not None and ranking_metadata.get(raw_message_id, {}).get("facts"):
                 has_fact = True
 
+        # LLM's own confidence (0-1) for the two leading candidates.
         diagnostics.update({
             "top1_id": top1.id,
             "top1_score": top1_score,
@@ -1357,14 +1391,24 @@ class MemoryStore:
             "top2_score": top2_score,
             "top1_query_overlap": top1_overlap,
             "top2_query_overlap": top2_overlap,
+            "top1_confidence": top1_confidence,
+            "top2_confidence": top2_confidence,
             "top1_evidence_channels": top1_channel_count,
             "top2_evidence_channels": top2_channel_count,
             "top2_has_fact": has_fact,
         })
-        strictly_stronger = (
-            top2_overlap > top1_overlap
-            and top2_overlap >= self.p5_min_evidence_channels
-        ) or has_fact
+        if confidence_available:
+            strictly_stronger = (
+                top2_confidence > top1_confidence
+                and (top2_confidence - top1_confidence) >= self.p5_confidence_margin
+            ) or has_fact
+        else:
+            # No confidence (truncated long-dialogue question or model without
+            # the method): do NOT fall back to retrieval-layer proxies — they
+            # were empirically disproven (channels -0.005, overlap -0.035,
+            # strata -0.010). Missing confidence means no swap.
+            diagnostics["reason"] = "no_confidence_signal"
+            return original
         if not strictly_stronger:
             diagnostics["reason"] = "runner_up_not_strictly_stronger"
             return original
@@ -4990,6 +5034,16 @@ class MemoryStore:
                     ),
                 })
             ordered_ids = self.model.rank_candidates(query, options or [], candidates)
+            rank_confidence: Dict[str, float] = {}
+            if self.p5_gate and hasattr(self.model, "rank_candidates_with_confidence"):
+                ordered_ids, rank_confidence = (
+                    self.model.rank_candidates_with_confidence(
+                        query, options or [], candidates
+                    )
+                )
+            retrieval_trace["p5_diagnostics"]["rank_confidence"] = dict(
+                rank_confidence
+            )
             positions = {candidate_id: index for index, candidate_id in enumerate(ordered_ids)}
             deduplicated.sort(key=lambda result: positions.get(result.id, len(positions)))
         elif deduplicated:

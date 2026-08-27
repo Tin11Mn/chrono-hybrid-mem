@@ -62,6 +62,11 @@ class SearchOnlyModel:
     def rank_candidates(self, query: str, options: List[str], candidates: List[Dict[str, str]]) -> List[str]:
         return self.model.rank_candidates(query, options, candidates)
 
+    def rank_candidates_with_confidence(
+        self, query: str, options: List[str], candidates: List[Dict[str, str]]
+    ) -> Tuple[List[str], Dict[str, float]]:
+        return self.model.rank_candidates_with_confidence(query, options, candidates)
+
 
 def session_number(key: str) -> int:
     match = re.fullmatch(r"session_(\d+)", key)
@@ -268,6 +273,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              p5_gate: bool = False,
              p5_near_tie_epsilon: float = 0.0005,
              p5_min_evidence_channels: int = 2,
+             p5_confidence_margin: float = 0.05,
              p5_strata: str = "temporal,correction") -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
@@ -340,6 +346,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 p5_gate=p5_gate,
                 p5_near_tie_epsilon=p5_near_tie_epsilon,
                 p5_min_evidence_channels=p5_min_evidence_channels,
+                p5_confidence_margin=p5_confidence_margin,
                 p5_strata=p5_strata,
             )
             store.initialize()
@@ -715,6 +722,14 @@ def main() -> None:
     parser.add_argument(
         "--p5-min-evidence-channels", type=int, default=2,
         help="P5 minimum P1-channel hits required for the runner-up to be promoted (default 2)",
+    )
+    parser.add_argument(
+        "--p5-confidence-margin", type=float, default=0.05,
+        help=(
+            "P5 minimum confidence advantage (0-1) the runner-up needs over "
+            "Top-1 to justify a swap when the model supplies confidence scores "
+            "(default 0.05)"
+        ),
     )
     parser.add_argument(
         "--p5-strata", default="temporal,correction",
@@ -1248,6 +1263,11 @@ def main() -> None:
         or not 1 <= args.p5_min_evidence_channels <= 30
     ):
         raise ValueError("--p5-min-evidence-channels must be an integer between 1 and 30")
+    if (
+        isinstance(args.p5_confidence_margin, bool)
+        or not 0 <= args.p5_confidence_margin <= 1
+    ):
+        raise ValueError("--p5-confidence-margin must be between 0 and 1")
     if not isinstance(args.p5_strata, str) or not args.p5_strata.strip():
         raise ValueError("--p5-strata must be a non-empty string")
     strata_parts = {part.strip() for part in args.p5_strata.split(",") if part.strip()}
@@ -1713,6 +1733,7 @@ def main() -> None:
         p5_gate=args.p5_gate,
         p5_near_tie_epsilon=args.p5_near_tie_epsilon,
         p5_min_evidence_channels=args.p5_min_evidence_channels,
+        p5_confidence_margin=args.p5_confidence_margin,
         p5_strata=args.p5_strata,
     )
     if not args.compare_v020:

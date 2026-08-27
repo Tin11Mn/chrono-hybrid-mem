@@ -46,23 +46,32 @@ rank-2/3 slice（24 题）中 3 题转成 Top1（12%）。
    gains 同步归零（strata 匹配的题里 rank-2/3 gold 本就不多，且 runner-up
    overlap 更高仍 ≠ gold 在 runner-up，如 offset 129: ov1=3 ov2=5 却 displaces）。
    **三种信号（通道计数 / query 重叠 / strata 收窄）全部失败。**
+5. **LLM confidence 信号（strata=all）：门控 zero swap，且 confidence prompt
+   本身把 Hit@1 打崩 -0.045**（0.565→0.520，control 与 gate 完全一致）。
+   Qwen 的 confidence 输出里 Top-1 恒为 1.0、Top-2 < 1.0，margin 0.05 永不
+   满足 → 门控永不触发；同时要求模型额外输出 confidence 会干扰其排序判断。
+   关键实验设计教训：off（旧 prompt）与 on（confidence prompt）prompt 不一致，
+   排序差异不能归因门控——必须用 control（同 prompt、margin=1.0 不 swap）归因。
+   **四种信号（通道计数 / query 重叠 / strata / LLM confidence）全部失败。**
 
 ## 结论
 
-- **P5 门控三次信号尝试均不通过筛选**：通道计数 -0.005、query 重叠 -0.035、
-  strata 收窄 -0.010，全部在"不降 >0.005"门槛之外；strata 收窄换来了更少
-  displaces 但 gains 也归零，无净收益。
-- **根本约束（三次收敛）**：无 gold 泄漏下，纯检索层信号（融合分差 + 通道计数 /
-  query token 重叠 / strata 预注册）无法可靠区分"该换"与"不该换"。本地 Qwen
-  代理的检索/重排信号已到天花板，门控式置换在该口径下无法净赚 Hit@1。
-- 代码保留（默认 off，`--p5-strata` 可配）+ 测试（8 例）作为可控消融。
+- **P5 门控四次信号尝试均不通过筛选**：通道计数 -0.005、query 重叠 -0.035、
+  strata 收窄 -0.010、LLM confidence 0（不触发）但 prompt 副作用 -0.045，
+  全部在"不降 >0.005"门槛之外。
+- **根本约束（四次收敛）**：无 gold 泄漏下，检索层信号（融合分差 + 通道计数 /
+  query token 重叠 / strata）与模型自身 confidence 均无法可靠区分"该换"与
+  "不该换"；且让本地 Qwen 自报置信度会破坏其排序能力（-0.045）。本地代理的
+  检索/重排信号已到天花板，P5 门控式置换在该口径下彻底关闭。
+- 代码保留（默认 off，`--p5-strata`/`--p5-confidence-margin` 可配）+ 测试（10 例）
+  作为可控消融。
 
 ## 后续方向（未做）
 
-1. **接受 Hit@1 中性，以 Hit@3/10 为目标**：三版 Hit@3 均 +0.005~+0.010 非负
-   （strata 版 +0.005），全量验证稳定性；但 Hit@10 三版均 0 或 -0.005，收益面窄。
-2. **转官方口径**：本地代理信号已到天花板；官方 gpt-4o-mini 的 rerank 质量
-   不同，P5 门控可能在官方口径下才有净收益。优先做官方评测迁移验证。
+1. **转官方口径（唯一剩余路径）**：本地 Qwen 代理的检索与重排信号均已到天花板
+   （P4-A 71 换 71 平；P5 四次信号失败），且让本地模型自报置信度会破坏排序。
+   官方 gpt-4o-mini 的 rerank 质量不同，门控/排序优化可能在那里才有净收益；
+   这是影响 leaderboard 排名的唯一剩余路径。
 
 ## 复现命令
 
