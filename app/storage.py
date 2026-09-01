@@ -556,6 +556,11 @@ class MemoryStore:
     MODEL_RERANK_LIMIT = 30
     GRAPH_SEED_LIMIT = 6
     GRAPH_EDGE_LIMIT_PER_SEED = 20
+    # Selective graph gate: P3-A on a 20-question slice showed global graph
+    # defaulting regressed (Hit@1 0.40->0.35, 0.72% relation coverage). The
+    # selective mode only runs the graph channel for multi-hop plans or
+    # entity-dense queries, where a second hop is actually defensible.
+    GRAPH_SELECTIVE_MIN_ENTITIES = 2
     ANCHOR_SEED_LIMIT = 6
     ANCHOR_CANDIDATES_PER_SEED = 20
     ANCHOR_MAX_CANDIDATES = 20
@@ -668,6 +673,7 @@ class MemoryStore:
                  graph_rrf_weight: float = 0.025,
                  graph_max_candidates: int = 20,
                  graph_rerank_quota: int = 4,
+                 graph_selective: bool = False,
                  evidence_anchors: bool = False,
                  anchor_seed_limit: int = ANCHOR_SEED_LIMIT,
                  anchor_max_candidates: int = ANCHOR_MAX_CANDIDATES,
@@ -757,6 +763,7 @@ class MemoryStore:
             self.graph_rrf_weight = graph_rrf_weight
             self.graph_max_candidates = graph_max_candidates
             self.graph_rerank_quota = graph_rerank_quota
+            self.graph_selective = graph_selective
         else:
             # Graph-only knobs are intentionally inert when the feature is off.
             # This preserves the P1 constructor and runtime path even if stale
@@ -766,6 +773,11 @@ class MemoryStore:
             self.graph_rrf_weight = 0.0
             self.graph_max_candidates = 0
             self.graph_rerank_quota = 0
+            self.graph_selective = False
+        if graph_selective and not evidence_graph:
+            raise ValueError("graph_selective requires evidence_graph")
+        if not isinstance(graph_selective, bool):
+            raise ValueError("graph_selective must be a boolean")
         if evidence_anchors:
             if not structured_query_plan:
                 raise ValueError("evidence_anchors requires structured_query_plan")
@@ -3848,9 +3860,33 @@ class MemoryStore:
                        LIMIT ?""",
                     (structured_match_query, user_id, candidate_limit),
                 ).fetchall()
+            graph_selective_triggered = False
+            graph_selective_reason = None
             if self.evidence_graph and query_plan:
                 planned_entities = query_plan.get("entities", [])
-                if isinstance(planned_entities, list):
+                planned_intent = str(query_plan.get("intent", "")).casefold()
+                if self.graph_selective:
+                    entity_count = len([
+                        value for value in planned_entities
+                        if isinstance(value, str) and value.strip()
+                    ])
+                    if planned_intent == "multi_hop":
+                        graph_selective_triggered = True
+                        graph_selective_reason = "multi_hop_intent"
+                    elif entity_count >= self.GRAPH_SELECTIVE_MIN_ENTITIES:
+                        graph_selective_triggered = True
+                        graph_selective_reason = "entity_dense"
+                else:
+                    graph_selective_triggered = True
+                    graph_selective_reason = "unconditional"
+                if graph_selective_reason is None:
+                    graph_selective_reason = "not_multi_hop_not_entity_dense"
+                retrieval_trace["edge_diagnostics"].update({
+                    "selective_enabled": bool(self.graph_selective),
+                    "selective_triggered": graph_selective_triggered,
+                    "selective_reason": graph_selective_reason,
+                })
+                if isinstance(planned_entities, list) and graph_selective_triggered:
                     graph_predicates = preferred_graph_predicates(
                         query, query_plan
                     )
@@ -3882,6 +3918,11 @@ class MemoryStore:
                                 "unresolved_seeds",
                             }
                         },
+                    })
+                    retrieval_trace["edge_diagnostics"].update({
+                        "selective_enabled": bool(self.graph_selective),
+                        "selective_triggered": graph_selective_triggered,
+                        "selective_reason": graph_selective_reason,
                     })
             elif self.evidence_anchors and query_plan:
                 planned_entities = query_plan.get("entities", [])

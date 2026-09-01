@@ -274,7 +274,12 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              p5_near_tie_epsilon: float = 0.0005,
              p5_min_evidence_channels: int = 2,
              p5_confidence_margin: float = 0.05,
-             p5_strata: str = "temporal,correction") -> Dict[str, object]:
+             p5_strata: str = "temporal,correction",
+             evidence_graph: bool = False,
+             graph_selective: bool = False,
+             graph_rrf_weight: float = 0.025,
+             graph_max_candidates: int = 20,
+             graph_rerank_quota: int = 4) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -348,6 +353,11 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 p5_min_evidence_channels=p5_min_evidence_channels,
                 p5_confidence_margin=p5_confidence_margin,
                 p5_strata=p5_strata,
+                evidence_graph=evidence_graph,
+                graph_selective=graph_selective,
+                graph_rrf_weight=graph_rrf_weight,
+                graph_max_candidates=graph_max_candidates,
+                graph_rerank_quota=graph_rerank_quota,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -506,6 +516,20 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                                 "swapped_ids", []
                             )
                         ),
+                        "graph_selective": {
+                            "enabled": retrieval_trace.get(
+                                "edge_diagnostics", {}
+                            ).get("selective_enabled", False),
+                            "triggered": retrieval_trace.get(
+                                "edge_diagnostics", {}
+                            ).get("selective_triggered", False),
+                            "reason": retrieval_trace.get(
+                                "edge_diagnostics", {}
+                            ).get("selective_reason"),
+                            "graph_candidate_ids": retrieval_trace.get(
+                                "graph_candidate_ids", []
+                            ),
+                        },
                         "reserved_need_ids": retrieval_trace.get(
                             "reserved_need_ids", []
                         ),
@@ -738,6 +762,30 @@ def main() -> None:
             "(default temporal,correction); the gate only fires for queries "
             "matching the strata language"
         ),
+    )
+    parser.add_argument(
+        "--evidence-graph", action="store_true",
+        help="Enable the P3 evidence-graph one-hop channel (default off)",
+    )
+    parser.add_argument(
+        "--graph-selective", action="store_true",
+        help=(
+            "Gate the graph channel to multi-hop plans or entity-dense queries "
+            "instead of running it unconditionally (P3-A global defaulting "
+            "regressed on a 20-question slice)"
+        ),
+    )
+    parser.add_argument(
+        "--graph-rrf-weight", type=float, default=0.025,
+        help="RRF weight for graph candidates (default 0.025)",
+    )
+    parser.add_argument(
+        "--graph-max-candidates", type=int, default=20,
+        help="Max graph candidates (default 20)",
+    )
+    parser.add_argument(
+        "--graph-quota", type=int, default=4,
+        help="Reserved rerank-pool slots for graph candidates (default 4)",
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -1273,6 +1321,25 @@ def main() -> None:
     strata_parts = {part.strip() for part in args.p5_strata.split(",") if part.strip()}
     if not strata_parts or not strata_parts.issubset({"all", "temporal", "correction"}):
         raise ValueError("--p5-strata must be a comma-separated subset of all/temporal/correction")
+    if args.evidence_graph and not args.structured_query_plan:
+        raise ValueError("--evidence-graph requires --structured-query-plan")
+    if args.graph_selective and not args.evidence_graph:
+        raise ValueError("--graph-selective requires --evidence-graph")
+    if (
+        isinstance(args.graph_rrf_weight, bool)
+        or not 0 <= args.graph_rrf_weight <= 1
+    ):
+        raise ValueError("--graph-rrf-weight must be between 0 and 1")
+    if (
+        isinstance(args.graph_max_candidates, bool)
+        or not 0 <= args.graph_max_candidates <= 100
+    ):
+        raise ValueError("--graph-max-candidates must be between 0 and 100")
+    if (
+        isinstance(args.graph_quota, bool)
+        or not 0 <= args.graph_quota <= 30
+    ):
+        raise ValueError("--graph-quota must be an integer between 0 and 30")
     if (
         isinstance(args.evidence_need_quota, bool)
         or not 1 <= args.evidence_need_quota <= 30
@@ -1735,6 +1802,11 @@ def main() -> None:
         p5_min_evidence_channels=args.p5_min_evidence_channels,
         p5_confidence_margin=args.p5_confidence_margin,
         p5_strata=args.p5_strata,
+        evidence_graph=args.evidence_graph,
+        graph_selective=args.graph_selective,
+        graph_rrf_weight=args.graph_rrf_weight,
+        graph_max_candidates=args.graph_max_candidates,
+        graph_rerank_quota=args.graph_quota,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)
