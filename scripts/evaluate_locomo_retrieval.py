@@ -42,10 +42,13 @@ class SearchOnlyModel:
     def __init__(
         self, api_key: str, model_name: str = "gpt-4o-mini",
         base_url: str | None = None, disable_thinking: bool = False,
+        rank_prompt_v2: bool = False, timeout_seconds: float = 120.0,
     ) -> None:
         self.model = MemoryModel(
             api_key, model_name=model_name, base_url=base_url,
             disable_thinking=disable_thinking,
+            rank_prompt_v2=rank_prompt_v2,
+            timeout_seconds=timeout_seconds,
         )
 
     def extract_facts(
@@ -650,6 +653,17 @@ def main() -> None:
         help="Use a loopback OpenAI-compatible model for Search planning/ranking only",
     )
     parser.add_argument("--local-search-model-name", default="local")
+    parser.add_argument(
+        "--rank-prompt-v2", action="store_true",
+        help=(
+            "Use the v2 rank prompt (mention != answer rule + few-shot). "
+            "Default-off; v1 is the operational baseline."
+        ),
+    )
+    parser.add_argument(
+        "--model-timeout", type=float, default=120.0,
+        help="Per-request timeout seconds for the Search model (default 120)",
+    )
     parser.add_argument(
         "--structured-query-plan", action="store_true",
         help="Enable P1 structured planning on the selected Search model",
@@ -1354,11 +1368,16 @@ def main() -> None:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("--search-model requires OPENAI_API_KEY")
-        model = SearchOnlyModel(api_key)
+        model = SearchOnlyModel(
+            api_key, rank_prompt_v2=args.rank_prompt_v2,
+            timeout_seconds=args.model_timeout,
+        )
     elif args.local_search_model_url:
         model = SearchOnlyModel(
             "local-only", model_name=args.local_search_model_name,
             base_url=args.local_search_model_url, disable_thinking=True,
+            rank_prompt_v2=args.rank_prompt_v2,
+            timeout_seconds=args.model_timeout,
         )
     semantic_retriever = None
     if args.local_embedding_url:
