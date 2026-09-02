@@ -685,6 +685,7 @@ class MemoryStore:
                  evidence_need_retrieval: bool = False,
                  evidence_need_quota: int = EVIDENCE_NEED_QUOTA_DEFAULT,
                  evidence_need_rrf_weight: float = EVIDENCE_NEED_RRF_WEIGHT_DEFAULT,
+                 need_select_by_bm25: bool = False,
                  bridge_retrieval: bool = False,
                  bridge_max_terms: int = BRIDGE_MAX_TERMS_DEFAULT,
                  bridge_rrf_weight: float = BRIDGE_RRF_WEIGHT_DEFAULT,
@@ -882,6 +883,11 @@ class MemoryStore:
         self.evidence_need_retrieval = evidence_need_retrieval
         self.evidence_need_quota = evidence_need_quota
         self.evidence_need_rrf_weight = evidence_need_rrf_weight
+        if not isinstance(need_select_by_bm25, bool):
+            raise ValueError("need_select_by_bm25 must be a boolean")
+        if need_select_by_bm25 and not evidence_need_retrieval:
+            raise ValueError("need_select_by_bm25 requires evidence_need_retrieval")
+        self.need_select_by_bm25 = need_select_by_bm25
         if not isinstance(bridge_retrieval, bool):
             raise ValueError("bridge_retrieval must be a boolean")
         if bridge_retrieval and not structured_query_plan:
@@ -3589,6 +3595,7 @@ class MemoryStore:
                 "enabled": bool(need_match_queries),
                 "quota": self.evidence_need_quota,
                 "rrf_weight": self.evidence_need_rrf_weight,
+                "select_by_bm25": self.need_select_by_bm25,
                 "need_count": len(need_match_queries),
             }
         entity_terms = [
@@ -3708,9 +3715,15 @@ class MemoryStore:
                 for need_index, need_query in enumerate(need_match_queries):
                     for channel_name, fts_table, join_clause in need_query_specs:
                         raw_alias = "raw" if join_clause else "raw"
-                        select_clause = (
-                            "SELECT raw.id, raw.content, raw.created_at, raw.event_ts"
-                        )
+                        if self.need_select_by_bm25:
+                            select_clause = (
+                                "SELECT raw.id, raw.content, raw.created_at, "
+                                "raw.event_ts, bm25({fts}) AS bm25_score"
+                            ).format(fts=fts_table)
+                        else:
+                            select_clause = (
+                                "SELECT raw.id, raw.content, raw.created_at, raw.event_ts"
+                            )
                         from_clause = "FROM {fts}".format(fts=fts_table)
                         effective_join = join_clause.format(fts=fts_table)
                         if effective_join:
@@ -3736,12 +3749,27 @@ class MemoryStore:
                         ] = rows
             need_union_ids: List[str] = []
             seen_need_ids = set()
+            need_best_scores: Dict[str, float] = {}
             for rows in need_channel_rows.values():
                 for row in rows:
                     candidate_id = "mem_{}".format(row["id"])
                     if candidate_id not in seen_need_ids:
                         seen_need_ids.add(candidate_id)
                         need_union_ids.append(candidate_id)
+                    if self.need_select_by_bm25:
+                        try:
+                            score = float(row["bm25_score"])
+                        except (TypeError, ValueError, KeyError):
+                            continue
+                        if (
+                            candidate_id not in need_best_scores
+                            or score < need_best_scores[candidate_id]
+                        ):
+                            # bm25 is negative and smaller = better; keep the
+                            # best (most negative) score across channels.
+                            need_best_scores[candidate_id] = score
+            if self.need_select_by_bm25 and need_best_scores:
+                need_union_ids.sort(key=lambda cid: need_best_scores.get(cid, 0.0))
             retrieval_trace["evidence_need_channels"] = {
                 name: ["mem_{}".format(row["id"]) for row in rows]
                 for name, rows in need_channel_rows.items()
