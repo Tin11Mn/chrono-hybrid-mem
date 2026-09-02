@@ -232,3 +232,38 @@ def test_p4d_requires_evidence_need_retrieval():
             model=RelaxModel(), structured_query_plan=True,
             query_relaxation=True,
         )
+
+
+def test_need_select_by_bm25_default_off_preserves_order():
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=RelaxModel(), structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    assert record["evidence_need_diagnostics"]["select_by_bm25"] is False
+
+
+def test_need_select_by_bm25_requires_evidence_need_retrieval():
+    import pytest
+
+    with pytest.raises(ValueError):
+        locomo_evaluation.evaluate(
+            RELAX_SAMPLE, [1], None,
+            model=RelaxModel(), structured_query_plan=True,
+            need_select_by_bm25=True,
+        )
+
+
+def test_need_select_by_bm25_records_diagnostic_when_enabled():
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=RelaxModel(), structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        need_select_by_bm25=True,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    diag = record["evidence_need_diagnostics"]
+    assert diag["select_by_bm25"] is True

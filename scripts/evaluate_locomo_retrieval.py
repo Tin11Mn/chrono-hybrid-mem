@@ -264,6 +264,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              evidence_need_retrieval: bool = False,
              evidence_need_quota: int = 2,
              evidence_need_rrf_weight: float = 0.01,
+             need_select_by_bm25: bool = False,
              adjacent_turn_expansion: bool = False,
              bridge_retrieval: bool = False,
              bridge_max_terms: int = 3,
@@ -342,6 +343,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 evidence_need_retrieval=evidence_need_retrieval,
                 evidence_need_quota=evidence_need_quota,
                 evidence_need_rrf_weight=evidence_need_rrf_weight,
+                need_select_by_bm25=need_select_by_bm25,
                 adjacent_turn_expansion=adjacent_turn_expansion,
                 bridge_retrieval=bridge_retrieval,
                 bridge_max_terms=bridge_max_terms,
@@ -499,6 +501,9 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                         ),
                         "evidence_need_union_ids": retrieval_trace.get(
                             "evidence_need_union_ids", []
+                        ),
+                        "evidence_need_diagnostics": retrieval_trace.get(
+                            "evidence_need_diagnostics", {}
                         ),
                         "relax_union_ids": retrieval_trace.get(
                             "relax_union_ids", []
@@ -686,6 +691,13 @@ def main() -> None:
     parser.add_argument(
         "--evidence-need-rrf-weight", type=float, default=0.01,
         help="P4-A low RRF weight for evidence-need channels (default 0.01)",
+    )
+    parser.add_argument(
+        "--need-select-by-bm25", action="store_true",
+        help=(
+            "P4-A: order evidence-need union candidates by best bm25 score "
+            "instead of channel insertion order before the quota picks (default off)"
+        ),
     )
     parser.add_argument(
         "--baseline-mode", action="store_true",
@@ -1364,6 +1376,8 @@ def main() -> None:
         or not 0 <= args.evidence_need_rrf_weight <= 1
     ):
         raise ValueError("--evidence-need-rrf-weight must be between 0 and 1")
+    if args.need_select_by_bm25 and not args.evidence_need_retrieval:
+        raise ValueError("--need-select-by-bm25 requires --evidence-need-retrieval")
     if args.search_model:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -1807,6 +1821,7 @@ def main() -> None:
         evidence_need_retrieval=args.evidence_need_retrieval,
         evidence_need_quota=args.evidence_need_quota,
         evidence_need_rrf_weight=args.evidence_need_rrf_weight,
+        need_select_by_bm25=args.need_select_by_bm25,
         adjacent_turn_expansion=args.adjacent_turn_expansion,
         bridge_retrieval=args.bridge_retrieval,
         bridge_max_terms=args.bridge_max_terms,
