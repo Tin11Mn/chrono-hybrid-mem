@@ -20,6 +20,7 @@ def test_local_instruction_reranker_rejects_non_loopback_servers():
         LocalInstructionReranker("https://example.com/v1")
 
 
+@pytest.mark.local_research
 def test_http_embedding_retriever_orders_indexed_vectors_and_caches():
     retriever = LocalHTTPEmbeddingRetriever("http://127.0.0.1:8081/v1")
     calls = []
@@ -52,6 +53,7 @@ def test_http_embedding_retriever_orders_indexed_vectors_and_caches():
     assert calls == [["tea query"], ["tea passage", "running passage"]]
 
 
+@pytest.mark.local_research
 def test_http_embedding_retriever_applies_instruction_only_to_query():
     retriever = LocalHTTPEmbeddingRetriever(
         "http://127.0.0.1:8081/v1",
