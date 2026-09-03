@@ -267,3 +267,39 @@ def test_need_select_by_bm25_records_diagnostic_when_enabled():
     record = report["question_diagnostics"][0]
     diag = record["evidence_need_diagnostics"]
     assert diag["select_by_bm25"] is True
+
+
+def test_llm_rerank_top_n_default_uses_all_candidates():
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=RelaxModel(), structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    # With top_n=0 (default) every candidate reaches the LLM rank call.
+    assert record["llm_rank_candidate_count"] > 0
+
+
+def test_llm_rerank_top_n_limits_candidate_count():
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=RelaxModel(), structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        llm_rerank_top_n=2,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    # The sample has 3 messages; compression to 2 must cap the LLM rank input.
+    assert record["llm_rank_candidate_count"] <= 2
+
+
+def test_llm_rerank_top_n_rejects_out_of_range():
+    import pytest
+
+    with pytest.raises(ValueError):
+        locomo_evaluation.evaluate(
+            RELAX_SAMPLE, [1], None,
+            model=RelaxModel(), structured_query_plan=True,
+            llm_rerank_top_n=31,
+        )

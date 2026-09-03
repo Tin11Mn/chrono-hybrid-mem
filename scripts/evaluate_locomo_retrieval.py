@@ -279,6 +279,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              p5_min_evidence_channels: int = 2,
              p5_confidence_margin: float = 0.05,
              p5_strata: str = "temporal,correction",
+             llm_rerank_top_n: int = 0,
              evidence_graph: bool = False,
              graph_selective: bool = False,
              graph_rrf_weight: float = 0.025,
@@ -358,6 +359,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 p5_min_evidence_channels=p5_min_evidence_channels,
                 p5_confidence_margin=p5_confidence_margin,
                 p5_strata=p5_strata,
+                llm_rerank_top_n=llm_rerank_top_n,
                 evidence_graph=evidence_graph,
                 graph_selective=graph_selective,
                 graph_rrf_weight=graph_rrf_weight,
@@ -538,6 +540,9 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                                 "graph_candidate_ids", []
                             ),
                         },
+                        "llm_rank_candidate_count": retrieval_trace.get(
+                            "llm_rank_candidate_count", 0
+                        ),
                         "reserved_need_ids": retrieval_trace.get(
                             "reserved_need_ids", []
                         ),
@@ -812,6 +817,14 @@ def main() -> None:
     parser.add_argument(
         "--graph-quota", type=int, default=4,
         help="Reserved rerank-pool slots for graph candidates (default 4)",
+    )
+    parser.add_argument(
+        "--llm-rerank-top-n", type=int, default=0,
+        help=(
+            "Direction-3 candidate compression: only the first N rerank-pool "
+            "candidates (fusion order) are sent to the Search model for ranking "
+            "(default 0 = all candidates, up to 30)"
+        ),
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -1367,6 +1380,11 @@ def main() -> None:
     ):
         raise ValueError("--graph-quota must be an integer between 0 and 30")
     if (
+        isinstance(args.llm_rerank_top_n, bool)
+        or not 0 <= args.llm_rerank_top_n <= 30
+    ):
+        raise ValueError("--llm-rerank-top-n must be an integer between 0 and 30")
+    if (
         isinstance(args.evidence_need_quota, bool)
         or not 1 <= args.evidence_need_quota <= 30
     ):
@@ -1836,6 +1854,7 @@ def main() -> None:
         p5_min_evidence_channels=args.p5_min_evidence_channels,
         p5_confidence_margin=args.p5_confidence_margin,
         p5_strata=args.p5_strata,
+        llm_rerank_top_n=args.llm_rerank_top_n,
         evidence_graph=args.evidence_graph,
         graph_selective=args.graph_selective,
         graph_rrf_weight=args.graph_rrf_weight,

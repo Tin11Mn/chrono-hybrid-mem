@@ -554,6 +554,12 @@ def extract_bridge_terms(
 class MemoryStore:
     RRF_CONSTANT = 60
     MODEL_RERANK_LIMIT = 30
+    # Direction-3 candidate compression: when llm_rerank_top_n > 0, only the
+    # first N rerank-pool candidates (fusion order) are sent to the Search
+    # model for ranking. Long candidate lists dilute the local model's
+    # attention (435 full-set questions have gold in pool positions 11-30);
+    # focusing on the top N should sharpen ordering at the top.
+    LLM_RERANK_TOP_N_DEFAULT = 0
     GRAPH_SEED_LIMIT = 6
     GRAPH_EDGE_LIMIT_PER_SEED = 20
     # Selective graph gate: P3-A on a 20-question slice showed global graph
@@ -698,7 +704,8 @@ class MemoryStore:
                  p5_near_tie_epsilon: float = P5_NEAR_TIE_EPSILON_DEFAULT,
                  p5_min_evidence_channels: int = P5_MIN_EVIDENCE_CHANNELS,
                  p5_confidence_margin: float = P5_CONFIDENCE_MARGIN_DEFAULT,
-                 p5_strata: str = P5_STRATA_DEFAULT) -> None:
+                 p5_strata: str = P5_STRATA_DEFAULT,
+                 llm_rerank_top_n: int = LLM_RERANK_TOP_N_DEFAULT) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -1003,6 +1010,17 @@ class MemoryStore:
                 "p5_strata must be a comma-separated subset of all/temporal/correction"
             )
         self.p5_strata = ",".join(sorted(strata_set))
+        if (
+            isinstance(llm_rerank_top_n, bool)
+            or not isinstance(llm_rerank_top_n, int)
+            or not 0 <= llm_rerank_top_n <= self.MODEL_RERANK_LIMIT
+        ):
+            raise ValueError(
+                "llm_rerank_top_n must be an integer between 0 and {}".format(
+                    self.MODEL_RERANK_LIMIT
+                )
+            )
+        self.llm_rerank_top_n = llm_rerank_top_n
         self._retrieval_diagnostics_lock = threading.Lock()
         self._last_query_plan: Dict[str, Any] = {}
         self._last_graph_candidate_ids: List[str] = []
@@ -1116,6 +1134,7 @@ class MemoryStore:
             },
             "rerank_pool_ids": [],
             "final_ids": [],
+            "llm_rank_candidate_count": 0,
             "edge_diagnostics": {
                 "seed_limit": MemoryStore.GRAPH_SEED_LIMIT,
                 "edge_limit_per_seed": MemoryStore.GRAPH_EDGE_LIMIT_PER_SEED,
@@ -5089,7 +5108,10 @@ class MemoryStore:
                 for source_id in path.get("source_message_ids", []):
                     paths_by_source.setdefault(str(source_id), []).append(path)
             candidates = []
-            for result in rerank_pool:
+            llm_rank_pool = rerank_pool
+            if self.llm_rerank_top_n > 0 and len(rerank_pool) > self.llm_rerank_top_n:
+                llm_rank_pool = rerank_pool[:self.llm_rerank_top_n]
+            for result in llm_rank_pool:
                 metadata = ranking_metadata.get(message_ids[result.id], {})
                 candidates.append({
                     "id": result.id,
@@ -5102,6 +5124,7 @@ class MemoryStore:
                         paths_by_source.get(result.id, []),
                     ),
                 })
+            retrieval_trace["llm_rank_candidate_count"] = len(candidates)
             ordered_ids = self.model.rank_candidates(query, options or [], candidates)
             rank_confidence: Dict[str, float] = {}
             if self.p5_gate and hasattr(self.model, "rank_candidates_with_confidence"):
