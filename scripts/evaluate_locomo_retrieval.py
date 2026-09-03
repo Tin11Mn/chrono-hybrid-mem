@@ -42,10 +42,13 @@ class SearchOnlyModel:
     def __init__(
         self, api_key: str, model_name: str = "gpt-4o-mini",
         base_url: str | None = None, disable_thinking: bool = False,
+        rank_prompt_v2: bool = False, timeout_seconds: float = 120.0,
     ) -> None:
         self.model = MemoryModel(
             api_key, model_name=model_name, base_url=base_url,
             disable_thinking=disable_thinking,
+            rank_prompt_v2=rank_prompt_v2,
+            timeout_seconds=timeout_seconds,
         )
 
     def extract_facts(
@@ -61,6 +64,11 @@ class SearchOnlyModel:
 
     def rank_candidates(self, query: str, options: List[str], candidates: List[Dict[str, str]]) -> List[str]:
         return self.model.rank_candidates(query, options, candidates)
+
+    def rank_candidates_with_confidence(
+        self, query: str, options: List[str], candidates: List[Dict[str, str]]
+    ) -> Tuple[List[str], Dict[str, float]]:
+        return self.model.rank_candidates_with_confidence(query, options, candidates)
 
 
 def session_number(key: str) -> int:
@@ -255,7 +263,28 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              include_question_diagnostics: bool = False,
              evidence_need_retrieval: bool = False,
              evidence_need_quota: int = 2,
-             evidence_need_rrf_weight: float = 0.01) -> Dict[str, object]:
+             evidence_need_rrf_weight: float = 0.01,
+             need_select_by_bm25: bool = False,
+             adjacent_turn_expansion: bool = False,
+             bridge_retrieval: bool = False,
+             bridge_max_terms: int = 3,
+             bridge_rrf_weight: float = 0.01,
+             bridge_rerank_quota: int = 2,
+             sidecar_shared_quota: int = 0,
+             query_relaxation: bool = False,
+             relax_rrf_weight: float = 0.01,
+             relax_quota: int = 2,
+             p5_gate: bool = False,
+             p5_near_tie_epsilon: float = 0.0005,
+             p5_min_evidence_channels: int = 2,
+             p5_confidence_margin: float = 0.05,
+             p5_strata: str = "temporal,correction",
+             llm_rerank_top_n: int = 0,
+             evidence_graph: bool = False,
+             graph_selective: bool = False,
+             graph_rrf_weight: float = 0.025,
+             graph_max_candidates: int = 20,
+             graph_rerank_quota: int = 4) -> Dict[str, object]:
     if retriever not in {"current", "v0.2.0"}:
         raise ValueError("retriever must be current or v0.2.0")
     hit_counts = {top_k: 0 for top_k in top_ks}
@@ -315,6 +344,27 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 evidence_need_retrieval=evidence_need_retrieval,
                 evidence_need_quota=evidence_need_quota,
                 evidence_need_rrf_weight=evidence_need_rrf_weight,
+                need_select_by_bm25=need_select_by_bm25,
+                adjacent_turn_expansion=adjacent_turn_expansion,
+                bridge_retrieval=bridge_retrieval,
+                bridge_max_terms=bridge_max_terms,
+                bridge_rrf_weight=bridge_rrf_weight,
+                bridge_rerank_quota=bridge_rerank_quota,
+                sidecar_shared_quota=sidecar_shared_quota,
+                query_relaxation=query_relaxation,
+                relax_rrf_weight=relax_rrf_weight,
+                relax_quota=relax_quota,
+                p5_gate=p5_gate,
+                p5_near_tie_epsilon=p5_near_tie_epsilon,
+                p5_min_evidence_channels=p5_min_evidence_channels,
+                p5_confidence_margin=p5_confidence_margin,
+                p5_strata=p5_strata,
+                llm_rerank_top_n=llm_rerank_top_n,
+                evidence_graph=evidence_graph,
+                graph_selective=graph_selective,
+                graph_rrf_weight=graph_rrf_weight,
+                graph_max_candidates=graph_max_candidates,
+                graph_rerank_quota=graph_rerank_quota,
             )
             store.initialize()
             user_id = "locomo:{}".format(sample.get("sample_id", sample_index))
@@ -430,8 +480,74 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                                 )
                             )
                         },
+                        "gold_adjacent_positions": _gold_positions(
+                            gold_mem_ids,
+                            retrieval_trace.get("adjacent_candidate_ids", []),
+                        ),
+                        "promoted_adjacent_ids": retrieval_trace.get(
+                            "promoted_adjacent_ids", []
+                        ),
+                        "displaced_p1_for_adjacent_ids": retrieval_trace.get(
+                            "displaced_p1_for_adjacent_ids", []
+                        ),
+                        "gold_bridge_positions": _gold_positions(
+                            gold_mem_ids,
+                            retrieval_trace.get("bridge_union_ids", []),
+                        ),
+                        "bridge_terms": retrieval_trace.get("bridge_terms", []),
+                        "promoted_bridge_ids": retrieval_trace.get(
+                            "promoted_bridge_ids", []
+                        ),
+                        "displaced_p1_for_bridge_ids": retrieval_trace.get(
+                            "displaced_p1_for_bridge_ids", []
+                        ),
                         "evidence_need_union_ids": retrieval_trace.get(
                             "evidence_need_union_ids", []
+                        ),
+                        "evidence_need_diagnostics": retrieval_trace.get(
+                            "evidence_need_diagnostics", {}
+                        ),
+                        "relax_union_ids": retrieval_trace.get(
+                            "relax_union_ids", []
+                        ),
+                        "reserved_relax_ids": retrieval_trace.get(
+                            "reserved_relax_ids", []
+                        ),
+                        "promoted_relax_ids": retrieval_trace.get(
+                            "promoted_relax_ids", []
+                        ),
+                        "gold_relax_positions": _gold_positions(
+                            gold_mem_ids,
+                            retrieval_trace.get("relax_union_ids", []),
+                        ),
+                        "p5_gate": retrieval_trace.get("p5_diagnostics", {}),
+                        "p5_swapped": bool(
+                            retrieval_trace.get("p5_diagnostics", {}).get(
+                                "swapped_ids", []
+                            )
+                        ),
+                        "graph_selective": {
+                            "enabled": retrieval_trace.get(
+                                "edge_diagnostics", {}
+                            ).get("selective_enabled", False),
+                            "triggered": retrieval_trace.get(
+                                "edge_diagnostics", {}
+                            ).get("selective_triggered", False),
+                            "reason": retrieval_trace.get(
+                                "edge_diagnostics", {}
+                            ).get("selective_reason"),
+                            "graph_candidate_ids": retrieval_trace.get(
+                                "graph_candidate_ids", []
+                            ),
+                        },
+                        "llm_rank_candidate_count": retrieval_trace.get(
+                            "llm_rank_candidate_count", 0
+                        ),
+                        "reserved_need_ids": retrieval_trace.get(
+                            "reserved_need_ids", []
+                        ),
+                        "reserved_bridge_ids": retrieval_trace.get(
+                            "reserved_bridge_ids", []
                         ),
                         "promoted_need_ids": retrieval_trace.get(
                             "promoted_need_ids", []
@@ -548,6 +664,17 @@ def main() -> None:
     )
     parser.add_argument("--local-search-model-name", default="local")
     parser.add_argument(
+        "--rank-prompt-v2", action="store_true",
+        help=(
+            "Use the v2 rank prompt (mention != answer rule + few-shot). "
+            "Default-off; v1 is the operational baseline."
+        ),
+    )
+    parser.add_argument(
+        "--model-timeout", type=float, default=120.0,
+        help="Per-request timeout seconds for the Search model (default 120)",
+    )
+    parser.add_argument(
         "--structured-query-plan", action="store_true",
         help="Enable P1 structured planning on the selected Search model",
     )
@@ -571,11 +698,132 @@ def main() -> None:
         help="P4-A low RRF weight for evidence-need channels (default 0.01)",
     )
     parser.add_argument(
+        "--need-select-by-bm25", action="store_true",
+        help=(
+            "P4-A: order evidence-need union candidates by best bm25 score "
+            "instead of channel insertion order before the quota picks (default off)"
+        ),
+    )
+    parser.add_argument(
         "--baseline-mode", action="store_true",
         help=(
             "One-flag shorthand for the validated P4-A q2 baseline: enables "
             "--structured-query-plan and --evidence-need-retrieval with quota 2. "
             "Explicit --evidence-need-quota / --evidence-need-rrf-weight still win."
+        ),
+    )
+    parser.add_argument(
+        "--adjacent-turn-expansion", action="store_true",
+        help=(
+            "Enable default-off P1.1/P4-B same-session +/-1 neighbor recovery "
+            "with a reserved rerank-pool quota"
+        ),
+    )
+    parser.add_argument(
+        "--bridge-retrieval", action="store_true",
+        help=(
+            "Enable default-off P4-C bridge second-pass retrieval for multi-hop "
+            "plans; requires --structured-query-plan"
+        ),
+    )
+    parser.add_argument(
+        "--bridge-max-terms", type=int, default=3,
+        help="P4-C max deterministic bridge terms (default 3)",
+    )
+    parser.add_argument(
+        "--bridge-rrf-weight", type=float, default=0.01,
+        help="P4-C low RRF weight for bridge candidates (default 0.01)",
+    )
+    parser.add_argument(
+        "--bridge-quota", type=int, default=2,
+        help="P4-C reserved rerank-pool slots for bridge candidates (default 2)",
+    )
+    parser.add_argument(
+        "--sidecar-shared-quota", type=int, default=0,
+        help=(
+            "Shared sidecar pool: when >0, P4-A need and P4-C bridge candidates "
+            "share ONE total rerank-pool reservation instead of each holding its "
+            "own fixed quota (default 0 = disabled, independent quotas)"
+        ),
+    )
+    parser.add_argument(
+        "--query-relaxation", action="store_true",
+        help=(
+            "Enable default-off P4-D query relaxation: when every evidence-need "
+            "channel returns zero hits, run one bounded FTS5 prefix (word*) pass "
+            "over raw channels; requires --evidence-need-retrieval"
+        ),
+    )
+    parser.add_argument(
+        "--relax-rrf-weight", type=float, default=0.01,
+        help="P4-D low RRF weight for relaxed candidates (default 0.01)",
+    )
+    parser.add_argument(
+        "--relax-quota", type=int, default=2,
+        help="P4-D reserved rerank-pool slots for relaxed candidates (default 2)",
+    )
+    parser.add_argument(
+        "--p5-gate", action="store_true",
+        help=(
+            "Enable default-off P5 selective rerank gate: swap Top-1/Top-2 only "
+            "when near-tied on fusion score AND the runner-up carries strictly "
+            "stronger P1-channel evidence (evidence-preserving, never unconditional)"
+        ),
+    )
+    parser.add_argument(
+        "--p5-near-tie-epsilon", type=float, default=0.0005,
+        help="P5 fusion-score gap below which Top-1/Top-2 count as near-tied (default 0.0005)",
+    )
+    parser.add_argument(
+        "--p5-min-evidence-channels", type=int, default=2,
+        help="P5 minimum P1-channel hits required for the runner-up to be promoted (default 2)",
+    )
+    parser.add_argument(
+        "--p5-confidence-margin", type=float, default=0.05,
+        help=(
+            "P5 minimum confidence advantage (0-1) the runner-up needs over "
+            "Top-1 to justify a swap when the model supplies confidence scores "
+            "(default 0.05)"
+        ),
+    )
+    parser.add_argument(
+        "--p5-strata", default="temporal,correction",
+        help=(
+            "P5 gate strata: comma-separated subset of all/temporal/correction "
+            "(default temporal,correction); the gate only fires for queries "
+            "matching the strata language"
+        ),
+    )
+    parser.add_argument(
+        "--evidence-graph", action="store_true",
+        help="Enable the P3 evidence-graph one-hop channel (default off)",
+    )
+    parser.add_argument(
+        "--graph-selective", action="store_true",
+        help=(
+            "Gate the graph channel to multi-hop plans or entity-dense queries "
+            "instead of running it unconditionally (P3-A global defaulting "
+            "regressed on a 20-question slice)"
+        ),
+    )
+    parser.add_argument(
+        "--graph-rrf-weight", type=float, default=0.025,
+        help="RRF weight for graph candidates (default 0.025)",
+    )
+    parser.add_argument(
+        "--graph-max-candidates", type=int, default=20,
+        help="Max graph candidates (default 20)",
+    )
+    parser.add_argument(
+        "--graph-quota", type=int, default=4,
+        help="Reserved rerank-pool slots for graph candidates (default 4)",
+    )
+    parser.add_argument(
+        "--llm-rerank-top-n", type=int, default=0,
+        help=(
+            "Direction-3 candidate compression: only the first N rerank-pool "
+            "candidates (fusion order) are sent to the Search model for ranking "
+            "(default 0 = all candidates, up to 30)"
         ),
     )
     parser.add_argument(
@@ -1048,6 +1296,94 @@ def main() -> None:
         raise ValueError("--evidence-need-retrieval requires --structured-query-plan")
     if args.evidence_need_retrieval and args.fusion_alpha is not None:
         raise ValueError("--evidence-need-retrieval cannot use --fusion-alpha")
+    if args.bridge_retrieval and not args.structured_query_plan:
+        raise ValueError("--bridge-retrieval requires --structured-query-plan")
+    if args.bridge_retrieval and args.fusion_alpha is not None:
+        raise ValueError("--bridge-retrieval cannot use --fusion-alpha")
+    if (
+        isinstance(args.bridge_max_terms, bool)
+        or not 1 <= args.bridge_max_terms <= 5
+    ):
+        raise ValueError("--bridge-max-terms must be an integer between 1 and 5")
+    if (
+        isinstance(args.bridge_rrf_weight, bool)
+        or not 0 <= args.bridge_rrf_weight <= 1
+    ):
+        raise ValueError("--bridge-rrf-weight must be between 0 and 1")
+    if (
+        isinstance(args.bridge_quota, bool)
+        or not 0 <= args.bridge_quota <= 30
+    ):
+        raise ValueError("--bridge-quota must be an integer between 0 and 30")
+    if (
+        isinstance(args.sidecar_shared_quota, bool)
+        or not 0 <= args.sidecar_shared_quota <= 30
+    ):
+        raise ValueError("--sidecar-shared-quota must be an integer between 0 and 30")
+    if (
+        args.sidecar_shared_quota > 0
+        and not args.evidence_need_retrieval
+        and not args.bridge_retrieval
+    ):
+        raise ValueError("--sidecar-shared-quota requires --evidence-need-retrieval or --bridge-retrieval")
+    if args.query_relaxation and not args.evidence_need_retrieval:
+        raise ValueError("--query-relaxation requires --evidence-need-retrieval")
+    if (
+        isinstance(args.relax_rrf_weight, bool)
+        or not 0 <= args.relax_rrf_weight <= 1
+    ):
+        raise ValueError("--relax-rrf-weight must be between 0 and 1")
+    if (
+        isinstance(args.relax_quota, bool)
+        or not 0 <= args.relax_quota <= 30
+    ):
+        raise ValueError("--relax-quota must be an integer between 0 and 30")
+    if args.p5_gate and not args.structured_query_plan:
+        raise ValueError("--p5-gate requires --structured-query-plan")
+    if (
+        isinstance(args.p5_near_tie_epsilon, bool)
+        or not 0 <= args.p5_near_tie_epsilon <= 1
+    ):
+        raise ValueError("--p5-near-tie-epsilon must be between 0 and 1")
+    if (
+        isinstance(args.p5_min_evidence_channels, bool)
+        or not 1 <= args.p5_min_evidence_channels <= 30
+    ):
+        raise ValueError("--p5-min-evidence-channels must be an integer between 1 and 30")
+    if (
+        isinstance(args.p5_confidence_margin, bool)
+        or not 0 <= args.p5_confidence_margin <= 1
+    ):
+        raise ValueError("--p5-confidence-margin must be between 0 and 1")
+    if not isinstance(args.p5_strata, str) or not args.p5_strata.strip():
+        raise ValueError("--p5-strata must be a non-empty string")
+    strata_parts = {part.strip() for part in args.p5_strata.split(",") if part.strip()}
+    if not strata_parts or not strata_parts.issubset({"all", "temporal", "correction"}):
+        raise ValueError("--p5-strata must be a comma-separated subset of all/temporal/correction")
+    if args.evidence_graph and not args.structured_query_plan:
+        raise ValueError("--evidence-graph requires --structured-query-plan")
+    if args.graph_selective and not args.evidence_graph:
+        raise ValueError("--graph-selective requires --evidence-graph")
+    if (
+        isinstance(args.graph_rrf_weight, bool)
+        or not 0 <= args.graph_rrf_weight <= 1
+    ):
+        raise ValueError("--graph-rrf-weight must be between 0 and 1")
+    if (
+        isinstance(args.graph_max_candidates, bool)
+        or not 0 <= args.graph_max_candidates <= 100
+    ):
+        raise ValueError("--graph-max-candidates must be between 0 and 100")
+    if (
+        isinstance(args.graph_quota, bool)
+        or not 0 <= args.graph_quota <= 30
+    ):
+        raise ValueError("--graph-quota must be an integer between 0 and 30")
+    if (
+        isinstance(args.llm_rerank_top_n, bool)
+        or not 0 <= args.llm_rerank_top_n <= 30
+    ):
+        raise ValueError("--llm-rerank-top-n must be an integer between 0 and 30")
     if (
         isinstance(args.evidence_need_quota, bool)
         or not 1 <= args.evidence_need_quota <= 30
@@ -1058,15 +1394,22 @@ def main() -> None:
         or not 0 <= args.evidence_need_rrf_weight <= 1
     ):
         raise ValueError("--evidence-need-rrf-weight must be between 0 and 1")
+    if args.need_select_by_bm25 and not args.evidence_need_retrieval:
+        raise ValueError("--need-select-by-bm25 requires --evidence-need-retrieval")
     if args.search_model:
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError("--search-model requires OPENAI_API_KEY")
-        model = SearchOnlyModel(api_key)
+        model = SearchOnlyModel(
+            api_key, rank_prompt_v2=args.rank_prompt_v2,
+            timeout_seconds=args.model_timeout,
+        )
     elif args.local_search_model_url:
         model = SearchOnlyModel(
             "local-only", model_name=args.local_search_model_name,
             base_url=args.local_search_model_url, disable_thinking=True,
+            rank_prompt_v2=args.rank_prompt_v2,
+            timeout_seconds=args.model_timeout,
         )
     semantic_retriever = None
     if args.local_embedding_url:
@@ -1496,6 +1839,27 @@ def main() -> None:
         evidence_need_retrieval=args.evidence_need_retrieval,
         evidence_need_quota=args.evidence_need_quota,
         evidence_need_rrf_weight=args.evidence_need_rrf_weight,
+        need_select_by_bm25=args.need_select_by_bm25,
+        adjacent_turn_expansion=args.adjacent_turn_expansion,
+        bridge_retrieval=args.bridge_retrieval,
+        bridge_max_terms=args.bridge_max_terms,
+        bridge_rrf_weight=args.bridge_rrf_weight,
+        bridge_rerank_quota=args.bridge_quota,
+        sidecar_shared_quota=args.sidecar_shared_quota,
+        query_relaxation=args.query_relaxation,
+        relax_rrf_weight=args.relax_rrf_weight,
+        relax_quota=args.relax_quota,
+        p5_gate=args.p5_gate,
+        p5_near_tie_epsilon=args.p5_near_tie_epsilon,
+        p5_min_evidence_channels=args.p5_min_evidence_channels,
+        p5_confidence_margin=args.p5_confidence_margin,
+        p5_strata=args.p5_strata,
+        llm_rerank_top_n=args.llm_rerank_top_n,
+        evidence_graph=args.evidence_graph,
+        graph_selective=args.graph_selective,
+        graph_rrf_weight=args.graph_rrf_weight,
+        graph_max_candidates=args.graph_max_candidates,
+        graph_rerank_quota=args.graph_quota,
     )
     if not args.compare_v020:
         rendered = json.dumps(current, ensure_ascii=False, indent=2)

@@ -22,7 +22,7 @@
 
 ChronoHybridMem은 대화 턴을 저장하고 질의와 가장 관련 있는 원본 증거를 검색하는 Docker 배포형 장기 메모리 서비스입니다. Agent Memory Challenge를 위해 개발되었으며, 의도적으로 증거 검색까지만 담당합니다. 벤치마크의 최종 답변은 생성하지 않습니다.
 
-기본 브랜치 `main`은 검증된 안정적 제출 후 로컬 연구 베이스라인으로 P4-A q2를 사용합니다. P3 Evidence Graph 코드는 기본적으로 꺼진 실험 연구 기능으로 남아 있으며 안정 검색 경로의 일부가 아닙니다.
+기본 브랜치 `main`은 검증된 안정적 제출 후 로컬 연구 베이스라인으로 P4-A q2 + bm25 selection를 사용합니다(완료 가능한 질의 1,976개 기준 Hit@1 0.5850). P3 Evidence Graph 코드는 기본적으로 꺼진 실험 연구 기능으로 남아 있으며 안정 검색 경로의 일부가 아닙니다.
 
 ## 시스템이 하는 일
 
@@ -66,9 +66,9 @@ flowchart LR
 - 메모리 Search는 벤치마크 답변을 생성하지 않습니다.
 - 복잡성을 추가하기 전에 재현성과 제한된 회귀 테스트를 우선합니다.
 
-## 현재 안정 파이프라인: P4-A q2
+## 현재 안정 파이프라인: P4-A q2 + bm25 selection
 
-안정 기본 경로는 P1 구조화 질의 계획과 P4-A evidence-need 독립 검색을 결합합니다. P4-A는 각 `evidence_need`를 제한된 독립 채널로 검색하고 rerank pool에 후보 2개를 예약합니다. Search 모델 호출을 추가하지 않고 답변도 생성하지 않습니다. `MEMORY_EVIDENCE_NEED_RETRIEVAL=false`로 설정하면 과거 P1 경로를 재현할 수 있습니다.
+안정 기본 경로는 P1 구조화 질의 계획과 P4-A evidence-need 독립 검색을 결합합니다. P4-A는 각 `evidence_need`를 제한된 독립 채널로 검색하고 rerank pool에 후보 2개를 예약합니다. need 후보는 할당 선택 전에 최상의 bm25 점수 순으로 정렬되므로 가장 강한 후보가 유지됩니다. Search 모델 호출을 추가하지 않고 답변도 생성하지 않습니다. `MEMORY_EVIDENCE_NEED_RETRIEVAL=false`로 설정하면 과거 P1 경로를 재현할 수 있습니다.
 
 ### Add
 
@@ -104,14 +104,15 @@ P1은 기존 질의 계획 호출을 재사용합니다. 모델 호출 수를 �
 
 ### B. 안정적 제출 후 로컬 연구
 
-저장소에는 LoCoMo 적격 질문 1,977개에 대한 다음 전체 로컬 실행 결과가 기록되어 있습니다.
+저장소에는 LoCoMo에서 실행한 전체 제출 후 로컬 실행 결과가 기록되어 있습니다(로컬 Qwen3-4B 프록시이며 공식 leaderboard 결과가 아닙니다). 현재 최고 방법은 완료 가능한 질의 1,976개에서 평가됩니다. offset 758은 모든 방법에서 동일하게 제외되는데, 지나치게 긴 해당 대화가 추론 서버를 확실히 중단시키기 때문입니다:
 
-| 방법 | Hit@1 | Hit@3 | Hit@10 | MRR |
-|---|---:|---:|---:|---:|
-| P1 structured planner + local Qwen3-4B proxy | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
-| **P4-A q2(현재 가장 강한 로컬 프록시 베이스라인)** | **0.5776** | **0.7198** | **0.7643** | **0.6501** |
+| 방법 | Hit@1 | Hit@3 | Hit@10 | MRR  | Evidence Recall@10 |
+|---|---:|---:|---:|---:|---:|
+| P1 structured planner(기준선) | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 0.5976* |
+| P4-A q2(ablation) | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 0.5998* |
+| **P4-A q2 + bm25 selection(현재 최고)** | **0.5850** | **0.7323** | **0.7809** | **0.6618** | **0.6086** |
 
-이는 제출 후 로컬 LoCoMo 연구 결과이며 공식 leaderboard 결과가 아닙니다. P4-A q2는 Search 계획과 증거 정렬에 loopback Qwen3-4B 서버를 사용했습니다. 대응 P1 프록시 베이스라인과 비교해 Hit@1은 0.0015, Hit@3은 0.0041, Hit@10은 0.0025, MRR은 0.0022 향상되었고 기존 Top-10 밖의 8개를 Top-10으로 복구했습니다. 프로토콜과 경계는 [P4-A 전체 검증](docs/P4_A_FULL1977_VALIDATION.md) 및 [P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md)을 참조하십시오.
+이는 로컬 제출 후 LoCoMo 연구 결과이며 공식 leaderboard 결과가 아닙니다. 동일한 1,976문항 집합의 대응 P1 프록시 기준선과 비교할 때, 현재 최고 방법(P4-A q2 + bm25 selection)은 Hit@1을 0.0071, Hit@10을 0.0208, MRR을 0.0121 개선합니다. Paired bootstrap(10,000회 재표본) 95% CI: Hit@1 [-0.0051, +0.0197] (0을 포함하며 유의하다고 주장하지 않음), MRR [+0.0036, +0.0207], Hit@10 [+0.0116, +0.0299] (둘 다 0을 제외). nDCG@10 0.6914; Recall@5 0.7606. 프로토콜과 경계는 [전체 평가(1,976)](docs/EVALUATION_NEW_METHOD_1976.md), [논문용 결과](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md), [재현 절차](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md), [P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md)을 참조하십시오.
 
 ### C. Proxy 및 실험적 증거
 
@@ -147,7 +148,7 @@ P2는 구조화된 계획의 증거 필요 토큰을 이용해 P1 모델 순위 
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen reranker + time-aware-key milestone | 고정 research tag |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | Structured query-planning milestone | 안정 research tag |
 | [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | 현재 검증된 안정적 제출 후 연구 구현 | 활성 |
-| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | P3 Evidence Graph | 실험적 |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need + bm25 (1,976-query Hit@1 0.5850) | Active research branch |
 
 간략한 개발 경로는 다음과 같습니다.
 

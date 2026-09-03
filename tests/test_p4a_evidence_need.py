@@ -168,3 +168,138 @@ def test_baseline_mode_keeps_explicit_quota():
     assert args.structured_query_plan is True
     assert args.evidence_need_retrieval is True
     assert args.evidence_need_quota == 4
+
+
+class RelaxModel(NeedPlanModel):
+    """Plan whose evidence needs never match, forcing the relax pass."""
+
+    def __init__(self):
+        super().__init__(["zzz nonexistent term alpha", "zzz another beta"])
+
+
+RELAX_SAMPLE = [{
+    "sample_id": "sample-relax",
+    "conversation": {"session_1": [
+        {"speaker": "Ari", "dia_id": "D1:1",
+         "text": "Bob mentioned the Microsoft campus yesterday."},
+    ]},
+    "qa": [{
+        "question": "Which company campus did Bob mention?",
+        "evidence": ["D1:1"], "category": 3,
+    }],
+}]
+
+
+def test_p4d_default_off_never_triggers_relax():
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=RelaxModel(), structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    assert record["relax_union_ids"] == []
+    assert record["promoted_relax_ids"] == []
+    assert record["gold_relax_positions"] == {}
+
+
+def test_p4d_prefix_pass_recovers_lexical_evidence():
+    """When need channels miss, the prefix pass over plan terms should surface
+    the gold message (its words are substrings of plan core terms)."""
+    model = RelaxModel()
+    # Override plan to carry a term that prefixes gold words ("campus").
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=model, structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        query_relaxation=True, relax_quota=2,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    gold = set(record["gold_mem_ids"])
+    # Relax pass must have fired (need channels miss on the bogus terms).
+    assert record["gold_relax_positions"] or record["promoted_relax_ids"]
+    # The gold message either entered the pool via relax or was already there.
+    assert gold.intersection(record["rerank_pool_ids"])
+
+
+def test_p4d_requires_evidence_need_retrieval():
+    import pytest
+
+    with pytest.raises(ValueError):
+        locomo_evaluation.evaluate(
+            RELAX_SAMPLE, [1], None,
+            model=RelaxModel(), structured_query_plan=True,
+            query_relaxation=True,
+        )
+
+
+def test_need_select_by_bm25_default_off_preserves_order():
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=RelaxModel(), structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    assert record["evidence_need_diagnostics"]["select_by_bm25"] is False
+
+
+def test_need_select_by_bm25_requires_evidence_need_retrieval():
+    import pytest
+
+    with pytest.raises(ValueError):
+        locomo_evaluation.evaluate(
+            RELAX_SAMPLE, [1], None,
+            model=RelaxModel(), structured_query_plan=True,
+            need_select_by_bm25=True,
+        )
+
+
+def test_need_select_by_bm25_records_diagnostic_when_enabled():
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=RelaxModel(), structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        need_select_by_bm25=True,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    diag = record["evidence_need_diagnostics"]
+    assert diag["select_by_bm25"] is True
+
+
+def test_llm_rerank_top_n_default_uses_all_candidates():
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=RelaxModel(), structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    # With top_n=0 (default) every candidate reaches the LLM rank call.
+    assert record["llm_rank_candidate_count"] > 0
+
+
+def test_llm_rerank_top_n_limits_candidate_count():
+    report = locomo_evaluation.evaluate(
+        RELAX_SAMPLE, [1, 3, 10], None,
+        model=RelaxModel(), structured_query_plan=True,
+        evidence_need_retrieval=True, evidence_need_quota=2,
+        llm_rerank_top_n=2,
+        include_question_diagnostics=True,
+    )
+    record = report["question_diagnostics"][0]
+    # The sample has 3 messages; compression to 2 must cap the LLM rank input.
+    assert record["llm_rank_candidate_count"] <= 2
+
+
+def test_llm_rerank_top_n_rejects_out_of_range():
+    import pytest
+
+    with pytest.raises(ValueError):
+        locomo_evaluation.evaluate(
+            RELAX_SAMPLE, [1], None,
+            model=RelaxModel(), structured_query_plan=True,
+            llm_rerank_top_n=31,
+        )

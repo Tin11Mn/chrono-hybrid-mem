@@ -66,9 +66,12 @@ flowchart LR
 - 记忆 Search 绝不生成基准测试答案。
 - 可复现性和有边界的回归测试优先于增加复杂度。
 
-## 当前稳定版流水线：P4-A q2
+## 当前稳定版流水线：P4-A q2 + bm25 selection
 
-稳定默认路径基于 P1 结构化查询规划，并启用 P4-A evidence-need 独立检索。P4-A 将每条 `evidence_need` 作为一个受限的独立检索通道，并以固定 2 个候选的配额进入重排序池；它不增加 Search 模型调用，也不生成答案。将 `MEMORY_EVIDENCE_NEED_RETRIEVAL=false` 可回退到历史 P1 路径。
+稳定默认将 P1 结构化查询规划与 P4-A evidence-need 独立检索结合。P4-A 通过
+有界独立通道检索每条 `evidence_need`，并在重排池中保留 2 个候选；配额选取前
+need 候选按最佳 bm25 分数排序，从而保留最强候选。它不新增 Search 模型调用，
+也从不生成答案。设置 `MEMORY_EVIDENCE_NEED_RETRIEVAL=false` 可复现历史 P1 路径。
 
 ### Add
 
@@ -88,7 +91,7 @@ flowchart LR
 5. 可选使用 `gpt-4o-mini` 对范围受限的候选集进行排序。
 6. 根据所提供的候选 ID 允许列表过滤模型输出，并返回原始证据。
 
-P1 复用现有的查询规划调用；它不会新增模型调用，也不会改变 Add/Search API。API 服务默认设置为 `MEMORY_STRUCTURED_QUERY_PLAN=true`；如需进行扁平规划器消融实验，请将其设为 `false`。直接使用 `MemoryStore` 以及离线 LoCoMo 评测器时仍采取保守策略：评测器要求显式传入 `--structured-query-plan` 标志。如果没有 `OPENAI_API_KEY`，标准服务会走词法路径，不会调用模型。
+P1 复用现有的查询规划调用；它不会新增模型调用，也不会改变 Add/Search API。API 服务默认设置为 `MEMORY_STRUCTURED_QUERY_PLAN=true`；如需进行扁平规划器消融实验，请将其设为 `false`。
 
 可选的 BGE、ColBERT、交叉编码器、Qwen 及其他本地模型组件仍仅用于研究，稳定版 `main` 的默认配置并不包含这些组件。
 
@@ -104,14 +107,28 @@ P1 复用现有的查询规划调用；它不会新增模型调用，也不会�
 
 ### B. 稳定版赛后本地研究
 
-仓库记录了以下在 1,977 个符合条件的 LoCoMo 问题上完成的本地全量运行结果：
+仓库记录了 LoCoMo 上完整的赛后本地运行（本地 Qwen3-4B 代理，非官方
+排行榜结果）。当前最佳方法在 1,976 个可完成查询上评估（offset 758
+对所有方法一致排除——该超长对话必然挂起推理服务器）：
 
-| 方法 | Hit@1 | Hit@3 | Hit@10 | MRR |
-|---|---:|---:|---:|---:|
-| P1 结构化规划器 + 本地 Qwen3-4B 代理 | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
-| **P4-A q2（当前最强本地代理基线）** | **0.5776** | **0.7198** | **0.7643** | **0.6501** |
+| 方法 | Hit@1 | Hit@3 | Hit@10 | MRR | Evidence Recall@10 |
+|---|---:|---:|---:|---:|---:|
+| P1 结构化规划器（基线） | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 0.5976* |
+| P4-A q2（消融） | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 0.5998* |
+| **P4-A q2 + bm25 选取（当前最佳）** | **0.5850** | **0.7323** | **0.7809** | **0.6618** | **0.6086** |
 
-这些结果属于本地赛后 LoCoMo 研究，而非官方排行榜结果。P4-A q2 使用回环 Qwen3-4B 服务器进行 Search 规划和证据排序；相较同一 P1 代理基线，Hit@1 增加 0.0015、Hit@3 增加 0.0041、Hit@10 增加 0.0025、MRR 增加 0.0022，并将 8 个原本 Top-10 外的问题救回 Top-10。有关实验协议与边界，请参阅 [P4-A 全量验证](docs/P4_A_FULL1977_VALIDATION.md) 和 [P1 本地模型评测](docs/P1_LOCAL_EVALUATION.md)。
+* Evidence Recall@10 为各自证据池口径（差约 6 条源自 offset 758 统一排除）；
+同口径逐条重算待补。nDCG@10 0.6914；Recall@5 0.7606。
+相对同一 1,976 题集上的 P1 基线，当前最佳方法将 Hit@1 提升 0.0071、
+Hit@10 提升 0.0208、MRR 提升 0.0121。
+Paired bootstrap（10,000 次重采样）95% CI：Hit@1 [-0.0051, +0.0197]
+（含 0，未声称统计显著）；MRR [+0.0036, +0.0207] 与
+Hit@10 [+0.0116, +0.0299]（均排除 0，显著）。
+
+协议与复现见：[全量评测（1,976）](docs/EVALUATION_NEW_METHOD_1976.md)、
+[论文结果](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md)、
+[复现指南](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md)、
+[P1 本地模型评测](docs/P1_LOCAL_EVALUATION.md)。
 
 ### C. 代理证据与实验性证据
 
@@ -147,7 +164,7 @@ P2 在 P1 模型排序之后尝试依据结构化计划中的证据需求词，�
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen 重排序器 + 时间感知键里程碑 | 已冻结研究标签 |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | 结构化查询规划里程碑 | 稳定研究标签 |
 | [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | 当前经过验证的稳定版赛后研究实现 | 活跃 |
-| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | P3 Evidence Graph | 实验性 |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | 当前主方法：P4-A evidence-need 检索 + bm25 选取（1,976 问全量评测 Hit@1 0.5850） | 活跃研究分支 |
 
 精简的开发路径如下：
 
