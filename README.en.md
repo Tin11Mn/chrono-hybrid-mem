@@ -22,7 +22,7 @@
 
 ChronoHybridMem is a Docker-deployable long-term memory service that stores conversation turns and retrieves the original evidence most relevant to a query. It was developed for the Agent Memory Challenge and deliberately stops at evidence retrieval: it does not generate the benchmark's final answer.
 
-The default branch, `main`, uses P4-A q2 as its validated stable post-submission local research baseline. P3 Evidence Graph code remains a default-disabled experimental research surface and is not part of the stable retrieval path.
+The default branch, `main`, uses P4-A q2 with bm25 candidate selection as its validated stable post-submission local research baseline (Hit@1 0.5850 on 1,976 completable queries). P3 Evidence Graph code remains a default-disabled experimental research surface and is not part of the stable retrieval path.
 
 ## What the system does
 
@@ -66,9 +66,9 @@ The stable service follows six principles:
 - Memory Search never generates the benchmark answer.
 - Reproducibility and bounded regression tests come before added complexity.
 
-## Current stable pipeline: P4-A q2
+## Current stable pipeline: P4-A q2 + bm25 selection
 
-The stable default combines P1 structured query planning with P4-A evidence-need independent retrieval. P4-A retrieves each `evidence_need` through a bounded independent channel and reserves 2 candidates in the rerank pool; it adds no Search-model call and never generates answers. Set `MEMORY_EVIDENCE_NEED_RETRIEVAL=false` to reproduce the historical P1 path.
+The stable default combines P1 structured query planning with P4-A evidence-need independent retrieval. P4-A retrieves each `evidence_need` through a bounded independent channel and reserves 2 candidates in the rerank pool; need candidates are ordered by best bm25 score before the quota picks, so the strongest candidates are retained. It adds no Search-model call and never generates answers. Set `MEMORY_EVIDENCE_NEED_RETRIEVAL=false` to reproduce the historical P1 path.
 
 ### Add
 
@@ -104,14 +104,15 @@ The organizer has formally confirmed that the official result corresponds to [`v
 
 ### B. Stable post-submission local research
 
-The repository records the following full local runs on 1,977 eligible LoCoMo questions:
+The repository records full post-submission local runs on LoCoMo (local Qwen3-4B proxy, not official leaderboard results). The current best method is evaluated on 1,976 completable queries (offset 758 is excluded uniformly for every method because that overlong conversation reliably hangs the inference server):
 
-| Method | Hit@1 | Hit@3 | Hit@10 | MRR |
-|---|---:|---:|---:|---:|
-| P1 structured planner + local Qwen3-4B proxy | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
-| **P4-A q2 (current strongest local-proxy baseline)** | **0.5776** | **0.7198** | **0.7643** | **0.6501** |
+| Method | Hit@1 | Hit@3 | Hit@10 | MRR | Evidence Recall@10 |
+|---|---:|---:|---:|---:|---:|
+| P1 structured planner (baseline) | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 0.5976* |
+| P4-A q2 (ablation) | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 0.5998* |
+| **P4-A q2 + bm25 selection (current best)** | **0.5850** | **0.7323** | **0.7809** | **0.6618** | **0.6086** |
 
-These are local post-submission LoCoMo research results, not official leaderboard results. P4-A q2 used a loopback Qwen3-4B server for Search planning and evidence ordering; versus the matched P1 proxy baseline, Hit@1 increased by 0.0015, Hit@3 by 0.0041, Hit@10 by 0.0025, and MRR by 0.0022, with 8 former Top-10 misses recovered to Top-10. See [P4-A full validation](docs/P4_A_FULL1977_VALIDATION.md) and [P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md) for protocol and boundaries.
+These are local post-submission LoCoMo research results, not official leaderboard results. Versus the matched P1 proxy baseline on the same 1,976-question set, the current best method (P4-A q2 + bm25 selection) improves Hit@1 by 0.0071, Hit@10 by 0.0208, and MRR by 0.0121. Paired bootstrap (10,000 resamples) 95% CI: Hit@1 [-0.0051, +0.0197] (includes 0; not claimed significant), MRR [+0.0036, +0.0207] and Hit@10 [+0.0116, +0.0299] (both exclude 0). nDCG@10 0.6914; Recall@5 0.7606. See [full evaluation (1,976)](docs/EVALUATION_NEW_METHOD_1976.md), [results for paper](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md), [repro](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md), and [P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md) for protocol and boundaries.
 
 ### C. Proxy and experimental evidence
 
@@ -147,7 +148,7 @@ These experiments reject default graph or adjacent expansion on LoCoMo, not grap
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen reranker + time-aware-key milestone | Frozen research tag |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | Structured query-planning milestone | Stable research tag |
 | [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | Current validated stable post-submission research implementation | Active |
-| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | P3 Evidence Graph | Experimental |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need retrieval + bm25 selection (1,976-query evaluation Hit@1 0.5850) | Active research branch |
 
 The compact development path is:
 

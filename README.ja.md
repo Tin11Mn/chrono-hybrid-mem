@@ -22,7 +22,7 @@
 
 ChronoHybridMem は、会話ターンを保存し、クエリとの関連性が最も高い原典の根拠を検索する、Docker でデプロイ可能な長期メモリサービスです。Agent Memory Challenge のために開発され、意図的に根拠検索までを責務としています。ベンチマークの最終回答は生成しません。
 
-デフォルトブランチの `main` は、検証済みで安定した提出後ローカル研究ベースラインとして P4-A q2 を使用します。P3 Evidence Graph のコードは既定で無効な実験的研究機能として残り、安定した検索パスの一部ではありません。
+デフォルトブランチの `main` は、検証済みで安定した提出後ローカル研究のベースラインとして、P4-A q2 + bm25 selection を使用します（Hit@1 0.5850、1,976 件の実行可能なクエリに基づく）。P3 Evidence Graph のコードは、既定で無効な実験的研究機能のままであり、安定した検索パスの一部ではありません。
 
 ## システムの役割
 
@@ -66,9 +66,9 @@ flowchart LR
 - メモリの Search は、ベンチマークの回答を生成しません。
 - 複雑さを増す前に、再現性と範囲を限定した回帰テストを優先します。
 
-## 現在の安定版パイプライン：P4-A q2
+## 現在の安定版パイプライン：P4-A q2 + bm25 selection
 
-安定した既定経路は、P1 の構造化クエリ計画と P4-A の evidence-need 独立検索を組み合わせます。P4-A は各 `evidence_need` を制限付き独立チャネルで検索し、再ランキングプールに候補を 2 件予約します。Search モデル呼び出しを増やさず、回答も生成しません。`MEMORY_EVIDENCE_NEED_RETRIEVAL=false` を設定すると履歴上の P1 経路を再現できます。
+安定した既定経路は、P1 の構造化クエリ計画と P4-A の evidence-need 独立検索を組み合わせます。P4-A は各 `evidence_need` を制限付き独立チャネルで検索し、再ランキングプールに候補を 2 件予約します。need 候補はクォータ選択の前に最良の bm25 スコア順に並べられ、最も強い候補が保持されます。Search モデル呼び出しを増やさず、回答も生成しません。`MEMORY_EVIDENCE_NEED_RETRIEVAL=false` を設定すると履歴上の P1 経路を再現できます。
 
 ### Add
 
@@ -104,14 +104,15 @@ P1 は既存のクエリ計画呼び出しを再利用します。モデル呼�
 
 ### B. 安定した提出後のローカル研究
 
-このリポジトリには、対象となる LoCoMo の 1,977 問すべてを用いた、次のローカル実行結果が記録されています。
+このリポジトリには、LoCoMo（ローカルの Qwen3-4B プロキシ。公式リーダーボードの結果ではない）での提出後ローカル実行の全結果が記録されています。現在最良の手法は 1,976 件の実行可能なクエリで評価されています（オフセット 758 は、その過度に長い会話が推論サーバーを確実にハングアップさせるため、すべての手法で一様に除外）:
 
-| 手法 | Hit@1 | Hit@3 | Hit@10 | MRR |
-|---|---:|---:|---:|---:|
-| P1 structured planner + local Qwen3-4B proxy | **0.5761** | **0.7157** | **0.7618** | **0.6479** |
-| **P4-A q2（現在最強のローカルプロキシベースライン）** | **0.5776** | **0.7198** | **0.7643** | **0.6501** |
+| 手法 | Hit@1 | Hit@3 | Hit@10 | MRR | Evidence Recall@10 |
+|---|---:|---:|---:|---:|---:|
+| P1 structured planner（ベースライン） | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 0.5976* |
+| P4-A q2（アブレーション） | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 0.5998* |
+| **P4-A q2 + bm25 selection（現在最良）** | **0.5850** | **0.7323** | **0.7809** | **0.6618** | **0.6086** |
 
-これらは提出後の LoCoMo ローカル研究結果であり、公式リーダーボードの結果ではありません。P4-A q2 は Search 計画と根拠の並べ替えにループバックの Qwen3-4B サーバーを使用しました。対応する P1 プロキシベースラインと比較して、Hit@1 は 0.0015、Hit@3 は 0.0041、Hit@10 は 0.0025、MRR は 0.0022 改善し、従来 Top-10 外だった 8 件を Top-10 に回復しました。プロトコルと境界については [P4-A 全件検証](docs/P4_A_FULL1977_VALIDATION.md) および [P1 ローカルモデル評価](docs/P1_LOCAL_EVALUATION.md)を参照してください。
+これらは提出後の LoCoMo ローカル研究結果であり、公式リーダーボードの結果ではありません。同一の 1,976 問セット上で、対応する P1 プロキシベースラインと比較すると、現在最良の手法（P4-A q2 + bm25 selection）は Hit@1 を 0.0071、Hit@10 を 0.0208、MRR を 0.0121 改善します。ペア付きブートストラップ（10,000 回のリサンプル）の 95% CI：Hit@1 [-0.0051, +0.0197]（0 を含むため有意とは主張しない）、MRR [+0.0036, +0.0207] および Hit@10 [+0.0116, +0.0299]（いずれも 0 を除外）。nDCG@10 は 0.6914。Recall@5 は 0.7606。プロトコルと境界については、[全件評価（1,976）](docs/EVALUATION_NEW_METHOD_1976.md)、[論文用の結果](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md)、[再現手順](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md)、[P1 ローカルモデル評価](docs/P1_LOCAL_EVALUATION.md)を参照してください。
 
 ### C. プロキシおよび実験的な根拠
 
@@ -147,7 +148,7 @@ P2 は、構造化計画の証拠ニーズ語を用いて、P1 のモデルラ�
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen リランカー + time-aware-key のマイルストーン | 固定済み研究タグ |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | 構造化クエリ計画のマイルストーン | 安定版研究タグ |
 | [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | 現在検証済みで安定している提出後の研究実装 | 運用中 |
-| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | P3 Evidence Graph | 実験段階 |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need + bm25 (1,976-query Hit@1 0.5850) | Active research branch |
 
 開発経路を簡潔に示すと、次のとおりです。
 
