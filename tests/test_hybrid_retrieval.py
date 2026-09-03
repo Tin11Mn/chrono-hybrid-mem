@@ -692,3 +692,270 @@ def test_speaker_swap_dense_query_max_fusion_preserves_original_records(tmp_path
 
     assert retriever.queries == ["Why did Caroline run?", "Why did Melanie run?"]
     assert results[0].content == "Melanie: ran"
+
+
+class AdjacentExpansionModel:
+    """Small deterministic model fake for P1.1 candidate-pool assertions."""
+
+    def __init__(self, preferred_token=""):
+        self.preferred_token = preferred_token
+        self.extract_facts_calls = 0
+        self.plan_calls = 0
+        self.rank_calls = 0
+        self.ranked_candidate_ids = []
+        self.ranked_candidate_contents = {}
+
+    def extract_facts(self, content, speaker="", timestamp=None):
+        self.extract_facts_calls += 1
+        return []
+
+    def plan_query(self, query, options):
+        self.plan_calls += 1
+        return []
+
+    def rank_candidates(self, query, options, candidates):
+        self.rank_calls += 1
+        self.ranked_candidate_ids = [candidate["id"] for candidate in candidates]
+        self.ranked_candidate_contents = {
+            candidate["id"]: candidate["content"] for candidate in candidates
+        }
+        preferred = [
+            candidate["id"]
+            for candidate in candidates
+            if self.preferred_token and self.preferred_token in candidate["content"]
+        ]
+        return preferred + [
+            candidate["id"]
+            for candidate in candidates
+            if candidate["id"] not in preferred
+        ]
+
+
+def _add_adjacent_test_turn(store, *, request_id, session_id, content, user_id="user-a"):
+    store.add(AddRequest(
+        request_id=request_id,
+        user_id=user_id,
+        session_id=session_id,
+        messages=[{"role": "user", "content": content}],
+    ))
+
+
+def _seed_adjacent_turn_fixture(store):
+    # Separate Add calls deliberately avoid the existing ingestion-time context
+    # window; P1.1 must discover the same-session adjacency from raw turns.
+    _add_adjacent_test_turn(
+        store,
+        request_id="adjacent-previous",
+        session_id="session-a",
+        content="PREVIOUS_ONLY: the clue was written yesterday.",
+    )
+    _add_adjacent_test_turn(
+        store,
+        request_id="adjacent-anchor",
+        session_id="session-a",
+        content="BEACON_ANCHOR: Mina named the project beacon.",
+    )
+    _add_adjacent_test_turn(
+        store,
+        request_id="adjacent-following",
+        session_id="session-a",
+        content="NEXT_ONLY: the answer is the blue lantern.",
+    )
+
+
+def test_adjacent_turn_expansion_default_off_preserves_p1_candidate_path(tmp_path):
+    database_path = tmp_path / "adjacent-default-off.db"
+    seed_store = MemoryStore(str(database_path))
+    seed_store.initialize()
+    _seed_adjacent_turn_fixture(seed_store)
+
+    default_model = AdjacentExpansionModel()
+    explicit_off_model = AdjacentExpansionModel()
+    default_store = MemoryStore(str(database_path), model=default_model)
+    explicit_off_store = MemoryStore(
+        str(database_path),
+        model=explicit_off_model,
+        adjacent_turn_expansion=False,
+    )
+
+    default_results = default_store.search(
+        user_id="user-a", query="BEACON_ANCHOR", top_k=3
+    )
+    explicit_off_results = explicit_off_store.search(
+        user_id="user-a", query="BEACON_ANCHOR", top_k=3
+    )
+
+    assert [
+        (result.id, result.content, result.score) for result in default_results
+    ] == [
+        (result.id, result.content, result.score) for result in explicit_off_results
+    ]
+    assert default_model.ranked_candidate_ids == explicit_off_model.ranked_candidate_ids
+    assert default_store.last_retrieval_trace["p1_pre_rerank_ids"] == (
+        explicit_off_store.last_retrieval_trace["p1_pre_rerank_ids"]
+    )
+    assert default_store.last_retrieval_trace["rerank_pool_ids"] == (
+        explicit_off_store.last_retrieval_trace["rerank_pool_ids"]
+    )
+    for trace in (
+        default_store.last_retrieval_trace,
+        explicit_off_store.last_retrieval_trace,
+    ):
+        assert trace["adjacent_seed_ids"] == []
+        assert trace["adjacent_candidate_ids"] == []
+        assert trace["adjacent_deduped_ids"] == []
+
+
+def test_adjacent_turn_expansion_returns_immediate_same_session_raw_neighbors(tmp_path):
+    database_path = tmp_path / "adjacent-neighbors.db"
+    seed_store = MemoryStore(str(database_path))
+    seed_store.initialize()
+    _seed_adjacent_turn_fixture(seed_store)
+
+    model = AdjacentExpansionModel(preferred_token="NEXT_ONLY")
+    store = MemoryStore(
+        str(database_path),
+        model=model,
+        adjacent_turn_expansion=True,
+        adjacent_seed_limit=4,
+        adjacent_candidate_limit=4,
+    )
+
+    results = store.search(user_id="user-a", query="BEACON_ANCHOR", top_k=3)
+
+    result_ids_by_content = {result.content: result.id for result in results}
+    anchor_id = result_ids_by_content["BEACON_ANCHOR: Mina named the project beacon."]
+    previous_id = result_ids_by_content["PREVIOUS_ONLY: the clue was written yesterday."]
+    following_id = result_ids_by_content["NEXT_ONLY: the answer is the blue lantern."]
+    trace = store.last_retrieval_trace
+
+    assert trace["p1_pre_rerank_ids"] == [anchor_id]
+    assert trace["adjacent_seed_ids"] == [anchor_id]
+    assert trace["adjacent_candidate_ids"] == [previous_id, following_id]
+    assert trace["adjacent_deduped_ids"] == []
+    assert model.ranked_candidate_ids == [anchor_id, previous_id, following_id]
+    assert result_ids_by_content["NEXT_ONLY: the answer is the blue lantern."] == following_id
+    assert all("Original memory:" not in result.content for result in results)
+
+
+def test_adjacent_turn_expansion_never_crosses_session_boundaries(tmp_path):
+    database_path = tmp_path / "adjacent-session-boundary.db"
+    seed_store = MemoryStore(str(database_path))
+    seed_store.initialize()
+    _add_adjacent_test_turn(
+        seed_store,
+        request_id="session-anchor",
+        session_id="session-a",
+        content="BOUNDARY_ANCHOR: the topic is beacon.",
+    )
+    _add_adjacent_test_turn(
+        seed_store,
+        request_id="foreign-turn",
+        session_id="session-b",
+        content="FOREIGN_ONLY: this turn must never be traversed.",
+    )
+    _add_adjacent_test_turn(
+        seed_store,
+        request_id="session-neighbor",
+        session_id="session-a",
+        content="SAME_SESSION_ONLY: this is the valid following turn.",
+    )
+
+    model = AdjacentExpansionModel()
+    store = MemoryStore(
+        str(database_path),
+        model=model,
+        adjacent_turn_expansion=True,
+        adjacent_seed_limit=4,
+        adjacent_candidate_limit=4,
+    )
+    results = store.search(user_id="user-a", query="BOUNDARY_ANCHOR", top_k=3)
+
+    ids_by_content = {result.content: result.id for result in results}
+    trace = store.last_retrieval_trace
+    assert trace["adjacent_candidate_ids"] == [
+        ids_by_content["SAME_SESSION_ONLY: this is the valid following turn."]
+    ]
+    assert "FOREIGN_ONLY: this turn must never be traversed." not in ids_by_content
+    assert all("FOREIGN_ONLY" not in content for content in model.ranked_candidate_contents.values())
+
+
+def test_adjacent_turn_expansion_caps_seeds_candidates_and_model_pool_in_order(tmp_path):
+    database_path = tmp_path / "adjacent-caps.db"
+    seed_store = MemoryStore(str(database_path))
+    seed_store.initialize()
+    for index in range(35):
+        _add_adjacent_test_turn(
+            seed_store,
+            request_id="cap-anchor-{}".format(index),
+            session_id="session-a",
+            content="CAP_BEACON anchor {:02d}.".format(index),
+        )
+        _add_adjacent_test_turn(
+            seed_store,
+            request_id="cap-neighbor-{}".format(index),
+            session_id="session-a",
+            content="CAP_NEIGHBOR answer {:02d}.".format(index),
+        )
+
+    model = AdjacentExpansionModel()
+    store = MemoryStore(
+        str(database_path),
+        model=model,
+        adjacent_turn_expansion=True,
+        adjacent_seed_limit=4,
+        adjacent_candidate_limit=4,
+    )
+
+    store.search(user_id="user-a", query="CAP_BEACON", top_k=30)
+    first_trace = store.last_retrieval_trace
+    first_pool_ids = list(model.ranked_candidate_ids)
+    store.search(user_id="user-a", query="CAP_BEACON", top_k=30)
+    second_trace = store.last_retrieval_trace
+
+    assert len(first_trace["p1_pre_rerank_ids"]) >= MemoryStore.MODEL_RERANK_LIMIT
+    assert first_trace["adjacent_seed_ids"] == first_trace[
+        "p1_pre_rerank_ids"
+    ][:len(first_trace["adjacent_seed_ids"])]
+    assert 1 <= len(first_trace["adjacent_seed_ids"]) <= 4
+    assert len(first_trace["adjacent_candidate_ids"]) == 4
+    assert len(set(first_trace["adjacent_candidate_ids"])) == 4
+    assert set(first_trace["adjacent_candidate_ids"]).issubset(
+        set(first_trace["rerank_pool_ids"])
+    )
+    assert len(first_trace["rerank_pool_ids"]) <= MemoryStore.MODEL_RERANK_LIMIT
+    assert first_pool_ids == first_trace["rerank_pool_ids"]
+    assert first_trace["adjacent_seed_ids"] == second_trace["adjacent_seed_ids"]
+    assert first_trace["adjacent_candidate_ids"] == second_trace["adjacent_candidate_ids"]
+    assert first_trace["rerank_pool_ids"] == second_trace["rerank_pool_ids"]
+
+
+def test_adjacent_turn_expansion_adds_no_model_calls(tmp_path):
+    database_path = tmp_path / "adjacent-model-calls.db"
+    seed_store = MemoryStore(str(database_path))
+    seed_store.initialize()
+    _seed_adjacent_turn_fixture(seed_store)
+
+    off_model = AdjacentExpansionModel()
+    on_model = AdjacentExpansionModel()
+    off_store = MemoryStore(
+        str(database_path), model=off_model, adjacent_turn_expansion=False
+    )
+    on_store = MemoryStore(
+        str(database_path),
+        model=on_model,
+        adjacent_turn_expansion=True,
+        adjacent_seed_limit=4,
+        adjacent_candidate_limit=4,
+    )
+
+    off_store.search(user_id="user-a", query="BEACON_ANCHOR", top_k=3)
+    on_store.search(user_id="user-a", query="BEACON_ANCHOR", top_k=3)
+
+    assert off_model.extract_facts_calls == on_model.extract_facts_calls == 0
+    assert off_model.plan_calls == on_model.plan_calls == 1
+    assert off_model.rank_calls == on_model.rank_calls == 1
+    assert off_store.last_retrieval_trace["p1_pre_rerank_ids"] == (
+        on_store.last_retrieval_trace["p1_pre_rerank_ids"]
+    )
+    assert len(on_model.ranked_candidate_ids) > len(off_model.ranked_candidate_ids)
