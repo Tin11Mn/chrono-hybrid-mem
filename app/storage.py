@@ -484,11 +484,89 @@ def candidate_ranking_text(
     return "\n".join(parts)
 
 
+_BRIDGE_CAPITALIZED_PATTERN = re.compile(
+    r"\b[A-Z][a-zA-Z]{1,}(?:\s+[A-Z][a-zA-Z]{1,})*\b"
+)
+
+
+def extract_bridge_terms(
+    query: str,
+    candidate_texts: Sequence[str],
+    known_speakers: Sequence[str],
+    max_terms: int = 3,
+) -> List[str]:
+    """Deterministic bridge terms from first-pass evidence.
+
+    P4-C bridge extraction: capitalized spans from the first-pass evidence,
+    excluding the query's own terms, stop words, sentence-initial common words,
+    and the known participant names (their speaker prefixes are prefix noise).
+    The first hop can be a single candidate, so no cross-candidate co-occurrence
+    is required; terms are ordered by frequency then specificity. No model call.
+    """
+    query_lower = set(re.findall(r"[\w]+", query.casefold()))
+    speaker_lower = {
+        speaker.casefold().strip()
+        for speaker in known_speakers
+        if speaker.strip()
+    }
+    stop_words = MemoryStore.QUERY_STOP_WORDS
+    sentence_start_words = {
+        "a", "an", "he", "her", "his", "i", "i'm", "im", "it", "its", "me",
+        "my", "our", "she", "that", "the", "their", "there", "these", "they",
+        "this", "we", "you", "your",
+    }
+    selected: List[str] = []
+    seen: set = set()
+
+    def add_term(term: str) -> bool:
+        normalized = term.casefold().strip()
+        if (
+            not normalized
+            or normalized in stop_words
+            or normalized in query_lower
+            or normalized in speaker_lower
+            or normalized in sentence_start_words
+            or normalized in seen
+        ):
+            return False
+        seen.add(normalized)
+        selected.append(term)
+        return True
+
+    span_counts: Dict[str, int] = {}
+    span_originals: Dict[str, str] = {}
+    for text in candidate_texts:
+        for match in _BRIDGE_CAPITALIZED_PATTERN.finditer(text):
+            normalized = match.group(0).casefold()
+            span_counts[normalized] = span_counts.get(normalized, 0) + 1
+            if normalized not in span_originals:
+                span_originals[normalized] = match.group(0)
+    for normalized, _count in sorted(
+        span_counts.items(),
+        key=lambda item: (-item[1], -len(item[0])),
+    ):
+        if len(selected) >= max_terms:
+            break
+        add_term(span_originals[normalized])
+    return selected
+
+
 class MemoryStore:
     RRF_CONSTANT = 60
     MODEL_RERANK_LIMIT = 30
+    # Direction-3 candidate compression: when llm_rerank_top_n > 0, only the
+    # first N rerank-pool candidates (fusion order) are sent to the Search
+    # model for ranking. Long candidate lists dilute the local model's
+    # attention (435 full-set questions have gold in pool positions 11-30);
+    # focusing on the top N should sharpen ordering at the top.
+    LLM_RERANK_TOP_N_DEFAULT = 0
     GRAPH_SEED_LIMIT = 6
     GRAPH_EDGE_LIMIT_PER_SEED = 20
+    # Selective graph gate: P3-A on a 20-question slice showed global graph
+    # defaulting regressed (Hit@1 0.40->0.35, 0.72% relation coverage). The
+    # selective mode only runs the graph channel for multi-hop plans or
+    # entity-dense queries, where a second hop is actually defensible.
+    GRAPH_SELECTIVE_MIN_ENTITIES = 2
     ANCHOR_SEED_LIMIT = 6
     ANCHOR_CANDIDATES_PER_SEED = 20
     ANCHOR_MAX_CANDIDATES = 20
@@ -506,6 +584,52 @@ class MemoryStore:
     # reserved quota (default 2) instead of competing at core-intent weight.
     EVIDENCE_NEED_QUOTA_DEFAULT = 2
     EVIDENCE_NEED_RRF_WEIGHT_DEFAULT = 0.01
+    # P4-C bridge second-pass: for multi-hop plans, deterministic bridge terms
+    # (capitalized spans / speakers) are extracted from the first-pass evidence
+    # and re-queried together with each evidence need. The bridge channel gets a
+    # reserved pool quota; at most one second pass runs (no recursion).
+    BRIDGE_MAX_TERMS_DEFAULT = 3
+    BRIDGE_RRF_WEIGHT_DEFAULT = 0.01
+    BRIDGE_RERANK_QUOTA_DEFAULT = 2
+    # Shared sidecar pool: when >0, P4-A need and P4-C bridge candidates share
+    # one total reservation instead of each holding its own fixed quota. This
+    # prevents combos from over-compressing the P1 base budget (fixed-200 showed
+    # need 2 + bridge 2 pushed P1 to 26 and dropped Hit@1 below baseline).
+    SIDECAR_SHARED_QUOTA_DEFAULT = 0
+    # P4-D query relaxation: only fires when every evidence-need channel returns
+    # zero hits (a pure lexical-miss signal). The relaxed query ORs FTS5 prefix
+    # forms (term*) of plan core terms + entities + query terms across the two
+    # raw channels at low weight with a reserved quota. Audit (fixed-200 +
+    # full 1977) found channel_miss cases are inference-type with zero lexical
+    # overlap, so this is expected to add little; kept default-off for a
+    # controlled ablation.
+    RELAX_RRF_WEIGHT_DEFAULT = 0.01
+    RELAX_QUOTA_DEFAULT = 2
+    # P5 selective rerank gate: default-off deterministic reordering that only
+    # acts when the Search model's Top-1 vs Top-2 are near-tied on the fusion
+    # score AND the runner-up carries strictly stronger P1-channel evidence.
+    # Full-1977 paired diagnostics showed P4-A converts 56 rank-2/3 cases to
+    # Top-1 but displaces 71 Top-1 hits; P5 must gate on evidence and never
+    # promote unconditionally. Fusion scores live on MemoryResult.score.
+    P5_NEAR_TIE_EPSILON_DEFAULT = 0.0005
+    P5_MIN_EVIDENCE_CHANNELS = 2
+    # Confidence scale is 0-1, so the dominance margin differs from the fusion
+    # score epsilon. Default 0.05: the runner-up must be at least 5 points more
+    # confident than the Top-1 for a swap (a conservative, evidence-preserving
+    # threshold).
+    P5_CONFIDENCE_MARGIN_DEFAULT = 0.05
+    # P5 strata: gate only fires for queries in the configured strata (default
+    # temporal + correction), where the latest-valid-state rule is most
+    # defensible. "all" restores the un-stratified gate.
+    P5_STRATA_DEFAULT = "temporal,correction"
+    # Correction/state-change language cues (query side).
+    P5_CORRECTION_QUERY_PATTERN = re.compile(
+        r"\b(change|changes|changed|update|updates|updated|correction|corrected|"
+        r"revision|revised|no longer|used to|instead|currently|now|latest|"
+        r"recent|newest|previous|earlier|before|after)\b|"
+        r"改成|变为|更改|之前|后来|最新|现在|目前",
+        flags=re.IGNORECASE,
+    )
     # Kept for controlled ablations; full LoCoMo evaluation showed that
     # hard entity binding harms adversarial cross-speaker questions overall.
     ENTITY_RRF_WEIGHT = 0.0
@@ -555,6 +679,7 @@ class MemoryStore:
                  graph_rrf_weight: float = 0.025,
                  graph_max_candidates: int = 20,
                  graph_rerank_quota: int = 4,
+                 graph_selective: bool = False,
                  evidence_anchors: bool = False,
                  anchor_seed_limit: int = ANCHOR_SEED_LIMIT,
                  anchor_max_candidates: int = ANCHOR_MAX_CANDIDATES,
@@ -565,7 +690,22 @@ class MemoryStore:
                  adjacent_candidate_limit: int = ADJACENT_CANDIDATE_LIMIT,
                  evidence_need_retrieval: bool = False,
                  evidence_need_quota: int = EVIDENCE_NEED_QUOTA_DEFAULT,
-                 evidence_need_rrf_weight: float = EVIDENCE_NEED_RRF_WEIGHT_DEFAULT) -> None:
+                 evidence_need_rrf_weight: float = EVIDENCE_NEED_RRF_WEIGHT_DEFAULT,
+                 need_select_by_bm25: bool = False,
+                 bridge_retrieval: bool = False,
+                 bridge_max_terms: int = BRIDGE_MAX_TERMS_DEFAULT,
+                 bridge_rrf_weight: float = BRIDGE_RRF_WEIGHT_DEFAULT,
+                 bridge_rerank_quota: int = BRIDGE_RERANK_QUOTA_DEFAULT,
+                 sidecar_shared_quota: int = SIDECAR_SHARED_QUOTA_DEFAULT,
+                 query_relaxation: bool = False,
+                 relax_rrf_weight: float = RELAX_RRF_WEIGHT_DEFAULT,
+                 relax_quota: int = RELAX_QUOTA_DEFAULT,
+                 p5_gate: bool = False,
+                 p5_near_tie_epsilon: float = P5_NEAR_TIE_EPSILON_DEFAULT,
+                 p5_min_evidence_channels: int = P5_MIN_EVIDENCE_CHANNELS,
+                 p5_confidence_margin: float = P5_CONFIDENCE_MARGIN_DEFAULT,
+                 p5_strata: str = P5_STRATA_DEFAULT,
+                 llm_rerank_top_n: int = LLM_RERANK_TOP_N_DEFAULT) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -631,6 +771,7 @@ class MemoryStore:
             self.graph_rrf_weight = graph_rrf_weight
             self.graph_max_candidates = graph_max_candidates
             self.graph_rerank_quota = graph_rerank_quota
+            self.graph_selective = graph_selective
         else:
             # Graph-only knobs are intentionally inert when the feature is off.
             # This preserves the P1 constructor and runtime path even if stale
@@ -640,6 +781,11 @@ class MemoryStore:
             self.graph_rrf_weight = 0.0
             self.graph_max_candidates = 0
             self.graph_rerank_quota = 0
+            self.graph_selective = False
+        if graph_selective and not evidence_graph:
+            raise ValueError("graph_selective requires evidence_graph")
+        if not isinstance(graph_selective, bool):
+            raise ValueError("graph_selective must be a boolean")
         if evidence_anchors:
             if not structured_query_plan:
                 raise ValueError("evidence_anchors requires structured_query_plan")
@@ -744,6 +890,137 @@ class MemoryStore:
         self.evidence_need_retrieval = evidence_need_retrieval
         self.evidence_need_quota = evidence_need_quota
         self.evidence_need_rrf_weight = evidence_need_rrf_weight
+        if not isinstance(need_select_by_bm25, bool):
+            raise ValueError("need_select_by_bm25 must be a boolean")
+        if need_select_by_bm25 and not evidence_need_retrieval:
+            raise ValueError("need_select_by_bm25 requires evidence_need_retrieval")
+        self.need_select_by_bm25 = need_select_by_bm25
+        if not isinstance(bridge_retrieval, bool):
+            raise ValueError("bridge_retrieval must be a boolean")
+        if bridge_retrieval and not structured_query_plan:
+            raise ValueError("bridge_retrieval requires structured_query_plan")
+        if bridge_retrieval and dense_fusion_alpha is not None:
+            raise ValueError("bridge_retrieval cannot use dense_fusion_alpha")
+        if (
+            isinstance(bridge_max_terms, bool)
+            or not isinstance(bridge_max_terms, int)
+            or not 1 <= bridge_max_terms <= 5
+        ):
+            raise ValueError("bridge_max_terms must be an integer between 1 and 5")
+        if (
+            not isinstance(bridge_rrf_weight, (int, float))
+            or isinstance(bridge_rrf_weight, bool)
+            or not 0 <= bridge_rrf_weight <= 1
+        ):
+            raise ValueError("bridge_rrf_weight must be a number between 0 and 1")
+        if (
+            isinstance(bridge_rerank_quota, bool)
+            or not isinstance(bridge_rerank_quota, int)
+            or not 0 <= bridge_rerank_quota <= self.MODEL_RERANK_LIMIT
+        ):
+            raise ValueError(
+                "bridge_rerank_quota must be an integer between 0 and {}".format(
+                    self.MODEL_RERANK_LIMIT
+                )
+            )
+        self.bridge_retrieval = bridge_retrieval
+        self.bridge_max_terms = bridge_max_terms
+        self.bridge_rrf_weight = bridge_rrf_weight
+        self.bridge_rerank_quota = bridge_rerank_quota
+        if (
+            isinstance(sidecar_shared_quota, bool)
+            or not isinstance(sidecar_shared_quota, int)
+            or not 0 <= sidecar_shared_quota <= self.MODEL_RERANK_LIMIT
+        ):
+            raise ValueError(
+                "sidecar_shared_quota must be an integer between 0 and {}".format(
+                    self.MODEL_RERANK_LIMIT
+                )
+            )
+        if sidecar_shared_quota > 0 and not (
+            evidence_need_retrieval or bridge_retrieval
+        ):
+            raise ValueError(
+                "sidecar_shared_quota requires evidence_need_retrieval or bridge_retrieval"
+            )
+        self.sidecar_shared_quota = sidecar_shared_quota
+        if not isinstance(query_relaxation, bool):
+            raise ValueError("query_relaxation must be a boolean")
+        if query_relaxation and not evidence_need_retrieval:
+            raise ValueError(
+                "query_relaxation requires evidence_need_retrieval"
+            )
+        if (
+            not isinstance(relax_rrf_weight, (int, float))
+            or isinstance(relax_rrf_weight, bool)
+            or not 0 <= relax_rrf_weight <= 1
+        ):
+            raise ValueError("relax_rrf_weight must be a number between 0 and 1")
+        if (
+            isinstance(relax_quota, bool)
+            or not isinstance(relax_quota, int)
+            or not 0 <= relax_quota <= self.MODEL_RERANK_LIMIT
+        ):
+            raise ValueError(
+                "relax_quota must be an integer between 0 and {}".format(
+                    self.MODEL_RERANK_LIMIT
+                )
+            )
+        self.query_relaxation = query_relaxation
+        self.relax_rrf_weight = relax_rrf_weight
+        self.relax_quota = relax_quota
+        if not isinstance(p5_gate, bool):
+            raise ValueError("p5_gate must be a boolean")
+        if p5_gate and not structured_query_plan:
+            raise ValueError("p5_gate requires structured_query_plan")
+        if (
+            not isinstance(p5_near_tie_epsilon, (int, float))
+            or isinstance(p5_near_tie_epsilon, bool)
+            or not 0 <= p5_near_tie_epsilon <= 1
+        ):
+            raise ValueError("p5_near_tie_epsilon must be a number between 0 and 1")
+        if (
+            isinstance(p5_min_evidence_channels, bool)
+            or not isinstance(p5_min_evidence_channels, int)
+            or not 1 <= p5_min_evidence_channels <= 30
+        ):
+            raise ValueError(
+                "p5_min_evidence_channels must be an integer between 1 and 30"
+            )
+        self.p5_gate = p5_gate
+        self.p5_near_tie_epsilon = p5_near_tie_epsilon
+        self.p5_min_evidence_channels = p5_min_evidence_channels
+        if (
+            not isinstance(p5_confidence_margin, (int, float))
+            or isinstance(p5_confidence_margin, bool)
+            or not 0 <= p5_confidence_margin <= 1
+        ):
+            raise ValueError("p5_confidence_margin must be a number between 0 and 1")
+        self.p5_confidence_margin = p5_confidence_margin
+        if not isinstance(p5_strata, str) or not p5_strata.strip():
+            raise ValueError("p5_strata must be a non-empty string")
+        allowed_strata = {"all", "temporal", "correction"}
+        strata_set = {
+            part.strip()
+            for part in p5_strata.split(",")
+            if part.strip()
+        }
+        if not strata_set or not strata_set.issubset(allowed_strata):
+            raise ValueError(
+                "p5_strata must be a comma-separated subset of all/temporal/correction"
+            )
+        self.p5_strata = ",".join(sorted(strata_set))
+        if (
+            isinstance(llm_rerank_top_n, bool)
+            or not isinstance(llm_rerank_top_n, int)
+            or not 0 <= llm_rerank_top_n <= self.MODEL_RERANK_LIMIT
+        ):
+            raise ValueError(
+                "llm_rerank_top_n must be an integer between 0 and {}".format(
+                    self.MODEL_RERANK_LIMIT
+                )
+            )
+        self.llm_rerank_top_n = llm_rerank_top_n
         self._retrieval_diagnostics_lock = threading.Lock()
         self._last_query_plan: Dict[str, Any] = {}
         self._last_graph_candidate_ids: List[str] = []
@@ -798,15 +1075,28 @@ class MemoryStore:
             "reserved_graph_ids": [],
             "reserved_anchor_ids": [],
             "reserved_adjacent_ids": [],
+            "reserved_need_ids": [],
+            "reserved_bridge_ids": [],
+            "reserved_relax_ids": [],
             "promoted_graph_ids": [],
             "promoted_anchor_ids": [],
             "promoted_adjacent_ids": [],
+            "promoted_need_ids": [],
+            "promoted_bridge_ids": [],
             "displaced_p1_ids": [],
             "displaced_p1_for_anchor_ids": [],
             "displaced_p1_for_adjacent_ids": [],
-            "reserved_need_ids": [],
-            "promoted_need_ids": [],
             "displaced_p1_for_need_ids": [],
+            "displaced_p1_for_bridge_ids": [],
+            "bridge_diagnostics": {
+                "enabled": False,
+                "max_terms": MemoryStore.BRIDGE_MAX_TERMS_DEFAULT,
+                "rrf_weight": MemoryStore.BRIDGE_RRF_WEIGHT_DEFAULT,
+                "quota": MemoryStore.BRIDGE_RERANK_QUOTA_DEFAULT,
+            },
+            "bridge_terms": [],
+            "bridge_channels": {},
+            "bridge_union_ids": [],
             "evidence_need_diagnostics": {
                 "enabled": False,
                 "quota": MemoryStore.EVIDENCE_NEED_QUOTA_DEFAULT,
@@ -815,8 +1105,36 @@ class MemoryStore:
             },
             "evidence_need_channels": {},
             "evidence_need_union_ids": [],
+            "relax_diagnostics": {
+                "enabled": False,
+                "rrf_weight": MemoryStore.RELAX_RRF_WEIGHT_DEFAULT,
+                "quota": MemoryStore.RELAX_QUOTA_DEFAULT,
+            },
+            "relax_channels": {},
+            "relax_union_ids": [],
+            "promoted_relax_ids": [],
+            "displaced_p1_for_relax_ids": [],
+            "p5_diagnostics": {
+                "enabled": False,
+                "near_tie_epsilon": MemoryStore.P5_NEAR_TIE_EPSILON_DEFAULT,
+                "min_evidence_channels": MemoryStore.P5_MIN_EVIDENCE_CHANNELS,
+                "confidence_margin": MemoryStore.P5_CONFIDENCE_MARGIN_DEFAULT,
+                "strata": MemoryStore.P5_STRATA_DEFAULT,
+                "strata_matched": False,
+                "rank_confidence": {},
+                "triggered": False,
+                "swapped_ids": [],
+                "top1_id": None,
+                "top1_score": None,
+                "top2_id": None,
+                "top2_score": None,
+                "top2_evidence_channels": 0,
+                "top2_has_fact": False,
+                "reason": None,
+            },
             "rerank_pool_ids": [],
             "final_ids": [],
+            "llm_rank_candidate_count": 0,
             "edge_diagnostics": {
                 "seed_limit": MemoryStore.GRAPH_SEED_LIMIT,
                 "edge_limit_per_seed": MemoryStore.GRAPH_EDGE_LIMIT_PER_SEED,
@@ -968,6 +1286,179 @@ class MemoryStore:
         ]
         retrieval_trace["p2_newly_covered_tokens"] = selected_diagnostics
         return ordered_results
+
+    def _apply_selective_rerank_gate(
+        self,
+        results: Sequence[MemoryResult],
+        *,
+        query: str,
+        query_plan: Dict[str, Any],
+        retrieval_trace: Dict[str, Any],
+        ranking_metadata: Optional[Dict[Any, Dict[str, Any]]] = None,
+        message_ids: Optional[Dict[str, int]] = None,
+    ) -> List[MemoryResult]:
+        """P5 selective gate: swap Top-1/Top-2 only when they are near-tied on
+        the fusion score AND the runner-up has strictly more query-token
+        overlap with the question than the current Top-1 (plus an optional fact
+        annotation). Default-off; never promotes unconditionally."""
+
+        diagnostics = retrieval_trace["p5_diagnostics"]
+        diagnostics.update({
+            "enabled": self.p5_gate,
+            "near_tie_epsilon": self.p5_near_tie_epsilon,
+            "min_evidence_channels": self.p5_min_evidence_channels,
+            "confidence_margin": self.p5_confidence_margin,
+            "strata": self.p5_strata,
+        })
+        original = list(results)
+        if (
+            not self.p5_gate
+            or len(original) < 2
+            or not retrieval_trace.get("p1_channels")
+        ):
+            return original
+
+        # Strata gate: only act for queries whose language (or plan intent)
+        # matches the configured strata. This is a pre-registration of where the
+        # latest-valid-state rule is defensible; outside the strata the gate
+        # never fires regardless of near-tie or evidence.
+        strata_parts = {
+            part.strip()
+            for part in self.p5_strata.split(",")
+            if part.strip()
+        }
+        plan_intent = str(query_plan.get("intent", "")).casefold()
+        temporal_match = bool(
+            self.TEMPORAL_QUERY_PATTERN.search(query)
+            or self.HISTORICAL_QUERY_PATTERN.search(query)
+            or plan_intent == "temporal"
+        )
+        correction_match = bool(
+            self.P5_CORRECTION_QUERY_PATTERN.search(query)
+            or plan_intent == "correction"
+        )
+        strata_matched = (
+            ("all" in strata_parts)
+            or ("temporal" in strata_parts and temporal_match)
+            or ("correction" in strata_parts and correction_match)
+        )
+        diagnostics["strata_matched"] = strata_matched
+        if not strata_matched:
+            diagnostics["reason"] = "strata_excluded"
+            return original
+
+        top1, top2 = original[0], original[1]
+        top1_score = getattr(top1, "score", None)
+        top2_score = getattr(top2, "score", None)
+        if top1_score is None or top2_score is None:
+            diagnostics["reason"] = "missing_fusion_score"
+            return original
+        # LLM's own confidence (0-1) for the two leading candidates. This is
+        # the model's near-tie signal: if the model ranks A first but gives A
+        # and B nearly equal confidence, and B is the one it is more sure of,
+        # a swap reflects the model's own uncertainty. When confidence is
+        # available it REPLACES the fusion-score near-tie gate (the fusion gap
+        # is a retrieval-layer proxy that already failed three times); the
+        # fusion gap only gates when confidence is absent.
+        rank_confidence = retrieval_trace.get("p5_diagnostics", {}).get(
+            "rank_confidence", {}
+        )
+        top1_confidence = rank_confidence.get(top1.id)
+        top2_confidence = rank_confidence.get(top2.id)
+        confidence_available = (
+            isinstance(top1_confidence, (int, float))
+            and isinstance(top2_confidence, (int, float))
+        )
+        if not confidence_available:
+            score_gap = top1_score - top2_score
+            if score_gap >= self.p5_near_tie_epsilon:
+                diagnostics.update({
+                    "top1_id": top1.id,
+                    "top1_score": top1_score,
+                    "top2_id": top2.id,
+                    "top2_score": top2_score,
+                    "reason": "not_near_tie",
+                })
+                return original
+
+        # Query-token overlap: how many non-stopword query tokens appear in each
+        # candidate's content. This is a correctness-adjacent signal (a runner-up
+        # that literally restates more of the question is more likely the answer),
+        # unlike P1 channel counts, which are multi-view projections of the same
+        # content and carry no discrimination.
+        query_tokens = {
+            token.casefold()
+            for token in re.findall(r"[\w]+", query, flags=re.UNICODE)
+            if token.casefold() not in self.QUERY_STOP_WORDS
+        }
+
+        def overlap_count(result: MemoryResult) -> int:
+            content_tokens = {
+                token.casefold()
+                for token in re.findall(
+                    r"[\w]+", result.content, flags=re.UNICODE
+                )
+            }
+            return len(query_tokens & content_tokens)
+
+        top1_overlap = overlap_count(top1)
+        top2_overlap = overlap_count(top2)
+
+        # P1-channel counts stay as diagnostics only (multi-view, no signal).
+        top1_channel_count = 0
+        top2_channel_count = 0
+        for rows in retrieval_trace.get("p1_channels", {}).values():
+            if not isinstance(rows, list):
+                continue
+            if top1.id in rows:
+                top1_channel_count += 1
+            if top2.id in rows:
+                top2_channel_count += 1
+        has_fact = False
+        if ranking_metadata and message_ids:
+            raw_message_id = message_ids.get(top2.id)
+            if raw_message_id is not None and ranking_metadata.get(raw_message_id, {}).get("facts"):
+                has_fact = True
+
+        # LLM's own confidence (0-1) for the two leading candidates.
+        diagnostics.update({
+            "top1_id": top1.id,
+            "top1_score": top1_score,
+            "top2_id": top2.id,
+            "top2_score": top2_score,
+            "top1_query_overlap": top1_overlap,
+            "top2_query_overlap": top2_overlap,
+            "top1_confidence": top1_confidence,
+            "top2_confidence": top2_confidence,
+            "top1_evidence_channels": top1_channel_count,
+            "top2_evidence_channels": top2_channel_count,
+            "top2_has_fact": has_fact,
+        })
+        if confidence_available:
+            strictly_stronger = (
+                top2_confidence > top1_confidence
+                and (top2_confidence - top1_confidence) >= self.p5_confidence_margin
+            ) or has_fact
+        else:
+            # No confidence (truncated long-dialogue question or model without
+            # the method): do NOT fall back to retrieval-layer proxies — they
+            # were empirically disproven (channels -0.005, overlap -0.035,
+            # strata -0.010). Missing confidence means no swap.
+            diagnostics["reason"] = "no_confidence_signal"
+            return original
+        if not strictly_stronger:
+            diagnostics["reason"] = "runner_up_not_strictly_stronger"
+            return original
+
+        # Both conditions met: swap Top-1/Top-2. The loser keeps rank 2 so no
+        # Top-1 evidence is lost from the visible set.
+        swapped = [top2, top1] + original[2:]
+        diagnostics.update({
+            "triggered": True,
+            "swapped_ids": [top2.id, top1.id],
+            "reason": "near_tie_with_stronger_evidence",
+        })
+        return swapped
 
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
@@ -3017,6 +3508,8 @@ class MemoryStore:
                top_k: int) -> List[MemoryResult]:
         speaker_conflict = False
         retrieval_trace = self._empty_retrieval_trace()
+        message_ids: Dict[str, int] = {}
+        ranking_metadata: Dict[Any, Dict[str, Any]] = {}
         retrieval_trace["edge_diagnostics"][
             "candidate_limit"
         ] = self.graph_max_candidates
@@ -3121,6 +3614,7 @@ class MemoryStore:
                 "enabled": bool(need_match_queries),
                 "quota": self.evidence_need_quota,
                 "rrf_weight": self.evidence_need_rrf_weight,
+                "select_by_bm25": self.need_select_by_bm25,
                 "need_count": len(need_match_queries),
             }
         entity_terms = [
@@ -3240,9 +3734,15 @@ class MemoryStore:
                 for need_index, need_query in enumerate(need_match_queries):
                     for channel_name, fts_table, join_clause in need_query_specs:
                         raw_alias = "raw" if join_clause else "raw"
-                        select_clause = (
-                            "SELECT raw.id, raw.content, raw.created_at, raw.event_ts"
-                        )
+                        if self.need_select_by_bm25:
+                            select_clause = (
+                                "SELECT raw.id, raw.content, raw.created_at, "
+                                "raw.event_ts, bm25({fts}) AS bm25_score"
+                            ).format(fts=fts_table)
+                        else:
+                            select_clause = (
+                                "SELECT raw.id, raw.content, raw.created_at, raw.event_ts"
+                            )
                         from_clause = "FROM {fts}".format(fts=fts_table)
                         effective_join = join_clause.format(fts=fts_table)
                         if effective_join:
@@ -3268,17 +3768,114 @@ class MemoryStore:
                         ] = rows
             need_union_ids: List[str] = []
             seen_need_ids = set()
+            need_best_scores: Dict[str, float] = {}
             for rows in need_channel_rows.values():
                 for row in rows:
                     candidate_id = "mem_{}".format(row["id"])
                     if candidate_id not in seen_need_ids:
                         seen_need_ids.add(candidate_id)
                         need_union_ids.append(candidate_id)
+                    if self.need_select_by_bm25:
+                        try:
+                            score = float(row["bm25_score"])
+                        except (TypeError, ValueError, KeyError):
+                            continue
+                        if (
+                            candidate_id not in need_best_scores
+                            or score < need_best_scores[candidate_id]
+                        ):
+                            # bm25 is negative and smaller = better; keep the
+                            # best (most negative) score across channels.
+                            need_best_scores[candidate_id] = score
+            if self.need_select_by_bm25 and need_best_scores:
+                need_union_ids.sort(key=lambda cid: need_best_scores.get(cid, 0.0))
             retrieval_trace["evidence_need_channels"] = {
                 name: ["mem_{}".format(row["id"]) for row in rows]
                 for name, rows in need_channel_rows.items()
             }
             retrieval_trace["evidence_need_union_ids"] = list(need_union_ids)
+            relax_channel_rows: Dict[str, List[sqlite3.Row]] = {}
+            relax_union_ids: List[str] = []
+            relax_triggered = False
+            if (
+                self.query_relaxation
+                and need_match_queries
+                and not need_union_ids
+            ):
+                # Pure lexical-miss signal: every evidence-need channel came back
+                # empty. One bounded relaxation pass: OR FTS5 prefix forms
+                # (word*) of plan core terms + entities + query words across the
+                # two raw channels. No extra Search call; candidate_limit keeps
+                # the pass bounded.
+                relax_words: List[str] = []
+                seen_relax_words = set()
+                for key in ("core_terms", "entities", "expansion_terms"):
+                    values = query_plan.get(key, [])
+                    if not isinstance(values, list):
+                        continue
+                    for value in values:
+                        if not isinstance(value, str):
+                            continue
+                        for word in re.findall(r"[\w]+", value, flags=re.UNICODE):
+                            normalized = word.casefold()
+                            if (
+                                len(word) >= 3
+                                and normalized not in self.QUERY_STOP_WORDS
+                                and normalized not in seen_relax_words
+                            ):
+                                seen_relax_words.add(normalized)
+                                relax_words.append(word)
+                for word in raw_terms:
+                    normalized = word.casefold()
+                    if (
+                        len(word) >= 3
+                        and normalized not in self.QUERY_STOP_WORDS
+                        and normalized not in seen_relax_words
+                    ):
+                        seen_relax_words.add(normalized)
+                        relax_words.append(word)
+                if relax_words:
+                    relax_triggered = True
+                    relax_clause = " OR ".join(
+                        '"{}*"'.format(word.replace('"', '')) for word in relax_words
+                    )
+                    relax_query_specs = (
+                        ("raw", "messages_fts", ""),
+                        ("raw_porter", "messages_porter_fts", ""),
+                    )
+                    for channel_name, fts_table, _join in relax_query_specs:
+                        sql = (
+                            "SELECT raw.id, raw.content, raw.created_at, raw.event_ts "
+                            "FROM {fts} JOIN raw_messages AS raw "
+                            "ON raw.id = {fts}.message_id "
+                            "WHERE {fts} MATCH ? AND {fts}.user_id = ? "
+                            "ORDER BY bm25({fts}), raw.id DESC LIMIT ?"
+                        ).format(fts=fts_table)
+                        rows = connection.execute(
+                            sql, (relax_clause, user_id, candidate_limit)
+                        ).fetchall()
+                        relax_channel_rows[channel_name] = rows
+                    seen_relax_ids = set()
+                    for rows in relax_channel_rows.values():
+                        for row in rows:
+                            candidate_id = "mem_{}".format(row["id"])
+                            if candidate_id not in seen_relax_ids:
+                                seen_relax_ids.add(candidate_id)
+                                relax_union_ids.append(candidate_id)
+            retrieval_trace["relax_diagnostics"] = {
+                "enabled": relax_triggered,
+                "rrf_weight": self.relax_rrf_weight,
+                "quota": self.relax_quota,
+                "relax_clause": (
+                    " OR ".join('"{}*"'.format(word.replace('"', '')) for word in relax_words)
+                    if relax_triggered else None
+                ),
+            }
+            retrieval_trace["relax_channels"] = {
+                name: ["mem_{}".format(row["id"]) for row in rows]
+                for name, rows in relax_channel_rows.items()
+            }
+            retrieval_trace["relax_union_ids"] = list(relax_union_ids)
             entity_raw_rows = []
             entity_porter_rows = []
             entity_context_rows = []
@@ -3310,9 +3907,33 @@ class MemoryStore:
                        LIMIT ?""",
                     (structured_match_query, user_id, candidate_limit),
                 ).fetchall()
+            graph_selective_triggered = False
+            graph_selective_reason = None
             if self.evidence_graph and query_plan:
                 planned_entities = query_plan.get("entities", [])
-                if isinstance(planned_entities, list):
+                planned_intent = str(query_plan.get("intent", "")).casefold()
+                if self.graph_selective:
+                    entity_count = len([
+                        value for value in planned_entities
+                        if isinstance(value, str) and value.strip()
+                    ])
+                    if planned_intent == "multi_hop":
+                        graph_selective_triggered = True
+                        graph_selective_reason = "multi_hop_intent"
+                    elif entity_count >= self.GRAPH_SELECTIVE_MIN_ENTITIES:
+                        graph_selective_triggered = True
+                        graph_selective_reason = "entity_dense"
+                else:
+                    graph_selective_triggered = True
+                    graph_selective_reason = "unconditional"
+                if graph_selective_reason is None:
+                    graph_selective_reason = "not_multi_hop_not_entity_dense"
+                retrieval_trace["edge_diagnostics"].update({
+                    "selective_enabled": bool(self.graph_selective),
+                    "selective_triggered": graph_selective_triggered,
+                    "selective_reason": graph_selective_reason,
+                })
+                if isinstance(planned_entities, list) and graph_selective_triggered:
                     graph_predicates = preferred_graph_predicates(
                         query, query_plan
                     )
@@ -3344,6 +3965,11 @@ class MemoryStore:
                                 "unresolved_seeds",
                             }
                         },
+                    })
+                    retrieval_trace["edge_diagnostics"].update({
+                        "selective_enabled": bool(self.graph_selective),
+                        "selective_triggered": graph_selective_triggered,
+                        "selective_reason": graph_selective_reason,
                     })
             elif self.evidence_anchors and query_plan:
                 planned_entities = query_plan.get("entities", [])
@@ -4127,9 +4753,17 @@ class MemoryStore:
             )
             if need_match_queries else ()
         )
+        relax_channels = (
+            tuple(
+                (rows, self.relax_rrf_weight)
+                for rows in relax_channel_rows.values()
+            )
+            if relax_channel_rows else ()
+        )
         ranked = fuse_channels(
             p1_channels
             + need_channels
+            + relax_channels
             + ((graph_rows, self.graph_rrf_weight),)
             + anchor_channel
             + adjacent_channel
@@ -4141,12 +4775,142 @@ class MemoryStore:
         retrieval_trace["anchor_channel_only_ids"] = list(
             anchor_only_candidate_ids
         )
+        bridge_channel_rows: Dict[str, List[sqlite3.Row]] = {}
+        bridge_union_ids: List[str] = []
+        bridge_triggered = False
+        if self.bridge_retrieval:
+            planned_intent = query_plan.get("intent")
+            planned_needs = query_plan.get("evidence_needs", [])
+            if isinstance(planned_needs, list):
+                planned_needs = [
+                    value for value in planned_needs if isinstance(value, str)
+                ]
+            bridge_triggered = (
+                planned_intent == "multi_hop"
+                or len(planned_needs) >= 2
+            ) and bool(deduplicated)
+            retrieval_trace["bridge_diagnostics"] = {
+                "enabled": bridge_triggered,
+                "max_terms": self.bridge_max_terms,
+                "rrf_weight": self.bridge_rrf_weight,
+                "quota": self.bridge_rerank_quota,
+            }
+            if bridge_triggered:
+                first_pass_texts = [
+                    candidate.content for candidate in deduplicated[:8]
+                ]
+                with self._connection() as bridge_connection:
+                    speaker_rows = bridge_connection.execute(
+                        "SELECT DISTINCT role FROM raw_messages WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchall()
+                    known_speakers = [
+                        str(row["role"]).strip()
+                        for row in speaker_rows
+                        if str(row["role"]).strip()
+                    ]
+                    bridge_terms = extract_bridge_terms(
+                        query,
+                        first_pass_texts,
+                        known_speakers,
+                        max_terms=self.bridge_max_terms,
+                    )
+                    retrieval_trace["bridge_terms"] = list(bridge_terms)
+                    if bridge_terms:
+                        bridge_query_specs = (
+                            ("raw", "messages_fts", ""),
+                            ("raw_porter", "messages_porter_fts", ""),
+                            ("context", "context_fts", ""),
+                            ("context_porter", "context_porter_fts", ""),
+                        )
+                        bridge_clause = " OR ".join(
+                            '"{}"'.format(term.replace('"', ''))
+                            for term in bridge_terms
+                        )
+                        for need_index, need in enumerate(planned_needs[:2]):
+                            need_terms = [
+                                term
+                                for term in re.findall(
+                                    r"[\w]+", need, flags=re.UNICODE
+                                )
+                                if term.casefold() not in self.QUERY_STOP_WORDS
+                            ]
+                            if not need_terms:
+                                continue
+                            need_clause = " OR ".join(
+                                '"{}"'.format(term.replace('"', ''))
+                                for term in need_terms
+                            )
+                            second_query = (
+                                "({}) AND ({})".format(
+                                    bridge_clause, need_clause
+                                )
+                            )
+                            for channel_name, fts_table, join_clause in (
+                                bridge_query_specs
+                            ):
+                                from_clause = "FROM {fts}".format(fts=fts_table)
+                                if join_clause:
+                                    from_clause += " " + join_clause.format(
+                                        fts=fts_table
+                                    )
+                                else:
+                                    from_clause += (
+                                        " JOIN raw_messages AS raw ON raw.id = "
+                                        "{fts}.message_id"
+                                    ).format(fts=fts_table)
+                                sql = (
+                                    "{select} {from_clause} "
+                                    "WHERE {fts} MATCH ? AND {fts}.user_id = ? "
+                                    "ORDER BY bm25({fts}), raw.id DESC LIMIT ?"
+                                ).format(
+                                    select=(
+                                        "SELECT raw.id, raw.content, "
+                                        "raw.created_at, raw.event_ts"
+                                    ),
+                                    from_clause=from_clause,
+                                    fts=fts_table,
+                                )
+                                rows = bridge_connection.execute(
+                                    sql,
+                                    (second_query, user_id, candidate_limit),
+                                ).fetchall()
+                                bridge_channel_rows[
+                                    "bridge_{}_{}".format(
+                                        need_index, channel_name
+                                    )
+                                ] = rows
+                seen_bridge_ids = set()
+                for rows in bridge_channel_rows.values():
+                    for row in rows:
+                        candidate_id = "mem_{}".format(row["id"])
+                        if candidate_id not in seen_bridge_ids:
+                            seen_bridge_ids.add(candidate_id)
+                            bridge_union_ids.append(candidate_id)
+                retrieval_trace["bridge_channels"] = {
+                    name: ["mem_{}".format(row["id"]) for row in rows]
+                    for name, rows in bridge_channel_rows.items()
+                }
+                retrieval_trace["bridge_union_ids"] = list(bridge_union_ids)
         if self.model and deduplicated:
             message_ids = {
                 candidate["result"].id: candidate["message_id"]
                 for candidate in ranked
             }
             result_by_id = {result.id: result for result in deduplicated}
+            if bridge_union_ids:
+                for rows in bridge_channel_rows.values():
+                    for row in rows:
+                        candidate_id = "mem_{}".format(row["id"])
+                        if candidate_id in result_by_id:
+                            continue
+                        message_ids[candidate_id] = int(row["id"])
+                        result_by_id[candidate_id] = MemoryResult(
+                            id=candidate_id,
+                            content=str(row["content"]),
+                            score=0.0,
+                            created_at=row["created_at"],
+                        )
             if self.adjacent_turn_expansion:
                 special_quota = self.adjacent_candidate_limit
             elif self.evidence_anchors:
@@ -4154,15 +4918,34 @@ class MemoryStore:
             else:
                 special_quota = self.graph_rerank_quota
             need_quota = self.evidence_need_quota if need_match_queries else 0
-            base_budget = (
-                self.MODEL_RERANK_LIMIT - special_quota - need_quota
-            )
+            bridge_quota = self.bridge_rerank_quota if bridge_union_ids else 0
+            relax_quota = self.relax_quota if relax_union_ids else 0
+            if self.sidecar_shared_quota > 0:
+                # Shared sidecar pool: need, bridge and relax candidates compete
+                # for ONE total reservation, so the P1 base budget is compressed
+                # by at most sidecar_shared_quota slots regardless of how many
+                # sidecar components are active.
+                base_budget = (
+                    self.MODEL_RERANK_LIMIT
+                    - special_quota
+                    - self.sidecar_shared_quota
+                )
+            else:
+                base_budget = (
+                    self.MODEL_RERANK_LIMIT
+                    - special_quota
+                    - need_quota
+                    - bridge_quota
+                    - relax_quota
+                )
             rerank_pool = list(deduplicated[:base_budget])
             pool_ids = {result.id for result in rerank_pool}
             reserved_graph_ids: List[str] = []
             reserved_anchor_ids: List[str] = []
             reserved_adjacent_ids: List[str] = []
             reserved_need_ids: List[str] = []
+            reserved_bridge_ids: List[str] = []
+            reserved_relax_ids: List[str] = []
             if self.adjacent_turn_expansion:
                 for candidate_id in retrieval_trace["adjacent_candidate_ids"]:
                     if len(reserved_adjacent_ids) >= self.adjacent_candidate_limit:
@@ -4184,13 +4967,46 @@ class MemoryStore:
                     if candidate_id in result_by_id and candidate_id not in pool_ids:
                         reserved_graph_ids.append(candidate_id)
                         pool_ids.add(candidate_id)
+            sidecar_reserved = 0
             if need_quota > 0:
+                need_limit = (
+                    self.sidecar_shared_quota
+                    if self.sidecar_shared_quota > 0
+                    else need_quota
+                )
                 for candidate_id in need_union_ids:
-                    if len(reserved_need_ids) >= need_quota:
+                    if sidecar_reserved >= need_limit:
                         break
                     if candidate_id in result_by_id and candidate_id not in pool_ids:
                         reserved_need_ids.append(candidate_id)
                         pool_ids.add(candidate_id)
+                        sidecar_reserved += 1
+            if bridge_quota > 0:
+                bridge_limit = (
+                    self.sidecar_shared_quota
+                    if self.sidecar_shared_quota > 0
+                    else bridge_quota
+                )
+                for candidate_id in bridge_union_ids:
+                    if sidecar_reserved >= bridge_limit:
+                        break
+                    if candidate_id in result_by_id and candidate_id not in pool_ids:
+                        reserved_bridge_ids.append(candidate_id)
+                        pool_ids.add(candidate_id)
+                        sidecar_reserved += 1
+            if relax_quota > 0:
+                relax_limit = (
+                    self.sidecar_shared_quota
+                    if self.sidecar_shared_quota > 0
+                    else relax_quota
+                )
+                for candidate_id in relax_union_ids:
+                    if sidecar_reserved >= relax_limit:
+                        break
+                    if candidate_id in result_by_id and candidate_id not in pool_ids:
+                        reserved_relax_ids.append(candidate_id)
+                        pool_ids.add(candidate_id)
+                        sidecar_reserved += 1
             rerank_pool.extend(
                 result_by_id[item]
                 for item in (
@@ -4198,6 +5014,8 @@ class MemoryStore:
                     + reserved_anchor_ids
                     + reserved_adjacent_ids
                     + reserved_need_ids
+                    + reserved_bridge_ids
+                    + reserved_relax_ids
                 )
             )
             for result in deduplicated:
@@ -4213,6 +5031,8 @@ class MemoryStore:
             retrieval_trace["reserved_anchor_ids"] = list(reserved_anchor_ids)
             retrieval_trace["reserved_adjacent_ids"] = list(reserved_adjacent_ids)
             retrieval_trace["reserved_need_ids"] = list(reserved_need_ids)
+            retrieval_trace["reserved_bridge_ids"] = list(reserved_bridge_ids)
+            retrieval_trace["reserved_relax_ids"] = list(reserved_relax_ids)
             retrieval_trace["rerank_pool_ids"] = rerank_pool_ids
             retrieval_trace["promoted_graph_ids"] = [
                 candidate_id for candidate_id in rerank_pool_ids
@@ -4246,6 +5066,22 @@ class MemoryStore:
                     and candidate_id not in p1_counterfactual_ids
                 )
             ]
+            bridge_candidate_id_set = set(bridge_union_ids)
+            retrieval_trace["promoted_bridge_ids"] = [
+                candidate_id for candidate_id in rerank_pool_ids
+                if (
+                    candidate_id in bridge_candidate_id_set
+                    and candidate_id not in p1_counterfactual_ids
+                )
+            ]
+            relax_candidate_id_set = set(relax_union_ids)
+            retrieval_trace["promoted_relax_ids"] = [
+                candidate_id for candidate_id in rerank_pool_ids
+                if (
+                    candidate_id in relax_candidate_id_set
+                    and candidate_id not in p1_counterfactual_ids
+                )
+            ]
             rerank_pool_id_set = set(rerank_pool_ids)
             displaced_p1_ids = [
                 candidate_id for candidate_id in p1_counterfactual_ids
@@ -4261,6 +5097,10 @@ class MemoryStore:
                 )
             elif need_quota > 0:
                 retrieval_trace["displaced_p1_for_need_ids"] = displaced_p1_ids
+            elif bridge_quota > 0:
+                retrieval_trace["displaced_p1_for_bridge_ids"] = displaced_p1_ids
+            elif relax_quota > 0:
+                retrieval_trace["displaced_p1_for_relax_ids"] = displaced_p1_ids
             else:
                 retrieval_trace["displaced_p1_ids"] = displaced_p1_ids
             paths_by_source: Dict[str, List[Dict[str, Any]]] = {}
@@ -4268,7 +5108,10 @@ class MemoryStore:
                 for source_id in path.get("source_message_ids", []):
                     paths_by_source.setdefault(str(source_id), []).append(path)
             candidates = []
-            for result in rerank_pool:
+            llm_rank_pool = rerank_pool
+            if self.llm_rerank_top_n > 0 and len(rerank_pool) > self.llm_rerank_top_n:
+                llm_rank_pool = rerank_pool[:self.llm_rerank_top_n]
+            for result in llm_rank_pool:
                 metadata = ranking_metadata.get(message_ids[result.id], {})
                 candidates.append({
                     "id": result.id,
@@ -4281,7 +5124,18 @@ class MemoryStore:
                         paths_by_source.get(result.id, []),
                     ),
                 })
+            retrieval_trace["llm_rank_candidate_count"] = len(candidates)
             ordered_ids = self.model.rank_candidates(query, options or [], candidates)
+            rank_confidence: Dict[str, float] = {}
+            if self.p5_gate and hasattr(self.model, "rank_candidates_with_confidence"):
+                ordered_ids, rank_confidence = (
+                    self.model.rank_candidates_with_confidence(
+                        query, options or [], candidates
+                    )
+                )
+            retrieval_trace["p5_diagnostics"]["rank_confidence"] = dict(
+                rank_confidence
+            )
             positions = {candidate_id: index for index, candidate_id in enumerate(ordered_ids)}
             deduplicated.sort(key=lambda result: positions.get(result.id, len(positions)))
         elif deduplicated:
@@ -4292,6 +5146,14 @@ class MemoryStore:
             deduplicated,
             query_plan=query_plan,
             retrieval_trace=retrieval_trace,
+        )
+        deduplicated = self._apply_selective_rerank_gate(
+            deduplicated,
+            query=query,
+            query_plan=query_plan,
+            retrieval_trace=retrieval_trace,
+            ranking_metadata=ranking_metadata,
+            message_ids=message_ids if self.model else None,
         )
         final_results = deduplicated[:top_k]
         retrieval_trace["final_ids"] = [
