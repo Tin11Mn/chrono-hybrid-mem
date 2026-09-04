@@ -115,15 +115,16 @@ P1 复用现有的查询规划调用；它不会新增模型调用，也不会�
 |---|---:|---:|---:|---:|---:|
 | P1 结构化规划器（基线） | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 0.5976* |
 | P4-A q2（消融） | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 0.5998* |
-| **P4-A q2 + bm25 选取（当前最佳）** | **0.5850** | **0.7323** | **0.7809** | **0.6618** | **0.6086** |
+| P4-A q2 + bm25 选取 | 0.5850 | 0.7323 | 0.7809 | 0.6618 | 0.6129 |
+| **+ Session-Fact 语义层（当前最佳）** | **0.6108** | **0.7677** | **0.8219** | **0.6929** | **0.6558** |
 
-* Evidence Recall@10 为各自证据池口径（差约 6 条源自 offset 758 统一排除）；
-同口径逐条重算待补。nDCG@10 0.6914；Recall@5 0.7606。
-相对同一 1,976 题集上的 P1 基线，当前最佳方法将 Hit@1 提升 0.0071、
-Hit@10 提升 0.0208、MRR 提升 0.0121。
-Paired bootstrap（10,000 次重采样）95% CI：Hit@1 [-0.0051, +0.0197]
-（含 0，未声称统计显著）；MRR [+0.0036, +0.0207] 与
-Hit@10 [+0.0116, +0.0299]（均排除 0，显著）。
+* P1/P4-A q2 的 Evidence Recall@10 为各自证据池历史口径；后两行为同一
+top-10 命中口径逐题重算（gold mem_ids ∩ result_ids），可公平对比。
+相对同一 1,976 题集上的 P1 基线，当前最佳方法将 Hit@1 提升 0.0329、
+Hit@10 提升 0.0618、MRR 提升 0.0432。
+相对 P4-A q2 + bm25 选取（上一最佳）的 paired bootstrap
+（10,000 次重采样，同题配对）：Hit@1 Δ +0.0258，95% CI [+0.0116, +0.0400]；
+MRR Δ +0.0311，95% CI [+0.0208, +0.0411]（均排除 0，显著）。
 
 协议与复现见：[全量评测（1,976）](docs/EVALUATION_NEW_METHOD_1976.md)、
 [论文结果](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md)、
@@ -164,7 +165,7 @@ P2 在 P1 模型排序之后尝试依据结构化计划中的证据需求词，�
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen 重排序器 + 时间感知键里程碑 | 已冻结研究标签 |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | 结构化查询规划里程碑 | 稳定研究标签 |
 | [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | 当前经过验证的稳定版赛后研究实现 | 活跃 |
-| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | 当前主方法：P4-A evidence-need 检索 + bm25 选取（1,976 问全量评测 Hit@1 0.5850） | 活跃研究分支 |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | 当前主方法：P4-A evidence-need 检索 + bm25 选取 + Session-Fact 语义层（1,976 问全量评测 Hit@1 0.6108） | 活跃研究分支 |
 
 精简的开发路径如下：
 

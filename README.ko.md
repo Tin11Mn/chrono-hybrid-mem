@@ -110,9 +110,20 @@ P1은 기존 질의 계획 호출을 재사용합니다. 모델 호출 수를 �
 |---|---:|---:|---:|---:|---:|
 | P1 structured planner(기준선) | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 0.5976* |
 | P4-A q2(ablation) | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 0.5998* |
-| **P4-A q2 + bm25 selection(현재 최고)** | **0.5850** | **0.7323** | **0.7809** | **0.6618** | **0.6086** |
+| P4-A q2 + bm25 selection | 0.5850 | 0.7323 | 0.7809 | 0.6618 | 0.6129 |
+| **+ Session-Fact 의미론적 레이어(현재 최고)** | **0.6108** | **0.7677** | **0.8219** | **0.6929** | **0.6558** |
 
-이는 로컬 제출 후 LoCoMo 연구 결과이며 공식 leaderboard 결과가 아닙니다. 동일한 1,976문항 집합의 대응 P1 프록시 기준선과 비교할 때, 현재 최고 방법(P4-A q2 + bm25 selection)은 Hit@1을 0.0071, Hit@10을 0.0208, MRR을 0.0121 개선합니다. Paired bootstrap(10,000회 재표본) 95% CI: Hit@1 [-0.0051, +0.0197] (0을 포함하며 유의하다고 주장하지 않음), MRR [+0.0036, +0.0207], Hit@10 [+0.0116, +0.0299] (둘 다 0을 제외). nDCG@10 0.6914; Recall@5 0.7606. 프로토콜과 경계는 [전체 평가(1,976)](docs/EVALUATION_NEW_METHOD_1976.md), [논문용 결과](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md), [재현 절차](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md), [P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md)을 참조하십시오.
+* P1 / P4-A q2의 Evidence Recall@10은 각 방법의 기존 evidence pool 범위를
+사용합니다. 마지막 두 행은 공통 top-10 적중 범위(gold mem_ids ∩ result_ids)로
+질문별 재계산되어 직접 비교할 수 있습니다. 동일한 1,976문항 집합의 대응
+P1 프록시 기준선과 비교할 때 현재 최고 방법은 Hit@1을 0.0329, Hit@10을
+0.0618, MRR을 0.0432 개선합니다. P4-A q2 + bm25 selection에 대한 Paired
+bootstrap(10,000회 재표본): Hit@1 Δ +0.0258, 95% CI [+0.0116, +0.0400];
+MRR Δ +0.0311, 95% CI [+0.0208, +0.0411] (둘 다 0을 제외). 프로토콜과
+경계는 [전체 평가(1,976)](docs/EVALUATION_NEW_METHOD_1976.md),
+[논문용 결과](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md),
+[재현 절차](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md),
+[P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md)을 참조하십시오.
 
 ### C. Proxy 및 실험적 증거
 
@@ -148,7 +159,7 @@ P2는 구조화된 계획의 증거 필요 토큰을 이용해 P1 모델 순위 
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen reranker + time-aware-key milestone | 고정 research tag |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | Structured query-planning milestone | 안정 research tag |
 | [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | 현재 검증된 안정적 제출 후 연구 구현 | 활성 |
-| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need + bm25 (1,976-query Hit@1 0.5850) | Active research branch |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need + bm25 + Session-Fact semantic layer (1,976-query Hit@1 0.6108) | Active research branch |
 
 간략한 개발 경로는 다음과 같습니다.
 

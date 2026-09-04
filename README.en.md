@@ -110,9 +110,21 @@ The repository records full post-submission local runs on LoCoMo (local Qwen3-4B
 |---|---:|---:|---:|---:|---:|
 | P1 structured planner (baseline) | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 0.5976* |
 | P4-A q2 (ablation) | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 0.5998* |
-| **P4-A q2 + bm25 selection (current best)** | **0.5850** | **0.7323** | **0.7809** | **0.6618** | **0.6086** |
+| P4-A q2 + bm25 selection | 0.5850 | 0.7323 | 0.7809 | 0.6618 | 0.6129 |
+| **+ Session-Fact semantic layer (current best)** | **0.6108** | **0.7677** | **0.8219** | **0.6929** | **0.6558** |
 
-These are local post-submission LoCoMo research results, not official leaderboard results. Versus the matched P1 proxy baseline on the same 1,976-question set, the current best method (P4-A q2 + bm25 selection) improves Hit@1 by 0.0071, Hit@10 by 0.0208, and MRR by 0.0121. Paired bootstrap (10,000 resamples) 95% CI: Hit@1 [-0.0051, +0.0197] (includes 0; not claimed significant), MRR [+0.0036, +0.0207] and Hit@10 [+0.0116, +0.0299] (both exclude 0). nDCG@10 0.6914; Recall@5 0.7606. See [full evaluation (1,976)](docs/EVALUATION_NEW_METHOD_1976.md), [results for paper](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md), [repro](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md), and [P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md) for protocol and boundaries.
+* Evidence Recall@10 for P1 / P4-A q2 uses each method's historical
+evidence-pool scope; the last two rows are recomputed per question with one
+shared top-10 hit scope (gold mem_ids ∩ result_ids) and are directly
+comparable. Versus the matched P1 proxy baseline on the same 1,976-question
+set, the current best method improves Hit@1 by 0.0329, Hit@10 by 0.0618, and
+MRR by 0.0432. Paired bootstrap (10,000 resamples) versus P4-A q2 + bm25
+selection: Hit@1 Δ +0.0258, 95% CI [+0.0116, +0.0400]; MRR Δ +0.0311, 95% CI
+[+0.0208, +0.0411] (both exclude 0). See
+[full evaluation (1,976)](docs/EVALUATION_NEW_METHOD_1976.md),
+[results for paper](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md),
+[repro](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md), and
+[P1 Local-Model Evaluation](docs/P1_LOCAL_EVALUATION.md) for protocol and boundaries.
 
 ### C. Proxy and experimental evidence
 
@@ -148,7 +160,7 @@ These experiments reject default graph or adjacent expansion on LoCoMo, not grap
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen reranker + time-aware-key milestone | Frozen research tag |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | Structured query-planning milestone | Stable research tag |
 | [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | Current validated stable post-submission research implementation | Active |
-| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need retrieval + bm25 selection (1,976-query evaluation Hit@1 0.5850) | Active research branch |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need retrieval + bm25 selection + Session-Fact semantic layer (1,976-query evaluation Hit@1 0.6108) | Active research branch |
 
 The compact development path is:
 
