@@ -622,6 +622,16 @@ class MemoryStore:
     # temporal + correction), where the latest-valid-state rule is most
     # defensible. "all" restores the un-stratified gate.
     P5_STRATA_DEFAULT = "temporal,correction"
+    # Session-fact semantic layer (MemoryART-inspired, B direction): offline
+    # per-session speaker-grounded observations are stored with their source
+    # message and dense-matched against the query; the top matches re-enter the
+    # rerank pool through a reserved quota. Default-off; requires a semantic
+    # retriever and the offline fact cache. See docs/
+    # MEMORYART_SURVEY_AND_OBSERVATION_DIAGNOSTIC.md for the diagnostic.
+    SESSION_FACT_RRF_WEIGHT_DEFAULT = 0.05
+    SESSION_FACT_QUOTA_DEFAULT = 3
+    SESSION_FACT_MAX_CANDIDATES = 200
+    SESSION_FACT_TOP_N_DEFAULT = 10
     # Correction/state-change language cues (query side).
     P5_CORRECTION_QUERY_PATTERN = re.compile(
         r"\b(change|changes|changed|update|updates|updated|correction|corrected|"
@@ -705,7 +715,11 @@ class MemoryStore:
                  p5_min_evidence_channels: int = P5_MIN_EVIDENCE_CHANNELS,
                  p5_confidence_margin: float = P5_CONFIDENCE_MARGIN_DEFAULT,
                  p5_strata: str = P5_STRATA_DEFAULT,
-                 llm_rerank_top_n: int = LLM_RERANK_TOP_N_DEFAULT) -> None:
+                 llm_rerank_top_n: int = LLM_RERANK_TOP_N_DEFAULT,
+                 session_fact_layer: bool = False,
+                 session_fact_rrf_weight: float = SESSION_FACT_RRF_WEIGHT_DEFAULT,
+                 session_fact_quota: int = SESSION_FACT_QUOTA_DEFAULT,
+                 session_fact_top_n: int = SESSION_FACT_TOP_N_DEFAULT) -> None:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
@@ -1021,6 +1035,11 @@ class MemoryStore:
                 )
             )
         self.llm_rerank_top_n = llm_rerank_top_n
+        self.session_fact_layer = bool(session_fact_layer)
+        self.session_fact_rrf_weight = session_fact_rrf_weight
+        self.session_fact_quota = session_fact_quota
+        self.session_fact_top_n = session_fact_top_n
+        self._session_fact_trigger_count = 0
         self._retrieval_diagnostics_lock = threading.Lock()
         self._last_query_plan: Dict[str, Any] = {}
         self._last_graph_candidate_ids: List[str] = []
@@ -1114,6 +1133,14 @@ class MemoryStore:
             "relax_union_ids": [],
             "promoted_relax_ids": [],
             "displaced_p1_for_relax_ids": [],
+            "reserved_session_fact_ids": [],
+            "session_fact_union_ids": [],
+            "session_fact_diagnostics": {
+                "enabled": False,
+                "facts": 0,
+                "top_matches": [],
+                "triggered": False,
+            },
             "p5_diagnostics": {
                 "enabled": False,
                 "near_tie_epsilon": MemoryStore.P5_NEAR_TIE_EPSILON_DEFAULT,
@@ -1564,6 +1591,17 @@ class MemoryStore:
                     content,
                     tokenize='porter unicode61'
                 );
+                CREATE TABLE IF NOT EXISTS session_facts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    source_message_id INTEGER NOT NULL,
+                    fact_text TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(source_message_id, fact_text)
+                );
+                CREATE INDEX IF NOT EXISTS session_facts_user_idx
+                    ON session_facts(user_id, source_message_id);
                 """
             )
             if not (self.evidence_graph or self.evidence_anchors):
@@ -3504,6 +3542,48 @@ class MemoryStore:
                 (request.session_id, request.user_id, session_content),
             )
 
+    def add_session_facts(
+        self,
+        *,
+        user_id: str,
+        facts: List[Dict[str, object]],
+    ) -> None:
+        """Store offline per-session observations (MemoryART-style semantic layer).
+
+        Each item must be {"session_id": str, "source_message_id": int,
+        "fact_text": str}. Facts are stored in the dedicated session_facts
+        table; they never alter raw messages or the P1 fact channels. The
+        search-time dense channel reads this table only when
+        ``session_fact_layer`` is enabled. Idempotent per (source message,
+        fact text).
+        """
+        if not facts:
+            return
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self._connection() as connection:
+            for item in facts:
+                if not isinstance(item, dict):
+                    continue
+                session_id = str(item.get("session_id") or "")
+                source_message_id = item.get("source_message_id")
+                fact_text = str(item.get("fact_text") or "").strip()
+                if not session_id or not fact_text:
+                    continue
+                try:
+                    message_id = int(source_message_id)
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    connection.execute(
+                        """INSERT INTO session_facts(
+                               user_id, session_id, source_message_id,
+                               fact_text, created_at)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (user_id, session_id, message_id, fact_text, now),
+                    )
+                except sqlite3.IntegrityError:
+                    continue
+
     def search(self, *, user_id: str, query: str, options: Optional[List[str]] = None,
                top_k: int) -> List[MemoryResult]:
         speaker_conflict = False
@@ -4327,6 +4407,97 @@ class MemoryStore:
                 "mem_{}".format(row["id"]): row for row in semantic_source_rows
             }
             dense_rows = [semantic_by_id[item] for item in dense_ids if item in semantic_by_id]
+        session_fact_rows: List[sqlite3.Row] = []
+        session_fact_diagnostics: Dict[str, Any] = {
+            "enabled": bool(
+                self.session_fact_layer
+                and self.semantic_retriever is not None
+            ),
+            "facts": 0,
+            "top_matches": [],
+            "triggered": False,
+        }
+        if (
+            self.session_fact_layer
+            and self.semantic_retriever is not None
+        ):
+            with self._connection() as sf_connection:
+                sf_rows = sf_connection.execute(
+                    """SELECT raw.id AS id,
+                              fact.id AS fact_id,
+                              fact.source_message_id,
+                              fact.session_id,
+                              fact.fact_text,
+                              raw.content,
+                              raw.created_at,
+                              raw.event_ts
+                       FROM session_facts AS fact
+                       JOIN raw_messages AS raw
+                         ON raw.id = fact.source_message_id
+                        AND raw.user_id = fact.user_id
+                       WHERE fact.user_id = ?
+                       ORDER BY fact.id""",
+                    (user_id,),
+                ).fetchall()
+            session_fact_diagnostics["facts"] = len(sf_rows)
+            if sf_rows:
+                fact_candidates = [
+                    {
+                        "id": "sfact_{}".format(int(row["fact_id"])),
+                        "content": str(row["fact_text"]),
+                    }
+                    for row in sf_rows
+                ]
+                sf_scores = self.semantic_retriever.score(
+                    query, options or [], fact_candidates
+                )
+                sf_ranked = sorted(
+                    sf_scores, key=sf_scores.get, reverse=True
+                )[: self.session_fact_top_n]
+                # Map each top fact back to its source message; keep message
+                # order by score and deduplicate identical source messages so
+                # one message never enters the channel twice.
+                fact_by_id = {
+                    "sfact_{}".format(int(row["fact_id"])): row
+                    for row in sf_rows
+                }
+                seen_sf_messages = set()
+                for candidate_id in sf_ranked:
+                    row = fact_by_id.get(candidate_id)
+                    if row is None:
+                        continue
+                    message_id = int(row["source_message_id"])
+                    if message_id in seen_sf_messages:
+                        continue
+                    seen_sf_messages.add(message_id)
+                    session_fact_diagnostics["top_matches"].append(
+                        candidate_id
+                    )
+                    session_fact_rows.append(row)
+                session_fact_diagnostics["triggered"] = bool(
+                    session_fact_rows
+                )
+                with self._retrieval_diagnostics_lock:
+                    self._session_fact_trigger_count += int(
+                        bool(session_fact_rows)
+                    )
+                # Make the session-fact evidence visible to the Search reranker:
+                # each source message selected by the SF channel carries its
+                # offline observations as ranking annotations, so the ranker
+                # judges the original memory with the semantic-layer evidence
+                # in view rather than being perturbed by an unexplained pool
+                # change.
+                for row in session_fact_rows:
+                    message_id = int(row["source_message_id"])
+                    item = ranking_metadata.get(message_id)
+                    if item is None:
+                        continue
+                    fact_text = str(row["fact_text"]).strip()
+                    if not fact_text:
+                        continue
+                    existing = item.setdefault("facts", [])
+                    if fact_text not in existing:
+                        existing.append(fact_text)
         p1_channel_rows = (
             ("raw", raw_rows, 1.0),
             ("raw_porter", raw_porter_rows, 1.0),
@@ -4760,6 +4931,10 @@ class MemoryStore:
             )
             if relax_channel_rows else ()
         )
+        session_fact_channel = (
+            ((session_fact_rows, self.session_fact_rrf_weight),)
+            if session_fact_rows else ()
+        )
         ranked = fuse_channels(
             p1_channels
             + need_channels
@@ -4767,6 +4942,7 @@ class MemoryStore:
             + ((graph_rows, self.graph_rrf_weight),)
             + anchor_channel
             + adjacent_channel
+            + session_fact_channel
         )
         deduplicated = deduplicate_ranked(ranked, prefer_provenance=True)
         retrieval_trace["graph_channel_only_ids"] = list(
@@ -4920,6 +5096,9 @@ class MemoryStore:
             need_quota = self.evidence_need_quota if need_match_queries else 0
             bridge_quota = self.bridge_rerank_quota if bridge_union_ids else 0
             relax_quota = self.relax_quota if relax_union_ids else 0
+            session_fact_quota_active = (
+                self.session_fact_quota if session_fact_rows else 0
+            )
             if self.sidecar_shared_quota > 0:
                 # Shared sidecar pool: need, bridge and relax candidates compete
                 # for ONE total reservation, so the P1 base budget is compressed
@@ -4937,6 +5116,7 @@ class MemoryStore:
                     - need_quota
                     - bridge_quota
                     - relax_quota
+                    - session_fact_quota_active
                 )
             rerank_pool = list(deduplicated[:base_budget])
             pool_ids = {result.id for result in rerank_pool}
@@ -5007,6 +5187,26 @@ class MemoryStore:
                         reserved_relax_ids.append(candidate_id)
                         pool_ids.add(candidate_id)
                         sidecar_reserved += 1
+            session_fact_union_ids: List[str] = []
+            if session_fact_rows:
+                session_fact_union_ids = [
+                    "mem_{}".format(int(row["source_message_id"]))
+                    for row in session_fact_rows
+                ]
+            reserved_session_fact_ids: List[str] = []
+            if session_fact_quota_active > 0:
+                sf_limit = (
+                    self.sidecar_shared_quota
+                    if self.sidecar_shared_quota > 0
+                    else session_fact_quota_active
+                )
+                for candidate_id in session_fact_union_ids:
+                    if sidecar_reserved >= sf_limit:
+                        break
+                    if candidate_id in result_by_id and candidate_id not in pool_ids:
+                        reserved_session_fact_ids.append(candidate_id)
+                        pool_ids.add(candidate_id)
+                        sidecar_reserved += 1
             rerank_pool.extend(
                 result_by_id[item]
                 for item in (
@@ -5016,6 +5216,7 @@ class MemoryStore:
                     + reserved_need_ids
                     + reserved_bridge_ids
                     + reserved_relax_ids
+                    + reserved_session_fact_ids
                 )
             )
             for result in deduplicated:
@@ -5033,6 +5234,15 @@ class MemoryStore:
             retrieval_trace["reserved_need_ids"] = list(reserved_need_ids)
             retrieval_trace["reserved_bridge_ids"] = list(reserved_bridge_ids)
             retrieval_trace["reserved_relax_ids"] = list(reserved_relax_ids)
+            retrieval_trace["reserved_session_fact_ids"] = list(
+                reserved_session_fact_ids
+            )
+            retrieval_trace["session_fact_union_ids"] = list(
+                session_fact_union_ids
+            )
+            retrieval_trace["session_fact_diagnostics"] = (
+                session_fact_diagnostics
+            )
             retrieval_trace["rerank_pool_ids"] = rerank_pool_ids
             retrieval_trace["promoted_graph_ids"] = [
                 candidate_id for candidate_id in rerank_pool_ids

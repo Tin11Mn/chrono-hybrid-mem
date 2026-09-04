@@ -233,6 +233,70 @@ def _load_mem_by_content(
     return mem_by_content
 
 
+def _inject_session_facts(
+    *,
+    store: object,
+    user_id: str,
+    cache_path: str,
+    sample_id: str,
+    evidence_text: Dict[str, str],
+    mem_by_content: Dict[str, str],
+) -> None:
+    """Load offline session facts for one conversation and store them.
+
+    The cache produced by .locomo/_gen_session_facts.py maps each
+    ``{sample_id}:{session_key}`` record to per-speaker fact pairs of the
+    form [text, dia_id]. Each fact is matched back to its source raw message
+    through the evaluation script's dia -> content map and the store's
+    content -> mem id map; unmatched facts are dropped silently.
+    """
+    if not mem_by_content:
+        return
+    try:
+        with open(cache_path, encoding="utf-8") as cache_file:
+            cache_records = json.load(cache_file)
+    except (OSError, ValueError):
+        return
+    facts: List[Dict[str, object]] = []
+    for record in cache_records:
+        if not isinstance(record, dict):
+            continue
+        key = str(record.get("key") or "")
+        if not key.startswith(sample_id + ":"):
+            continue
+        session_id = key.split(":", 1)[1] if ":" in key else ""
+        speakers = record.get("speakers", {})
+        if not isinstance(speakers, dict):
+            continue
+        for speaker, pairs in speakers.items():
+            if not isinstance(pairs, list):
+                continue
+            for pair in pairs:
+                if not isinstance(pair, list) or len(pair) < 2:
+                    continue
+                fact_text = str(pair[0]).strip()
+                dia_id = str(pair[1]).strip()
+                if not fact_text or not dia_id:
+                    continue
+                content = evidence_text.get(dia_id)
+                if content is None:
+                    continue
+                mem_id = mem_by_content.get(str(content).casefold())
+                if mem_id is None or not mem_id.startswith("mem_"):
+                    continue
+                try:
+                    source_message_id = int(mem_id.split("_", 1)[1])
+                except (IndexError, ValueError):
+                    continue
+                facts.append({
+                    "session_id": session_id,
+                    "source_message_id": source_message_id,
+                    "fact_text": fact_text,
+                })
+    if facts:
+        store.add_session_facts(user_id=user_id, facts=facts)
+
+
 def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questions: int | None,
              question_offset: int = 0,
              retriever: str = "current", model: object = None,
@@ -280,6 +344,11 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              p5_confidence_margin: float = 0.05,
              p5_strata: str = "temporal,correction",
              llm_rerank_top_n: int = 0,
+             session_fact_layer: bool = False,
+             session_fact_rrf_weight: float = 0.05,
+             session_fact_quota: int = 3,
+             session_fact_top_n: int = 10,
+             session_fact_cache: str = "",
              evidence_graph: bool = False,
              graph_selective: bool = False,
              graph_rrf_weight: float = 0.025,
@@ -360,6 +429,10 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 p5_confidence_margin=p5_confidence_margin,
                 p5_strata=p5_strata,
                 llm_rerank_top_n=llm_rerank_top_n,
+                session_fact_layer=session_fact_layer,
+                session_fact_rrf_weight=session_fact_rrf_weight,
+                session_fact_quota=session_fact_quota,
+                session_fact_top_n=session_fact_top_n,
                 evidence_graph=evidence_graph,
                 graph_selective=graph_selective,
                 graph_rrf_weight=graph_rrf_weight,
@@ -376,10 +449,19 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                     messages=messages,
                 ))
             mem_by_content: Dict[str, str] = {}
-            if include_question_diagnostics and retriever == "current":
+            if (include_question_diagnostics or session_fact_layer) and retriever == "current":
                 mem_by_content = _load_mem_by_content(
                     str(Path(temporary_directory) / "sample_{}.db".format(sample_index)),
                     user_id,
+                )
+            if session_fact_layer and session_fact_cache:
+                _inject_session_facts(
+                    store=store,
+                    user_id=user_id,
+                    cache_path=session_fact_cache,
+                    sample_id=str(sample.get("sample_id", sample_index)),
+                    evidence_text=evidence_text,
+                    mem_by_content=mem_by_content,
                 )
             for qa in sample.get("qa", []):
                 if max_questions is not None and question_count >= max_questions:
@@ -561,6 +643,15 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                         ),
                         "rerank_pool_ids": retrieval_trace.get("rerank_pool_ids", []),
                         "final_ids": retrieval_trace.get("final_ids", []),
+                        "session_fact_diagnostics": retrieval_trace.get(
+                            "session_fact_diagnostics", {}
+                        ),
+                        "reserved_session_fact_ids": retrieval_trace.get(
+                            "reserved_session_fact_ids", []
+                        ),
+                        "session_fact_union_ids": retrieval_trace.get(
+                            "session_fact_union_ids", []
+                        ),
                     })
             speaker_conflict_triggers += store.speaker_conflict_trigger_count
 
@@ -825,6 +916,35 @@ def main() -> None:
             "candidates (fusion order) are sent to the Search model for ranking "
             "(default 0 = all candidates, up to 30)"
         ),
+    )
+    parser.add_argument(
+        "--session-fact-layer", action="store_true",
+        help=(
+            "Enable the MemoryART-inspired offline session-fact semantic layer: "
+            "per-session observations (loaded from --session-fact-cache) are "
+            "dense-matched against the query and their source messages re-enter "
+            "the rerank pool through a reserved quota (default off)"
+        ),
+    )
+    parser.add_argument(
+        "--session-fact-cache",
+        help=(
+            "Path to the offline session-fact JSON cache produced by "
+            ".locomo/_gen_session_facts.py; requires --session-fact-layer"
+        ),
+    )
+    parser.add_argument(
+        "--session-fact-rrf-weight", type=float,
+        default=None,
+        help="RRF weight for the session-fact channel (default 0.05)",
+    )
+    parser.add_argument(
+        "--session-fact-quota", type=int, default=None,
+        help="Reserved rerank-pool slots for session-fact source messages (default 3)",
+    )
+    parser.add_argument(
+        "--session-fact-top-n", type=int, default=None,
+        help="Number of dense top session facts mapped back to source messages (default 10)",
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -1855,6 +1975,20 @@ def main() -> None:
         p5_confidence_margin=args.p5_confidence_margin,
         p5_strata=args.p5_strata,
         llm_rerank_top_n=args.llm_rerank_top_n,
+        session_fact_layer=args.session_fact_layer,
+        session_fact_rrf_weight=(
+            args.session_fact_rrf_weight
+            if args.session_fact_rrf_weight is not None else 0.05
+        ),
+        session_fact_quota=(
+            args.session_fact_quota
+            if args.session_fact_quota is not None else 3
+        ),
+        session_fact_top_n=(
+            args.session_fact_top_n
+            if args.session_fact_top_n is not None else 10
+        ),
+        session_fact_cache=args.session_fact_cache or "",
         evidence_graph=args.evidence_graph,
         graph_selective=args.graph_selective,
         graph_rrf_weight=args.graph_rrf_weight,
