@@ -66,9 +66,11 @@ The stable service follows six principles:
 - Memory Search never generates the benchmark answer.
 - Reproducibility and bounded regression tests come before added complexity.
 
-## Current stable pipeline: P4-A q2 + bm25 selection
+## Current stable pipeline: P4-A q2 + bm25 selection + Session-Fact semantic layer (current best)
 
 The stable default combines P1 structured query planning with P4-A evidence-need independent retrieval. P4-A retrieves each `evidence_need` through a bounded independent channel and reserves 2 candidates in the rerank pool; need candidates are ordered by best bm25 score before the quota picks, so the strongest candidates are retained. It adds no Search-model call and never generates answers. Set `MEMORY_EVIDENCE_NEED_RETRIEVAL=false` to reproduce the historical P1 path.
+
+On top of that, the **Session-Fact semantic layer (SF v2) is adopted as the current research best**: it is off by default (`session_fact_layer=False`; requires an offline per-session fact cache and an explicit opt-in), does not change the Add/Search API or stable defaults, and lifts full-1,976 Hit@1 from 0.5850 to 0.6108 (paired bootstrap p=1.000; see Section B).
 
 ### Add
 
@@ -104,7 +106,21 @@ The organizer has formally confirmed that the official result corresponds to [`v
 
 ### B. Stable post-submission local research
 
-The repository records full post-submission local runs on LoCoMo (local Qwen3-4B proxy, not official leaderboard results). The current best method is evaluated on 1,976 completable queries (offset 758 is excluded uniformly for every method because that overlong conversation reliably hangs the inference server):
+The repository records full post-submission local runs on LoCoMo (local Qwen3-4B proxy, not official leaderboard results). **Post-submission research progression** (each stage has its own scope; do not compare across scope rows directly):
+
+| Stage | Method | Hit@1 | Hit@3 | Hit@10 | MRR | Scope |
+|---|---|---:|---:|---:|---:|---|
+| Early research | [v0.2.0](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) official frozen retrieval | 0.2671 | 0.4355 | 0.5695 | 0.3567 | 1,977 queries |
+| Early research | [research-v0.3.0](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.3.0) local hybrid retrieval | 0.4355 | 0.6186 | 0.7577 | 0.5183 | 1,977 queries |
+| Early research | [research-v0.4.0](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) Qwen rerank + time key | 0.5225 | 0.6808 | 0.7653 | 0.5856 | 1,977 queries |
+| Current line | P1 structured planner (baseline) | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 1,976 queries |
+| Current line | P4-A q2 (ablation) | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 1,976 queries |
+| Current line | P4-A q2 + bm25 selection | 0.5850 | 0.7323 | 0.7809 | 0.6618 | 1,976 queries |
+| Current line | **+ Session-Fact semantic layer (current best)** | **0.6108** | **0.7677** | **0.8219** | **0.6929** | 1,976 queries |
+
+> Scope note: the 1,977-query rows predate the identification of the offset-758 hang and cover all then-completable queries; after that, every method uniformly excludes offset 758, so the current line is 1,976 queries (about one query differs between early rows and the current line; compare only within the same line and scope). Early rows come from each version's README; the same-scope comparison and significance for the current line are below.
+
+**Same-scope current-line comparison** (offset 758 is excluded uniformly for every method because that overlong conversation reliably hangs the inference server):
 
 | Method | Hit@1 | Hit@3 | Hit@10 | MRR | Evidence Recall@10 |
 |---|---:|---:|---:|---:|---:|

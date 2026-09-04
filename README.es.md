@@ -66,9 +66,11 @@ El servicio estable se rige por seis principios:
 - La búsqueda en memoria nunca genera la respuesta del benchmark.
 - La reproducibilidad y las pruebas de regresión acotadas tienen prioridad sobre la complejidad adicional.
 
-## Canalización estable actual: P4-A q2 + bm25 selection
+## Canalización estable actual: P4-A q2 + bm25 selection + capa semántica Session-Fact (el mejor actual)
 
 La ruta estable predeterminada combina la planificación estructurada P1 con la recuperación independiente evidence-need de P4-A. P4-A recupera cada `evidence_need` mediante un canal independiente acotado y reserva 2 candidatos en el pool de reranking; los candidatos de las necesidades se ordenan por la mejor puntuación bm25 antes de que la cuota seleccione, de modo que se conservan los candidatos más fuertes. No añade llamadas al modelo Search ni genera respuestas. Use `MEMORY_EVIDENCE_NEED_RETRIEVAL=false` para reproducir la ruta P1 histórica.
+
+Sobre esa base, la **capa semántica Session-Fact (SF v2) se adopta como el mejor actual de investigación**: está desactivada por defecto (`session_fact_layer=False`; requiere una caché de hechos por sesión generada offline y una activación explícita), no cambia la API Add/Search ni los valores predeterminados estables, y eleva el Hit@1 completo de 1,976 preguntas de 0.5850 a 0.6108 (bootstrap pareado p=1.000; consulte la sección B).
 
 ### Add
 
@@ -104,7 +106,21 @@ La organización ha confirmado formalmente que el resultado oficial corresponde 
 
 ### B. Investigación local estable posterior al envío
 
-El repositorio registra ejecuciones locales completas posteriores al envío en LoCoMo (proxy local Qwen3-4B, no resultados oficiales del leaderboard). El método actual más fuerte se evalúa sobre 1,976 consultas completables (el offset 758 se excluye de forma uniforme para todos los métodos porque esa conversación excesivamente larga cuelga de forma fiable el servidor de inferencia):
+El repositorio registra ejecuciones locales completas posteriores al envío en LoCoMo (proxy local Qwen3-4B, no resultados oficiales del leaderboard). **Progresión de la investigación posterior al envío** (cada etapa tiene su propio alcance; no compare directamente entre filas de distinto alcance):
+
+| Etapa | Método | Hit@1 | Hit@3 | Hit@10 | MRR | Alcance |
+|---|---|---:|---:|---:|---:|---|
+| Investigación temprana | [v0.2.0](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/v0.2.0) recuperación oficial congelada | 0.2671 | 0.4355 | 0.5695 | 0.3567 | 1,977 consultas |
+| Investigación temprana | [research-v0.3.0](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.3.0) recuperación híbrida local | 0.4355 | 0.6186 | 0.7577 | 0.5183 | 1,977 consultas |
+| Investigación temprana | [research-v0.4.0](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) reranking Qwen + clave temporal | 0.5225 | 0.6808 | 0.7653 | 0.5856 | 1,977 consultas |
+| Línea actual | Planificador estructurado P1 (línea base) | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 1,976 consultas |
+| Línea actual | P4-A q2 (ablación) | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 1,976 consultas |
+| Línea actual | P4-A q2 + bm25 selection | 0.5850 | 0.7323 | 0.7809 | 0.6618 | 1,976 consultas |
+| Línea actual | **+ capa semántica Session-Fact (el mejor actual)** | **0.6108** | **0.7677** | **0.8219** | **0.6929** | 1,976 consultas |
+
+> Nota de alcance: las filas de 1,977 consultas son anteriores a la identificación del cuelgue del offset 758 y cubren todas las consultas entonces completables; después, todos los métodos excluyen uniformemente el offset 758, por lo que la línea actual es de 1,976 consultas (difiere en aproximadamente una consulta respecto a las filas tempranas; compare solo dentro de la misma línea y alcance). Las filas tempranas provienen del README de cada versión; la comparación de igual alcance y la significación de la línea actual se muestran abajo.
+
+**Comparación de igual alcance de la línea actual** (el offset 758 se excluye de forma uniforme para todos los métodos porque esa conversación excesivamente larga cuelga de forma fiable el servidor de inferencia):
 
 | Método | Hit@1 | Hit@3 | Hit@10 | MRR | Evidence Recall@10 |
 |---|---:|---:|---:|---:|---:|
