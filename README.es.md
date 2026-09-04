@@ -110,9 +110,22 @@ El repositorio registra ejecuciones locales completas posteriores al envío en L
 |---|---:|---:|---:|---:|---:|
 | Planificador estructurado P1 (línea base) | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 0.5976* |
 | P4-A q2 (ablación) | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 0.5998* |
-| **P4-A q2 + bm25 selection (el mejor actual)** | **0.5850** | **0.7323** | **0.7809** | **0.6618** | **0.6086** |
+| P4-A q2 + bm25 selection | 0.5850 | 0.7323 | 0.7809 | 0.6618 | 0.6129 |
+| **+ capa semántica Session-Fact (el mejor actual)** | **0.6108** | **0.7677** | **0.8219** | **0.6929** | **0.6558** |
 
-Estos son resultados de investigación local de LoCoMo posteriores al envío, no resultados oficiales del leaderboard. Frente a la línea base proxy P1 emparejada sobre el mismo conjunto de 1,976 preguntas, el mejor método actual (P4-A q2 + bm25 selection) mejora Hit@1 en 0.0071, Hit@10 en 0.0208 y MRR en 0.0121. Bootstrap pareado (10,000 remuestras), IC del 95 %: Hit@1 [-0.0051, +0.0197] (incluye 0; no se reivindica significación), MRR [+0.0036, +0.0207] y Hit@10 [+0.0116, +0.0299] (ambos excluyen 0). nDCG@10 0.6914; Recall@5 0.7606. Consulte la [evaluación completa (1,976)](docs/EVALUATION_NEW_METHOD_1976.md), los [resultados para el artículo](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md), la [reproducción](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md) y la [Evaluación de P1 con un modelo local](docs/P1_LOCAL_EVALUATION.md) para conocer el protocolo y los límites.
+* El Evidence Recall@10 de P1 / P4-A q2 usa el alcance histórico del pool de
+evidencia de cada método; las dos últimas filas se recalculan por pregunta con
+un único alcance compartido de acierto top-10 (gold mem_ids ∩ result_ids) y
+son directamente comparables. Frente a la línea base proxy P1 emparejada sobre
+el mismo conjunto de 1,976 preguntas, el mejor método actual mejora Hit@1 en
+0.0329, Hit@10 en 0.0618 y MRR en 0.0432. Bootstrap pareado (10,000 remuestras)
+frente a P4-A q2 + bm25 selection: Hit@1 Δ +0.0258, IC del 95 % [+0.0116,
++0.0400]; MRR Δ +0.0311, IC del 95 % [+0.0208, +0.0411] (ambos excluyen 0).
+Consulte la [evaluación completa (1,976)](docs/EVALUATION_NEW_METHOD_1976.md),
+los [resultados para el artículo](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md),
+la [reproducción](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md) y la
+[Evaluación de P1 con un modelo local](docs/P1_LOCAL_EVALUATION.md) para conocer
+el protocolo y los límites.
 
 ### C. Evidencia proxy y experimental
 
@@ -148,7 +161,7 @@ Estos experimentos descartan activar por defecto el grafo o la expansión adyace
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Hito de reranker Qwen + clave con información temporal | Tag de investigación congelado |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | Hito de planificación estructurada de consultas | Tag de investigación estable |
 | [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | Implementación de investigación estable, validada y actual posterior al envío | Activa |
-| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need + bm25 (1,976-query Hit@1 0.5850) | Active research branch |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need + bm25 + Session-Fact semantic layer (1,976-query Hit@1 0.6108) | Active research branch |
 
 La ruta de desarrollo resumida es:
 
