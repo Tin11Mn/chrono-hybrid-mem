@@ -566,10 +566,18 @@ class MemoryModel:
     def rank_candidates(
         self, query: str, options: List[str], candidates: List[Dict[str, str]]
     ) -> List[str]:
-        parsed = self._json_response(
-            self._rank_prompt(),
-            {"query": query, "options": options, "candidates": candidates},
-        )
+        try:
+            parsed = self._json_response(
+                self._rank_prompt(),
+                {"query": query, "options": options, "candidates": candidates},
+                max_tokens=400,
+            )
+        except RuntimeError:
+            # Ultra-long dialogue prompts can push generation past the bounded
+            # output window (a Qwen3 local endpoint then runs away instead of
+            # stopping). Falling back to the fusion order keeps the query alive
+            # instead of killing the whole evaluation chunk.
+            return []
         ordered_ids = parsed.get("ordered_ids", [])
         allowed = {candidate["id"] for candidate in candidates}
         result: List[str] = []

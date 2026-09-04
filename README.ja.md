@@ -110,9 +110,21 @@ P1 は既存のクエリ計画呼び出しを再利用します。モデル呼�
 |---|---:|---:|---:|---:|---:|
 | P1 structured planner（ベースライン） | 0.5779 | 0.7176 | 0.7601 | 0.6497 | 0.5976* |
 | P4-A q2（アブレーション） | 0.5779 | 0.7201 | 0.7642 | 0.6504 | 0.5998* |
-| **P4-A q2 + bm25 selection（現在最良）** | **0.5850** | **0.7323** | **0.7809** | **0.6618** | **0.6086** |
+| P4-A q2 + bm25 selection | 0.5850 | 0.7323 | 0.7809 | 0.6618 | 0.6129 |
+| **+ Session-Fact セマンティックレイヤー（現在最良）** | **0.6108** | **0.7677** | **0.8219** | **0.6929** | **0.6558** |
 
-これらは提出後の LoCoMo ローカル研究結果であり、公式リーダーボードの結果ではありません。同一の 1,976 問セット上で、対応する P1 プロキシベースラインと比較すると、現在最良の手法（P4-A q2 + bm25 selection）は Hit@1 を 0.0071、Hit@10 を 0.0208、MRR を 0.0121 改善します。ペア付きブートストラップ（10,000 回のリサンプル）の 95% CI：Hit@1 [-0.0051, +0.0197]（0 を含むため有意とは主張しない）、MRR [+0.0036, +0.0207] および Hit@10 [+0.0116, +0.0299]（いずれも 0 を除外）。nDCG@10 は 0.6914。Recall@5 は 0.7606。プロトコルと境界については、[全件評価（1,976）](docs/EVALUATION_NEW_METHOD_1976.md)、[論文用の結果](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md)、[再現手順](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md)、[P1 ローカルモデル評価](docs/P1_LOCAL_EVALUATION.md)を参照してください。
+* P1 / P4-A q2 の Evidence Recall@10 は各手法の従来のエビデンスプール範囲を
+使います。最後の二行は、共通の top-10 ヒット範囲（gold mem_ids ∩
+result_ids）で質問ごとに再計算されており、直接比較できます。同一の
+1,976 問セット上で、対応する P1 プロキシベースラインと比較すると、
+現在最良の手法は Hit@1 を 0.0329、Hit@10 を 0.0618、MRR を 0.0432
+改善します。P4-A q2 + bm25 selection に対するペア付きブートストラップ
+（10,000 回のリサンプル）：Hit@1 Δ +0.0258、95% CI [+0.0116, +0.0400]；
+MRR Δ +0.0311、95% CI [+0.0208, +0.0411]（いずれも 0 を除外）。プロトコル
+と境界については、[全件評価（1,976）](docs/EVALUATION_NEW_METHOD_1976.md)、
+[論文用の結果](docs/CHRONOHYBRIDMEM_RESULTS_FOR_PAPER.md)、
+[再現手順](docs/CHRONOHYBRIDMEM_REPRO_NEW_METHOD.md)、
+[P1 ローカルモデル評価](docs/P1_LOCAL_EVALUATION.md)を参照してください。
 
 ### C. プロキシおよび実験的な根拠
 
@@ -148,7 +160,7 @@ P2 は、構造化計画の証拠ニーズ語を用いて、P1 のモデルラ�
 | [`research-v0.4.0`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-v0.4.0) | Qwen リランカー + time-aware-key のマイルストーン | 固定済み研究タグ |
 | [`research-p1-20260816`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research-p1-20260816) | 構造化クエリ計画のマイルストーン | 安定版研究タグ |
 | [`main`](https://github.com/Tin11Mn/chrono-hybrid-mem) | 現在検証済みで安定している提出後の研究実装 | 運用中 |
-| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need + bm25 (1,976-query Hit@1 0.5850) | Active research branch |
+| [`research/p3-evidence-graph`](https://github.com/Tin11Mn/chrono-hybrid-mem/tree/research/p3-evidence-graph) | Current best: P4-A evidence-need + bm25 + Session-Fact semantic layer (1,976-query Hit@1 0.6108) | Active research branch |
 
 開発経路を簡潔に示すと、次のとおりです。
 
