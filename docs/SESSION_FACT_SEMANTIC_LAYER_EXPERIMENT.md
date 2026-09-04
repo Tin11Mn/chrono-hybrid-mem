@@ -1,0 +1,143 @@
+# Session-Fact Semantic Layer（B 方向）实验记录
+
+日期：2026-09-04
+分支：research/p3-evidence-graph（实验线）
+状态：fixed-50 净正 → fixed-200 弱正 → **full-1976 统计显著，采纳**
+
+## 1. 动机（MemoryART 借鉴）
+
+参照 AAAI-26 MemoryART（多记忆 + ART 情景记忆），其核心可迁移主张：
+对话历史应有一层 **LLM 结构化语义事实**（带源消息回溯），检索在语义层做
+匹配、再回溯到原始证据——而不是只在原始消息词面上检索。
+
+我们 P4 审计已确认：1976 全量中 channel_miss 112 题（76 题连 evidence-need
+通道都 miss）是**推理型零词面重叠**（如 "political leaning" → gold
+"religious conservatives & LGBTQ rights"），词面层无解。
+
+## 2. 数据与公平性
+
+- 官方 locomo10.json 自带 `observation`（LLM 事实 + 源 dia），诊断显示
+  oracle 覆盖 78% 非 top1 查询——但 **Add 协议只收原始消息，observation
+  测试时不可见**，直接使用违反公平性。
+- 合规路径：**本地 Qwen3-4B 离线生成等价事实层**（per-session per-speaker
+  [text, dia] 观察），评测时注入 store 的 session_facts 表。
+- 产物：`.locomo/session-facts-full.json`（272 sessions / 4250 facts /
+  全部 dia 有效），生成脚本 `.locomo/_gen_session_facts.py`。
+
+## 3. 实现（default-off）
+
+### storage.py
+- 新表 `session_facts(id, user_id, session_id, source_message_id, fact_text)`，
+  无条件基础 schema。
+- `MemoryStore.add_session_facts(...)`：批量幂等注入。
+- `session_fact_layer / rrf_weight / quota / top_n` 构造参数（默认 off / 0.05 / 3 / 10）。
+- search()：启用时加载该 user 全部 session_facts → dense 打分（semantic
+  retriever）→ top-N → 映射源消息进 RRF 通道（低权重）→ quota 预留进
+  rerank pool；**命中消息的 fact 文本并入 ranking_metadata.facts**，使
+  Search rerank 的 candidate_ranking_text 包含语义层证据（v2 修复）。
+
+### evaluate_locomo_retrieval.py
+- `--session-fact-layer / --session-fact-cache / --session-fact-rrf-weight /
+  --session-fact-quota / --session-fact-top-n` CLI。
+- `_inject_session_facts(...)`：按 sample_id 匹配缓存记录，dia→content→mem_id
+  回溯后调用 store.add_session_facts。
+- question_diagnostics 增加 session_fact 字段。
+
+### 测试
+- `tests/test_session_fact_layer.py`：5 例（表存在 / 注入幂等 / default-off
+  不影响检索 / 启用时预留 / 无 retriever 惰性）。
+
+## 4. fixed-50 配对结果（同 200 题集前 50 问，offset 0-49）
+
+| 指标 | 基线 (P4-A+bm25) | +SF v1 | +SF v2 |
+|---|---|---|---|
+| Hit@1 | 28/50 = 0.5600 | 28/50 = 0.5600 | **30/50 = 0.6000** |
+| MRR | 0.6207 | 0.6290 | **0.6537** |
+| wins/losses | — | 3 / 3 | **3 / 1** |
+
+- wins（SF 把 gold 提上 Top1）：off=2 (career path 5→1)、32 (2→1)、44 (2→1)
+- v1 loss 3 例（18/37/49）：SF 引入假阳性消息扰动 rerank pool，rerank
+  listwise 级联 → 原 Top1 被排后（base 完全可复现，非 LLM 噪声）
+- **v2 修复**（rerank 输入含 fact 证据后 rerank 认可 SF 命中）：
+  off=18 (3→1)、off=49 (2→1) 修复；off=37 顽固（多跳聚合型，4 gold 分散，
+  SF 引入单方面消息 mem_196，rerank 仍不认可）
+
+## 5. 结论（fixed-50 阶段）
+
+SF v2（rerank 输入含语义层证据）在 fixed-50 净正：Hit@1 +0.040、MRR +0.033。
+需 fixed-200 全量配对确认统计显著后再决定采纳/REJECT。
+
+## 6. fixed-200 配对结果（2026-09-04 更新）
+
+同 200 题集（offset 0-199），与历史 P4-A+bm25 基线配对：
+
+| 指标 | 基线 | +SF v2 | Δ |
+|---|---|---|---|
+| Hit@1 | 117/200 = 0.5850 | 120/200 = 0.6000 | **+0.0150** |
+| MRR | 0.6546 | 0.6777 | **+0.0231** |
+| Hit@3 | 145 | 149 | +4 |
+| Hit@10 | 152 | 162 | +10 |
+| wins / losses | — | 12 / 9 | 净 +3 |
+
+paired bootstrap（10,000 次，seed 20260826）：
+- Hit@1 Δ CI95 [-0.030, +0.060]，p(>0) = 0.71（**不显著**）
+- MRR Δ CI95 [-0.008, +0.054]，p(>0) = 0.93（弱显著）
+
+解读：fixed-200（n=200）统计力不足；12 win 覆盖实体/属性列举类
+（career path、art types、music artists、beach trips 等），9 loss 为
+rerank 对 pool 变化的敏感位移（含顽固的 off=37 多跳聚合题）。全量
+1976 配对评测进行中（更大的 n 定论）。
+
+## 7. full-1976 配对结果（2026-09-04 定论）
+
+全量 1976 题（offset 758 统一排除，conv-43 超长会话 rank 请求在
+llama-server 端挂起，P1/P4-A/NEW/SF v2 一致），与 NEW 基线逐题配对：
+
+| 指标 | 基线 (NEW) | +SF v2 | Δ |
+|---|---|---|---|
+| Hit@1 | 0.5850 | **0.6108** | **+0.0258** |
+| MRR | 0.6618 | **0.6929** | **+0.0311** |
+| Hit@3 | 1447 | 1517 | +70 |
+| Hit@10 | 1543 | 1624 | +81 |
+| wins / losses | — | 130 / 79 | 净 +51 |
+
+paired bootstrap（10,000 次，seed 20260826）：
+- Hit@1 Δ CI95 **[0.0116, 0.0400]，p(>0) = 1.000（统计显著）**
+- MRR Δ CI95 **[0.0208, 0.0411]，p(>0) = 1.000（统计显著）**
+
+category Hit@1 分解：cat1 114→130、cat2 190→200、cat4 543→567 提升；
+cat3 26→27、cat5 283→283（无 category 下降）。
+
+> fixed-200（n=200）p=0.71 不显著是统计力不足；n=1976 下 CI 完全不含 0，
+> 双指标 p=1.000。SF v2 全量**采纳**。
+
+### 评测基础设施修复（full 评测中发现）
+
+- `app/model.py` 普通 `rank_candidates` 原无 `max_tokens` 上限：conv-43 超长
+  会话（680 消息）的 rank prompt 达 13558 tokens（近 16k ctx 上限）时，
+  Qwen3 本地端点病态无限生成（8000+ tokens 不停），整段评测 APITimeoutError
+  崩溃且无产物（runner 无 checkpoint）。
+- 修复：与 `rank_candidates_with_confidence` 对齐——`max_tokens=400` +
+  超长截断 RuntimeError 时回退 fusion 序（`return []`），单题不崩段。
+- 验证：offset 800 单题从挂起 600s+ 崩溃 → 113s 正常完成；seg 0800
+  （conv-43 196/200 题）4×50 窗全部成功。
+- 注意：截断回退只发生在病态超长题（极端少），正常题 rank 输出远小于
+  400 tokens，不受影响。
+
+### offset 758 复测（SF v2 下仍不可跑）
+
+用 SF v2 全配置 + `--model-timeout 300` 复测 offset 758 单题：rank 请求在
+llama-server 端仍挂起（进程无输出、CPU 不增长、超 10 分钟），判定挂起终止
+（日志 0 字节、无结果 JSON）。结论：758 挂起是 llama-server 对 conv-43
+680 消息超长会话的基础设施限制，与检索方法无关；SF v2 评测同样统一排除，
+1976 口径与 P1/P4-A/NEW 完全一致，不伪造该题指标。
+
+## 8. 单元测试与回归
+
+- `tests/test_session_fact_layer.py`：5 例全过（表存在 / 注入幂等 /
+  default-off 不影响检索 / 启用时预留 / 无 retriever 惰性）。
+- 核心回归：`tests/test_hybrid_retrieval.py` + `test_p4a_evidence_need.py`
+  **46 passed**（SF default-off 无回归）。
+- rank max_tokens 修复：正常题输出 <400 tokens 不受影响；`model.py`
+  py_compile 通过，冒烟单题验证 OK。
+
