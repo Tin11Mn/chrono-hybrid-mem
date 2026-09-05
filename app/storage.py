@@ -1597,11 +1597,19 @@ class MemoryStore:
                     session_id TEXT NOT NULL,
                     source_message_id INTEGER NOT NULL,
                     fact_text TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT 'fact',
                     created_at TEXT NOT NULL,
                     UNIQUE(source_message_id, fact_text)
                 );
                 CREATE INDEX IF NOT EXISTS session_facts_user_idx
                     ON session_facts(user_id, source_message_id);
+                CREATE TABLE IF NOT EXISTS session_fact_sources (
+                    fact_id INTEGER NOT NULL,
+                    source_message_id INTEGER NOT NULL,
+                    PRIMARY KEY(fact_id, source_message_id)
+                );
+                CREATE INDEX IF NOT EXISTS session_fact_sources_msg_idx
+                    ON session_fact_sources(source_message_id);
                 """
             )
             if not (self.evidence_graph or self.evidence_anchors):
@@ -3551,9 +3559,14 @@ class MemoryStore:
         """Store offline per-session observations (MemoryART-style semantic layer).
 
         Each item must be {"session_id": str, "source_message_id": int,
-        "fact_text": str}. Facts are stored in the dedicated session_facts
-        table; they never alter raw messages or the P1 fact channels. The
-        search-time dense channel reads this table only when
+        "fact_text": str}; optional fields are "kind" ("fact" | "bridge" |
+        "profile", default "fact") and "source_message_ids" (list of ints)
+        naming every source message that supports a bridge/profile note.
+        Facts are stored in the dedicated session_facts table; bridge/profile
+        notes additionally fan out to every supporting source through the
+        session_fact_sources table so a hit brings all linked messages into
+        the retrieval pool. Facts never alter raw messages or the P1 fact
+        channels. The search-time dense channel reads these tables only when
         ``session_fact_layer`` is enabled. Idempotent per (source message,
         fact text).
         """
@@ -3573,16 +3586,45 @@ class MemoryStore:
                     message_id = int(source_message_id)
                 except (TypeError, ValueError):
                     continue
+                kind = str(item.get("kind") or "fact")
+                if kind not in ("fact", "bridge", "profile"):
+                    kind = "fact"
                 try:
-                    connection.execute(
+                    cursor = connection.execute(
                         """INSERT INTO session_facts(
                                user_id, session_id, source_message_id,
-                               fact_text, created_at)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        (user_id, session_id, message_id, fact_text, now),
+                               fact_text, kind, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        (user_id, session_id, message_id, fact_text, kind, now),
                     )
                 except sqlite3.IntegrityError:
+                    # idempotent per (source message, fact text)
                     continue
+                fact_id = int(cursor.lastrowid)
+                # Every fact row keeps a session_fact_sources entry for its
+                # primary source so the search JOIN is uniform; bridge/profile
+                # notes additionally carry every supporting source.
+                extra_ids: List[int] = []
+                raw_extra = item.get("source_message_ids")
+                if isinstance(raw_extra, (list, tuple)):
+                    for raw_id in raw_extra:
+                        try:
+                            extra = int(raw_id)
+                        except (TypeError, ValueError):
+                            continue
+                        if extra != message_id and extra not in extra_ids:
+                            extra_ids.append(extra)
+                all_ids = [message_id] + extra_ids
+                for extra in all_ids:
+                    try:
+                        connection.execute(
+                            """INSERT OR IGNORE INTO session_fact_sources(
+                                   fact_id, source_message_id)
+                               VALUES (?, ?)""",
+                            (fact_id, extra),
+                        )
+                    except sqlite3.IntegrityError:
+                        continue
 
     def search(self, *, user_id: str, query: str, options: Optional[List[str]] = None,
                top_k: int) -> List[MemoryResult]:
@@ -4428,52 +4470,83 @@ class MemoryStore:
                               fact.source_message_id,
                               fact.session_id,
                               fact.fact_text,
+                              fact.kind,
                               raw.content,
                               raw.created_at,
                               raw.event_ts
                        FROM session_facts AS fact
+                       JOIN session_fact_sources AS src
+                         ON src.fact_id = fact.id
                        JOIN raw_messages AS raw
-                         ON raw.id = fact.source_message_id
+                         ON raw.id = src.source_message_id
                         AND raw.user_id = fact.user_id
                        WHERE fact.user_id = ?
-                       ORDER BY fact.id""",
+                       ORDER BY fact.id, src.source_message_id""",
                     (user_id,),
                 ).fetchall()
-            session_fact_diagnostics["facts"] = len(sf_rows)
+            # distinct facts (not expanded source rows) so the diagnostic
+            # count is stable whether a note is single- or multi-source
+            distinct_fact_ids = {
+                int(row["fact_id"]) for row in sf_rows
+            }
+            session_fact_diagnostics["facts"] = len(distinct_fact_ids)
             if sf_rows:
-                fact_candidates = [
-                    {
-                        "id": "sfact_{}".format(int(row["fact_id"])),
+                # Score each distinct fact once; a bridge/profile note with
+                # several sources is a single dense candidate.
+                fact_candidates = []
+                seen_fact_ids = set()
+                for row in sf_rows:
+                    fid = "sfact_{}".format(int(row["fact_id"]))
+                    if fid in seen_fact_ids:
+                        continue
+                    seen_fact_ids.add(fid)
+                    fact_candidates.append({
+                        "id": fid,
                         "content": str(row["fact_text"]),
-                    }
-                    for row in sf_rows
-                ]
+                    })
                 sf_scores = self.semantic_retriever.score(
                     query, options or [], fact_candidates
                 )
                 sf_ranked = sorted(
                     sf_scores, key=sf_scores.get, reverse=True
                 )[: self.session_fact_top_n]
-                # Map each top fact back to its source message; keep message
-                # order by score and deduplicate identical source messages so
-                # one message never enters the channel twice.
-                fact_by_id = {
-                    "sfact_{}".format(int(row["fact_id"])): row
-                    for row in sf_rows
-                }
+                # Expand every supporting source of each top fact: a bridge
+                # hit brings all linked messages into the channel so the gold
+                # on either side of the bridge can surface. Rerank annotations
+                # carry fact/profile notes only; bridge sentences describe a
+                # cross-message association and perturbing listwise ranking
+                # with them displaced already-correct top-1s (SF v2 lesson).
+                rows_by_fact: Dict[str, List[sqlite3.Row]] = {}
+                for row in sf_rows:
+                    rows_by_fact.setdefault(
+                        "sfact_{}".format(int(row["fact_id"])), []
+                    ).append(row)
                 seen_sf_messages = set()
+                sf_facts_by_message: Dict[int, List[str]] = {}
                 for candidate_id in sf_ranked:
-                    row = fact_by_id.get(candidate_id)
-                    if row is None:
+                    rows = rows_by_fact.get(candidate_id)
+                    if not rows:
                         continue
-                    message_id = int(row["source_message_id"])
-                    if message_id in seen_sf_messages:
-                        continue
-                    seen_sf_messages.add(message_id)
                     session_fact_diagnostics["top_matches"].append(
                         candidate_id
                     )
-                    session_fact_rows.append(row)
+                    fact_text = str(rows[0]["fact_text"]).strip()
+                    kind = str(rows[0]["kind"] or "fact")
+                    annotate = kind in ("fact", "profile")
+                    for row in rows:
+                        message_id = int(row["id"])
+                        if fact_text and annotate:
+                            sf_facts_by_message.setdefault(
+                                message_id, []
+                            )
+                            if fact_text not in sf_facts_by_message[message_id]:
+                                sf_facts_by_message[message_id].append(
+                                    fact_text
+                                )
+                        if message_id in seen_sf_messages:
+                            continue
+                        seen_sf_messages.add(message_id)
+                        session_fact_rows.append(row)
                 session_fact_diagnostics["triggered"] = bool(
                     session_fact_rows
                 )
@@ -4488,16 +4561,16 @@ class MemoryStore:
                 # in view rather than being perturbed by an unexplained pool
                 # change.
                 for row in session_fact_rows:
-                    message_id = int(row["source_message_id"])
+                    message_id = int(row["id"])
                     item = ranking_metadata.get(message_id)
                     if item is None:
                         continue
-                    fact_text = str(row["fact_text"]).strip()
-                    if not fact_text:
-                        continue
-                    existing = item.setdefault("facts", [])
-                    if fact_text not in existing:
-                        existing.append(fact_text)
+                    for fact_text in sf_facts_by_message.get(
+                        message_id, []
+                    ):
+                        existing = item.setdefault("facts", [])
+                        if fact_text not in existing:
+                            existing.append(fact_text)
         p1_channel_rows = (
             ("raw", raw_rows, 1.0),
             ("raw_porter", raw_porter_rows, 1.0),
@@ -5190,7 +5263,7 @@ class MemoryStore:
             session_fact_union_ids: List[str] = []
             if session_fact_rows:
                 session_fact_union_ids = [
-                    "mem_{}".format(int(row["source_message_id"]))
+                    "mem_{}".format(int(row["id"]))
                     for row in session_fact_rows
                 ]
             reserved_session_fact_ids: List[str] = []

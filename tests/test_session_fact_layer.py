@@ -176,3 +176,69 @@ def test_session_fact_layer_requires_retriever_for_channel(tmp_path):
     diag = trace.get("session_fact_diagnostics", {})
     assert diag.get("enabled") is False
     assert results
+
+
+def test_bridge_fact_stores_multi_source_links(tmp_path):
+    """A bridge note fans out to every supporting source row."""
+    store = _build_store(tmp_path)
+    store.add_session_facts(user_id="u1", facts=[{
+        "session_id": "s1", "source_message_id": 1, "kind": "bridge",
+        "fact_text": "Bob, who gave Alice the book, works at Microsoft.",
+        "source_message_ids": [1, 2],
+    }])
+    db_path = store.database_path
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT source_message_id FROM session_fact_sources "
+            "ORDER BY source_message_id"
+        ).fetchall()
+        kinds = conn.execute(
+            "SELECT kind FROM session_facts"
+        ).fetchall()
+        count = conn.execute(
+            "SELECT COUNT(*) FROM session_fact_sources"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert kinds == [("bridge",)]
+    assert count == 2
+    assert [r[0] for r in rows] == [1, 2]
+
+
+def test_bridge_hit_brings_all_sources_into_channel(tmp_path):
+    """A matched bridge fact must surface both linked messages."""
+    retriever = FixedRetriever()
+    store = _build_store(tmp_path, session_fact_layer=True, retriever=retriever)
+    store.add_session_facts(user_id="u1", facts=[
+        {"session_id": "s1", "source_message_id": 1, "kind": "bridge",
+         "fact_text": "Bob, who gave Alice the book, works at Microsoft.",
+         "source_message_ids": [1, 2]},
+    ])
+    store.search(user_id="u1", query="where does the book giver work", top_k=5)
+    trace = store.last_retrieval_trace
+    union = trace.get("session_fact_union_ids", [])
+    # Both ends of the bridge (mem_1 = gave book, mem_2 = works at MS) surface.
+    assert "mem_1" in union and "mem_2" in union
+    diag = trace.get("session_fact_diagnostics", {})
+    # One distinct fact scored, not one per expanded source row.
+    assert diag.get("facts") == 1
+    assert diag.get("triggered") is True
+
+
+def test_mixed_fact_and_bridge_kinds_coexist(tmp_path):
+    retriever = FixedRetriever()
+    store = _build_store(tmp_path, session_fact_layer=True, retriever=retriever)
+    store.add_session_facts(user_id="u1", facts=[
+        {"session_id": "s1", "source_message_id": 3, "fact_text": "Cid wrote a note."},
+        {"session_id": "s1", "source_message_id": 1, "kind": "profile",
+         "fact_text": "Bob is a book giver.",
+         "source_message_ids": [1]},
+    ])
+    store.search(user_id="u1", query="anything", top_k=5)
+    trace = store.last_retrieval_trace
+    diag = trace.get("session_fact_diagnostics", {})
+    assert diag.get("facts") == 2
+    union = trace.get("session_fact_union_ids", [])
+    assert "mem_3" in union
+    assert "mem_1" in union
