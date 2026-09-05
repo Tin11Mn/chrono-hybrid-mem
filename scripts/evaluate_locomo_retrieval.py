@@ -242,13 +242,15 @@ def _inject_session_facts(
     evidence_text: Dict[str, str],
     mem_by_content: Dict[str, str],
 ) -> None:
-    """Load offline session facts for one conversation and store them.
+    """Load offline session facts (SF v2/v3 caches) and store them.
 
-    The cache produced by .locomo/_gen_session_facts.py maps each
-    ``{sample_id}:{session_key}`` record to per-speaker fact pairs of the
-    form [text, dia_id]. Each fact is matched back to its source raw message
-    through the evaluation script's dia -> content map and the store's
-    content -> mem id map; unmatched facts are dropped silently.
+    SF v2 cache: each ``{sample_id}:{session_key}`` record maps a speaker to
+    fact pairs [text, dia_id]. SF v3 cache adds ``bridges``/``profiles`` per
+    speaker ([text, [dia_id,...]]) and a ``{sample_id}:__profile__`` record of
+    cross-session profiles citing [session_key, dia_id] pairs. Every note is
+    matched back to its source raw message(s) through dia -> content ->
+    mem id; a note with several source messages is stored once with all of
+    them so a search hit surfaces every linked message.
     """
     if not mem_by_content:
         return
@@ -258,6 +260,51 @@ def _inject_session_facts(
     except (OSError, ValueError):
         return
     facts: List[Dict[str, object]] = []
+    dia_to_session: Dict[str, str] = {}
+
+    def mem_for_dia(dia_id: str) -> int | None:
+        content = evidence_text.get(dia_id)
+        if content is None:
+            return None
+        mem_id = mem_by_content.get(str(content).casefold())
+        if mem_id is None or not mem_id.startswith("mem_"):
+            return None
+        try:
+            return int(mem_id.split("_", 1)[1])
+        except (IndexError, ValueError):
+            return None
+
+    def emit(session_id: str, kind: str, fact_text: str, mem_ids) -> None:
+        """Deduplicate message ids then store one note with all sources."""
+        if not fact_text:
+            return
+        unique_ids: List[int] = []
+        for raw_id in mem_ids:
+            if raw_id is not None and raw_id not in unique_ids:
+                unique_ids.append(raw_id)
+        if not unique_ids:
+            return
+        entry: Dict[str, object] = {
+            "session_id": session_id,
+            "source_message_id": unique_ids[0],
+            "fact_text": fact_text,
+            "kind": kind,
+        }
+        if kind != "fact" or len(unique_ids) > 1:
+            entry["source_message_ids"] = unique_ids
+        facts.append(entry)
+
+    def speaker_of_dia(dia_id: str) -> str:
+        """The speaker prefix ("Name:") of a dia's raw content, if present."""
+        content = evidence_text.get(dia_id)
+        if not content:
+            return ""
+        colon = content.find(":")
+        return content[:colon].strip() if colon > 0 else ""
+
+    def dia_speakers(dia_ids) -> set:
+        return {speaker_of_dia(str(d)) for d in dia_ids if str(d)}
+
     for record in cache_records:
         if not isinstance(record, dict):
             continue
@@ -265,34 +312,83 @@ def _inject_session_facts(
         if not key.startswith(sample_id + ":"):
             continue
         session_id = key.split(":", 1)[1] if ":" in key else ""
+        if session_id == "__profile__":
+            # Cross-session profiles: cite [session_key, dia_id] pairs.
+            profiles = record.get("profiles", [])
+            if not isinstance(profiles, list):
+                continue
+            for profile in profiles:
+                if not isinstance(profile, list) or len(profile) < 2:
+                    continue
+                fact_text = str(profile[0]).strip()
+                cites = profile[1]
+                if not isinstance(cites, list):
+                    continue
+                mem_ids: List[int] = []
+                for cite in cites:
+                    if not isinstance(cite, list) or len(cite) < 2:
+                        continue
+                    skey = str(cite[0])
+                    dia = str(cite[1])
+                    mid = mem_for_dia(dia)
+                    if mid is not None:
+                        mem_ids.append(mid)
+                        dia_to_session.setdefault(dia, skey)
+                emit("__profile__", "profile", fact_text, mem_ids)
+            continue
         speakers = record.get("speakers", {})
         if not isinstance(speakers, dict):
             continue
-        for speaker, pairs in speakers.items():
-            if not isinstance(pairs, list):
+        for speaker, blob in speakers.items():
+            if not isinstance(blob, dict):
                 continue
-            for pair in pairs:
-                if not isinstance(pair, list) or len(pair) < 2:
+            # SF v2 shape: flat list of [text, dia] pairs.
+            if isinstance(blob, list):
+                for pair in blob:
+                    if not isinstance(pair, list) or len(pair) < 2:
+                        continue
+                    fact_text = str(pair[0]).strip()
+                    dia_id = str(pair[1]).strip()
+                    if not fact_text or not dia_id:
+                        continue
+                    mid = mem_for_dia(dia_id)
+                    if mid is not None:
+                        emit(session_id, "fact", fact_text, [mid])
+                continue
+            # SF v3 shape: {"facts": [[text, dia]], "bridges": [[text, [dia...]]],
+            #               "profiles": [[text, [dia...]]]}
+            for kind in ("facts", "bridges", "profiles"):
+                pairs = blob.get(kind, [])
+                if not isinstance(pairs, list):
                     continue
-                fact_text = str(pair[0]).strip()
-                dia_id = str(pair[1]).strip()
-                if not fact_text or not dia_id:
-                    continue
-                content = evidence_text.get(dia_id)
-                if content is None:
-                    continue
-                mem_id = mem_by_content.get(str(content).casefold())
-                if mem_id is None or not mem_id.startswith("mem_"):
-                    continue
-                try:
-                    source_message_id = int(mem_id.split("_", 1)[1])
-                except (IndexError, ValueError):
-                    continue
-                facts.append({
-                    "session_id": session_id,
-                    "source_message_id": source_message_id,
-                    "fact_text": fact_text,
-                })
+                for pair in pairs:
+                    if not isinstance(pair, list) or len(pair) < 2:
+                        continue
+                    fact_text = str(pair[0]).strip()
+                    ref = pair[1]
+                    mem_ids = []
+                    dia_list = ref if isinstance(ref, list) else [ref]
+                    valid_dias = []
+                    for dia in dia_list:
+                        dia = str(dia).strip()
+                        if not dia:
+                            continue
+                        mid = mem_for_dia(dia)
+                        if mid is not None:
+                            mem_ids.append(mid)
+                            valid_dias.append(dia)
+                    note_kind = "fact" if kind == "facts" else (
+                        "bridge" if kind == "bridges" else "profile"
+                    )
+                    if note_kind in ("bridge", "profile") and valid_dias:
+                        # C2 attribution guard: the note lives under `speaker`
+                        # and must be backed by at least one message from that
+                        # speaker; otherwise the model likely cross-attributed
+                        # a fact to the wrong person. Drop silently.
+                        dsp = dia_speakers(valid_dias)
+                        if speaker and dsp and speaker not in dsp:
+                            continue
+                    emit(session_id, note_kind, fact_text, mem_ids)
     if facts:
         store.add_session_facts(user_id=user_id, facts=facts)
 
