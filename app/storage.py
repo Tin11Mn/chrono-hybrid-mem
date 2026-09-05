@@ -424,6 +424,7 @@ def candidate_ranking_text(
     facts: Optional[List[str]] = None,
     neighbor_context: Optional[List[str]] = None,
     graph_paths: Optional[List[Dict[str, Any]]] = None,
+    diagnostic_matches: Optional[List[str]] = None,
 ) -> str:
     """Expose provenance and extracted facts only to the evidence ranker."""
     parts = ["Original memory:\n{}".format(content)]
@@ -445,6 +446,10 @@ def candidate_ranking_text(
                 metadata.append("Event date: {}".format(event_date))
     if metadata:
         parts.insert(0, "\n".join(metadata))
+    if diagnostic_matches:
+        parts.append("Distinctive query-term matches:\n- {}".format(
+            "\n- ".join(diagnostic_matches)
+        ))
     supported_facts = [item.strip() for item in (facts or []) if item.strip()]
     if supported_facts:
         parts.append(
@@ -660,6 +665,7 @@ class MemoryStore:
     def __init__(self, database_path: str, model: Optional[MemoryModel] = None,
                  temporal_bonus: float = 0.0, semantic_retriever: object = None,
                  temporal_log_scale: bool = False,
+                 rem_diagnosticity: bool = False,
                  dense_rrf_weight: float = 1.0,
                  dense_fusion_alpha: Optional[float] = None,
                  dense_context_weight: float = 0.0,
@@ -725,6 +731,7 @@ class MemoryStore:
         self.model = model
         self.temporal_bonus = temporal_bonus
         self.temporal_log_scale = bool(temporal_log_scale)
+        self.rem_diagnosticity = bool(rem_diagnosticity)
         self.semantic_retriever = semantic_retriever
         self.dense_rrf_weight = dense_rrf_weight
         self.dense_fusion_alpha = dense_fusion_alpha
@@ -5416,8 +5423,45 @@ class MemoryStore:
             llm_rank_pool = rerank_pool
             if self.llm_rerank_top_n > 0 and len(rerank_pool) > self.llm_rerank_top_n:
                 llm_rank_pool = rerank_pool[:self.llm_rerank_top_n]
+            # REM diagnosticity: count how often each non-stop query term
+            # occurs across this user's messages. Terms that are rare for the
+            # user are distinctive; matches on them are surfaced to the ranker
+            # as annotations (only for terms with freq <= 2, so common names
+            # and topics stay unlabelled).
+            diag_query_terms: List[str] = []
+            user_term_freq: Dict[str, int] = {}
+            if self.rem_diagnosticity:
+                with self._connection() as freq_connection:
+                    content_rows = freq_connection.execute(
+                        "SELECT content FROM raw_messages WHERE user_id = ?",
+                        (user_id,),
+                    ).fetchall()
+                freq: Dict[str, int] = {}
+                for row in content_rows:
+                    for term in re.findall(
+                        r"[a-zA-Z][a-zA-Z']+", str(row["content"]).lower()
+                    ):
+                        if term.casefold() in self.QUERY_STOP_WORDS:
+                            continue
+                        freq[term] = freq.get(term, 0) + 1
+                user_term_freq = freq
+                for term in terms:
+                    t = str(term).casefold()
+                    if t in self.QUERY_STOP_WORDS:
+                        continue
+                    if freq.get(t, 0) <= 2:
+                        diag_query_terms.append(term)
             for result in llm_rank_pool:
                 metadata = ranking_metadata.get(message_ids[result.id], {})
+                diagnostic_matches: List[str] = []
+                if diag_query_terms:
+                    text = "{} {}".format(
+                        result.content,
+                        " ".join(str(metadata.get("facts", []) or [])),
+                    ).casefold()
+                    for term in diag_query_terms:
+                        if str(term).casefold() in text:
+                            diagnostic_matches.append(str(term))
                 candidates.append({
                     "id": result.id,
                     "content": candidate_ranking_text(
@@ -5427,6 +5471,7 @@ class MemoryStore:
                         metadata.get("facts", []),
                         metadata.get("neighbors", []),
                         paths_by_source.get(result.id, []),
+                        diagnostic_matches or None,
                     ),
                 })
             retrieval_trace["llm_rank_candidate_count"] = len(candidates)

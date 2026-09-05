@@ -448,6 +448,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              session_fact_cache: str = "",
              temporal_bonus: float = 0.0,
              temporal_log_scale: bool = False,
+             rem_diagnosticity: bool = False,
              evidence_graph: bool = False,
              graph_selective: bool = False,
              graph_rrf_weight: float = 0.025,
@@ -534,6 +535,7 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 session_fact_top_n=session_fact_top_n,
                 temporal_bonus=temporal_bonus,
                 temporal_log_scale=temporal_log_scale,
+                rem_diagnosticity=rem_diagnosticity,
                 evidence_graph=evidence_graph,
                 graph_selective=graph_selective,
                 graph_rrf_weight=graph_rrf_weight,
@@ -1055,6 +1057,10 @@ def main() -> None:
     parser.add_argument(
         "--temporal-log-scale", action="store_true",
         help="Use SIMPLE log-scaled temporal shape instead of linear recency",
+    )
+    parser.add_argument(
+        "--rem-diagnosticity", action="store_true",
+        help="Annotate rerank candidates with distinctive (rare) query-term matches (REM)",
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -2101,6 +2107,7 @@ def main() -> None:
         session_fact_cache=args.session_fact_cache or "",
         temporal_bonus=args.temporal_bonus,
         temporal_log_scale=args.temporal_log_scale,
+        rem_diagnosticity=args.rem_diagnosticity,
         evidence_graph=args.evidence_graph,
         graph_selective=args.graph_selective,
         graph_rrf_weight=args.graph_rrf_weight,

@@ -215,5 +215,117 @@ SF reserved（off=54 gold mem_272 被 SF 预留仍排后），瓶颈在 **rerank
 SIMPLE 时间形状作为可选项存档（CLI 已暴露）；temporal miss 的真正瓶颈
 在 rerank 层的时间理解，需提示层改造（不同机制）。
 
+## 11. REM 词面标注实验（2026-09-05）：REJECT
+
+动机（认知理论 REM：检索强度 ∝ 特征诊断性，罕见特征权重更高——查询中
+对说话者"罕见"的词命中应比常见词更具证据力）。A/B/C 分类（full-1976，
+SF v2 配置）：A（gold 在 rerank pool + 词面重叠 + 未 Top1）**461** 题、
+B（gold 在 pool + 零词面）29 题、C（gold 不在 pool）279 题；A 远超
+实施阈值 30。
+
+实现（default-off）：`--rem-diagnosticity` CLI → storage 现算该 user 全量
+消息词频，query 中 freq≤2 的非停用词为 diag_query_terms；候选命中时在
+candidate_ranking_text 追加 "Distinctive query-term matches:" section
+（作用 rerank 提示层，非 fuse 层——吸取 SIMPLE 教训）。
+
+量化证伪（A 类 461 题 overlap 结构）：
+- overlap 分布 {2:190, 1:129, 3:85, 4:43}——词面重叠极薄弱
+- 重叠词是常见词（人名/主题），查询的**稀有诊断词恰是 gold 用同义改写
+  的部分**（gold 不含），REM 标注偏向标到干扰候选而非 gold
+- 冒烟：off=13（diag terms path/persue 标注触发正常）rank 2→3（变差）、
+  off=45 2→2、off=53 1→1——标注机制正确但无正效果
+
+**结论：REJECT。** 词面标注保留为 default-off 存档（CLI 已暴露，含
+`candidate_ranking_text` 的 `diagnostic_matches` 参数）；REM 的"稀有词=
+诊断性"假设与 LoCoMo 查询结构不匹配（查询稀有词正是 gold 同义改写处）。
+与 SIMPLE 同因：作用层（rerank 输入标注）难穿透 rerank listwise 判定。
+
+## 12. Rerank 失败诊断 + RANK_PROMPT_V2 配对验证（2026-09-06）：V2 REJECT
+
+### 12.1 动机
+
+SIMPLE（fuse 层）、REM（rerank 输入标注层）双证伪后，共同指向 rerank
+listwise 判定本身。用户决策：先诊断 rerank 对 A 类 461 题的失败模式，
+再决定投资方向（不盲目再试机制）。
+
+### 12.2 方法（全离线，零新增评测）
+
+合并 11 段 sfv2-full 产物（1976 题 diagnostics）+ locomo10.json 重建
+per-sample raw-message id 序（与 evaluate 完全同序），离线重建每题的
+query / pool 序（`rerank_pool_ids`，pre-rerank）/ final 序（`final_ids`，
+post-rerank）/ gold mem 内容。
+
+### 12.3 诊断结果
+
+**D3 召回充足**：A 类 461 题中 gold 在 rerank pool 前 10 的 312/461
+（68%）、前 5 的 238/461（52%）——融合层达标，按决策树走"改 rerank
+提示词"分支。
+
+**D2 rerank 行为**：
+- promoted 246 题（含 58 题从 pool 21-30 位提到 r2-r9）——rerank 有
+  真实救捞能力，非噪声
+- **r2-blocked 212 题（46%）**：gold 被提到 final rank 2 差一步到 Top1
+  ← 主导失败模式
+- dropped_out 66 题（49/66 的 gold 本在 pool 深处 11-30，被挤出 top10）
+- demoted 72 题（含 32 题 gold 本是 fusion pool 冠军却被挤下）
+- champion-swap 207 题：rerank 主动替换 fusion 冠军（62 题新冠军来自
+  pool 11-30）——rerank 有独立判断，非摆设
+
+**D4 冠军 vs gold 特征**（final_ids[0] vs gold）：
+
+| 特征 | 冠军占优 | gold 占优 |
+|---|---|---|
+| 与 query 词面重叠 | 225 | 119 |
+| 内容更长 | 171 | 282（冠军偏短） |
+| session 更新 | 137 | 62（同 session 262） |
+| 冠军-gold 词面重叠 ≥2 | 354/461（77%） | — |
+| 冠军文本真含答案词 | **19/157（12%）** | 100 例 |
+
+典型（off 73 "When did Melanie go on a hike?"）：冠军大段描述 hike
+（无日期），gold "we just did it yesterday!" 才是答案——冠军是
+**叙事/社交回话型**（词面贴 query 但不携带答案），与 REM 诊断一致
+（查询稀有词在 gold 中）。
+
+**D5 提示词敏感性**：RANK_PROMPT_V2 的 rule(0) "mention ≠ answer" 注释
+自述正是为 full-1977 的 281 个 rank2/3 失败设计（mention 型消息压过
+answer 型），但从未严格配对验证。同条件配对（fixed-200，offsets 0-199，
+SF v2 配置，今日同日先后跑 V1/V2，4×50 窗防崩）：
+
+| 版本 | Hit@1 | MRR |
+|---|---|---|
+| V1（9/4 历史） | 0.6000 | 0.6777 |
+| V1（今日重跑，漂移对照） | 0.6050 | 0.6827 |
+| V2（rule0，今日） | 0.5850 | 0.6699 |
+
+- V1 历史 vs 今日重跑：Δ+0.005（CI [-0.015,+0.025]，p=0.58）——llama
+  漂移量级确认
+- **V1 今日 vs V2 今日（诚实配对）：Δ-0.0200，CI [-0.050,+0.010]，
+  p(>0)=0.075**——V2 无收益且略有害
+- 早期"V2 对 A 类 +3/0"观感是 9/4 旧基线漂移假象；同条件 A 类
+  wins [74,101] / losses [53,96] 净 0
+
+**反事实（无 LLM rerank，fusion pool top1 直出）**：Hit@1 0.392 →
+实际 0.6105——**rerank 净贡献 +432 hit（465 win / 33 loss）**。rerank
+是系统主力，不可移除；其边际 r2-blocked 失败**不是提示词可修的**。
+
+### 12.4 结论
+
+**V2 REJECT**（p>0=0.075，无正证据）；RANK_PROMPT_V2 保持未启用默认
+（V1 继续使用）。rerank 保持现状（主力 +432 hit，改动即有扰动 79 loss
+的 SF 先例风险）。
+
+三连 REJECT（SIMPLE fuse 层 / REM rerank 输入标注层 / V2 rerank 提示层）
+共同教训：A 类 461 失败根因是 rerank 模型把"叙事贴题非答案"消息排在
+"答案"消息前，且 **Qwen3-4B 在该判别上提示词已无空间**（V2 rule0 直接
+点名该失败仍无效）；真含答案的冠军仅 12%，其余是模型判别力上限。后续
+若继续，需更强 rerank 模型或重构评测口径，均超出本轮"纯打分改造"范围，
+收束。
+
+诊断产物（.locomo，gitignored）：`_rerank_diag.py`（D2/D3）、
+`_rerank_diag2.py`（r2/dropout/swap 细分）、`_rerank_diag3.py` +
+`_rerank_d4_examples.json`（D4 特征）、`_rerank_diag4b/4c/4d.py`
+（冠军-gold 语义关系）、`v1r-fixed200.json` / `v2-fixed200.json`
+（V1/V2 同条件配对）。
+
 
 
