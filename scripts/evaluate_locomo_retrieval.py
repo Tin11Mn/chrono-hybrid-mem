@@ -446,6 +446,8 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
              session_fact_quota: int = 3,
              session_fact_top_n: int = 10,
              session_fact_cache: str = "",
+             temporal_bonus: float = 0.0,
+             temporal_log_scale: bool = False,
              evidence_graph: bool = False,
              graph_selective: bool = False,
              graph_rrf_weight: float = 0.025,
@@ -530,6 +532,8 @@ def evaluate(samples: Iterable[Dict[str, object]], top_ks: List[int], max_questi
                 session_fact_rrf_weight=session_fact_rrf_weight,
                 session_fact_quota=session_fact_quota,
                 session_fact_top_n=session_fact_top_n,
+                temporal_bonus=temporal_bonus,
+                temporal_log_scale=temporal_log_scale,
                 evidence_graph=evidence_graph,
                 graph_selective=graph_selective,
                 graph_rrf_weight=graph_rrf_weight,
@@ -1042,6 +1046,15 @@ def main() -> None:
     parser.add_argument(
         "--session-fact-top-n", type=int, default=None,
         help="Number of dense top session facts mapped back to source messages (default 10)",
+    )
+    parser.add_argument(
+        "--temporal-bonus", type=float, default=0.0,
+        help="Temporal channel weight applied in reciprocal-rank fusion "
+             "(SIMPLE log-compressed age shape; 0 disables the temporal channel)",
+    )
+    parser.add_argument(
+        "--temporal-log-scale", action="store_true",
+        help="Use SIMPLE log-scaled temporal shape instead of linear recency",
     )
     parser.add_argument(
         "--local-embedding-model",
@@ -2086,6 +2099,8 @@ def main() -> None:
             if args.session_fact_top_n is not None else 10
         ),
         session_fact_cache=args.session_fact_cache or "",
+        temporal_bonus=args.temporal_bonus,
+        temporal_log_scale=args.temporal_log_scale,
         evidence_graph=args.evidence_graph,
         graph_selective=args.graph_selective,
         graph_rrf_weight=args.graph_rrf_weight,
