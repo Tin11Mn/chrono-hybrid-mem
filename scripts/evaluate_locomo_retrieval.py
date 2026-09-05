@@ -340,9 +340,8 @@ def _inject_session_facts(
         if not isinstance(speakers, dict):
             continue
         for speaker, blob in speakers.items():
-            if not isinstance(blob, dict):
-                continue
-            # SF v2 shape: flat list of [text, dia] pairs.
+            # SF v2 shape: flat list of [text, dia] pairs (must be handled
+            # before the dict-only check below).
             if isinstance(blob, list):
                 for pair in blob:
                     if not isinstance(pair, list) or len(pair) < 2:
@@ -354,6 +353,8 @@ def _inject_session_facts(
                     mid = mem_for_dia(dia_id)
                     if mid is not None:
                         emit(session_id, "fact", fact_text, [mid])
+                continue
+            if not isinstance(blob, dict):
                 continue
             # SF v3 shape: {"facts": [[text, dia]], "bridges": [[text, [dia...]]],
             #               "profiles": [[text, [dia...]]]}
