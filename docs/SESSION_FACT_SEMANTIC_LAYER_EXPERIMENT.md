@@ -182,4 +182,38 @@ miss 的根因是生成层 fact 直陈句与抽象查询之间的语义鸿沟（
 跨越），改进需查询侧改写或更大 embedding 模型等新机制（成本高、收益
 不确定），本轮收束不投入。SF v2（top_n=10）保持为采纳配置。
 
+## 10. SIMPLE 时间通道实验（2026-09-05）：REJECT
+
+动机（认知理论 SIMPLE：相对时间辨别、对数压缩、局部竞争，非简单线性
+recency）。诊断显示 temporal-intent 256 题（full 0.668）与 8 个 conv-26
+temporal miss。
+
+实现（default-off）：
+- evaluate CLI `--temporal-bonus`（float，默认 0）+ `--temporal-log-scale`；
+- storage 构造 `temporal_bonus / temporal_log_scale`，fuse 层时间加分支持
+  对数压缩形状 `1/(1+log1p(age_days))`（recency）与反向（historical）；
+  时间通道仅当 bonus>0 时启用（历史所有评测 bonus=0，即时间通道一直关）。
+
+conv-26 fixed-200 A/B（SF v2 配置，5 配置）：
+
+| 配置 | Hit@1 | MRR |
+|---|---|---|
+| off（基线） | 0.6050 | 0.6827 |
+| log-0.5 | 0.6000 | 0.6777 |
+| log-1.0 | 0.6050 | 0.6827 |
+| log-2.0 | 0.6000 | 0.6777 |
+| linear-1.0 | 0.6000 | 0.6777 |
+
+temporal 子集（30 题）各配置均为 21-22/30，无明显差异。
+
+失败机制诊断：8 个 temporal miss 中多个 gold 已在 channel 排名靠前甚至被
+SF reserved（off=54 gold mem_272 被 SF 预留仍排后），瓶颈在 **rerank 对
+"when" 时间相关性的判断**（非召回、非 RRF 时间加分可救）——时间加分只
+作用于 rerank 前的 fusion 排序，被 rerank listwise 重排覆盖。
+
+**结论：REJECT。** 时间通道保持默认关（bonus=0），不改任何历史结果。
+SIMPLE 时间形状作为可选项存档（CLI 已暴露）；temporal miss 的真正瓶颈
+在 rerank 层的时间理解，需提示层改造（不同机制）。
+
+
 

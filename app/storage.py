@@ -659,6 +659,7 @@ class MemoryStore:
     )
     def __init__(self, database_path: str, model: Optional[MemoryModel] = None,
                  temporal_bonus: float = 0.0, semantic_retriever: object = None,
+                 temporal_log_scale: bool = False,
                  dense_rrf_weight: float = 1.0,
                  dense_fusion_alpha: Optional[float] = None,
                  dense_context_weight: float = 0.0,
@@ -723,6 +724,7 @@ class MemoryStore:
         self.database_path = database_path
         self.model = model
         self.temporal_bonus = temporal_bonus
+        self.temporal_log_scale = bool(temporal_log_scale)
         self.semantic_retriever = semantic_retriever
         self.dense_rrf_weight = dense_rrf_weight
         self.dense_fusion_alpha = dense_fusion_alpha
@@ -4893,20 +4895,40 @@ class MemoryStore:
                 temporal_direction = 1
             elif self.HISTORICAL_QUERY_PATTERN.search(query):
                 temporal_direction = -1
-            if temporal_direction:
+            if temporal_direction and self.temporal_bonus > 0:
                 timestamps = [
                     candidate["event_ts"] for candidate in channel_candidates.values()
                     if candidate["event_ts"] is not None
                 ]
                 if timestamps and max(timestamps) > min(timestamps):
                     oldest, newest = min(timestamps), max(timestamps)
+                    span_days = max((newest - oldest) / 86400.0, 1.0)
                     for candidate in channel_candidates.values():
                         event_ts = candidate["event_ts"]
                         if event_ts is not None:
-                            recency = (event_ts - oldest) / (newest - oldest)
-                            temporal_score = (
-                                recency if temporal_direction > 0 else 1.0 - recency
-                            )
+                            if self.temporal_log_scale:
+                                # SIMPLE: log-compressed recency keeps an old
+                                # isolated event competitive and compresses a
+                                # dense recent cluster into a softer gradient.
+                                if temporal_direction > 0:
+                                    age_days = max((newest - event_ts) / 86400.0, 0.0)
+                                    temporal_score = 1.0 / (
+                                        1.0 + math.log1p(age_days)
+                                    )
+                                else:
+                                    # historical: prefer older messages; use
+                                    # age relative to the newest so the newest
+                                    # is penalised and older ones rank by age
+                                    age_days = max((newest - event_ts) / 86400.0, 0.0)
+                                    temporal_score = 1.0 - 1.0 / (
+                                        1.0 + math.log1p(age_days)
+                                    )
+                            else:
+                                recency = (event_ts - oldest) / (newest - oldest)
+                                temporal_score = (
+                                    recency if temporal_direction > 0
+                                    else 1.0 - recency
+                                )
                             candidate["result"].score += (
                                 self.temporal_bonus * temporal_score
                             )
