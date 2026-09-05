@@ -141,3 +141,45 @@ llama-server 端仍挂起（进程无输出、CPU 不增长、超 10 分钟）�
 - rank max_tokens 修复：正常题输出 <400 tokens 不受影响；`model.py`
   py_compile 通过，冒烟单题验证 OK。
 
+## 9. 失败模式深挖与参数收束（2026-09-05）
+
+### 9.1 注入层回归修复（v2 flat 缓存兼容）
+
+SF v3 实验给注入层加 v3 dict 结构支持时，把 v2 flat-list 缓存的判断
+（`if isinstance(blob, list)`）放到了 `if not isinstance(blob, dict):
+continue` 之后——v2 格式（speaker → [[text, dia], ...]）被提前跳过，
+导致 v2 缓存在新代码下注入 0 行（SF facts=0）。修复：flat-list 分支移到
+dict 检查之前。修复后 v2 缓存注入恢复（facts=309/conv-26），top10 复现
+0.6050（历史 0.6000，5 题差异为 rerank LLM 运行噪声，SF 通道输入不变）。
+
+### 9.2 D：检索层 miss（gold 不在 top30，350 题）归因
+
+| 子类 | 数量 | 说明 |
+|---|---|---|
+| low_lexical_overlap | 137 | 查询抽象问法 vs gold 具体陈述，dense 也漏 |
+| multi_gold_msgs | 95 | gold 分散多条消息 |
+| temporal_cue | 59 | 时间线索查询 |
+| q_names_absent_from_gold | 30 | 问的人不在 gold 文本 |
+| zero_lexical_overlap | 23 | 完全零词面 |
+
+328 低词面题 SF 通道全触发（triggered=True）但只 reserved 到 8 个 gold
+消息——SF 的 fact 直陈句 dense 对抽象-具体语义鸿沟几乎无效。
+
+### 9.3 E：SF v2 的 79 loss 归因
+
+- 77/79 gold 仍在 final top10 但 rerank 排后（rank 1 → 2~5），79/79 SF
+  全触发——SF 带进 pool 的消息 + fact 注解扰动 rerank listwise 判定，
+  把已正确的 Top1 排后。这是 SF 机制的固有代价（救 130 / 扰动 79）。
+
+### 9.4 top_n 假设证伪（参数收束）
+
+假设"gold fact 排在 top_n=10 之外"→ 提高 top_n 到 60 验证（conv-26）：
+**0.5850 < top10 的 0.6050**（4 wins / 8 losses）——提高 top_n 没有救回
+lowlex miss，反而让更多噪声 fact 消息进 pool 干扰 rerank。
+
+**结论：SF v2 在 top_n=10 已是局部最优；D/E 方向无免费参数空间。** 低词面
+miss 的根因是生成层 fact 直陈句与抽象查询之间的语义鸿沟（dense 无法
+跨越），改进需查询侧改写或更大 embedding 模型等新机制（成本高、收益
+不确定），本轮收束不投入。SF v2（top_n=10）保持为采纳配置。
+
+
