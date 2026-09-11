@@ -258,6 +258,20 @@ def test_manifest_freeze_and_tamper_fail_closed(workdir, monkeypatch):
     finally:
         sys.argv = argv
         e2e.AnswerClient = original_client
+    # tamper with an OFFSET (out of frozen set) -> still exit 6
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["questions"][0]["offset"] = 999999
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    e2e.AnswerClient = StubClient
+    argv = sys.argv
+    sys.argv = ["x", "--artifact-glob", GLOB, "--run-id", "t8",
+                "--out-root", str(workdir), "--max-questions", "8",
+                "--stratify", "2", "--manifest", str(manifest_path), "--resume"]
+    try:
+        assert e2e.main() == 6
+    finally:
+        sys.argv = argv
+        e2e.AnswerClient = original_client
 
 
 def test_cost_cap_stops_early(workdir, monkeypatch):

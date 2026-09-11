@@ -416,7 +416,10 @@ def main():
             manifest_selected = []
             for entry in prev_manifest.get("questions", []):
                 offset = int(entry["offset"])
-                if offset not in frozen or offset not in index:
+                # NOTE: build_question_index returns a LIST whose position IS
+                # the offset; membership tests (`offset in index`) are
+                # meaningless, so validate by bounds + exact question_id.
+                if offset not in frozen or not 0 <= offset < len(index):
                     print("ERROR: manifest offset {} not in frozen artifacts "
                           "or dataset index.".format(offset))
                     return 6
