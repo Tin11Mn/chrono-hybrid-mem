@@ -136,3 +136,21 @@ LoCoMo Dataset:      chrono-hybrid-mem/.locomo/locomo10.json (79fa87e9…8ff4)
 Evidence Evaluation: 1976 historical track (offset 758 excluded for all methods)
 E2E Evaluation:      1540 non-adversarial track (category != 5)
 ```
+
+## 7. Smoke-20 status (2026-09-12)
+
+Stratified smoke (5 per category, conv-26 prefix; offsets
+0,1,2,3,4,5,6,7,8,11,13,14,22,27,40,79,80,81,82,83) completed on the
+ChatAnywhere gateway (`results/locomo_e2e/smoke20-stratified/`):
+
+- Answer/Judge: `gpt-4o-mini` requested, **all 40 responses returned
+  `gpt-4o-mini-2024-07-18`** (20 answer + 20 judge); 0 drift, 0 parse
+  errors, 20/20 ok.
+- Judge accuracy 0.75 (15/20); f1_official 0.5297; f1_mem0 0.4599;
+  bleu1_m1 0.3587. Evidence: Hit@1 0.50, Hit@3 0.70, Hit@10 0.70,
+  MRR 0.60, pooled Evidence Recall@10 0.5556 (n=20 — smoke is a pipeline
+  check, not a metric claim).
+- Cost $0.0041 (answer $0.0028 + judge $0.0013), 18,091 answer-in /
+  129 answer-out / 7,981 judge-in / 140 judge-out tokens.
+- Fingerprints: answer `fp_369e662417` ×20; judge `fp_369e662417` ×18 +
+  `fp_acf70d9fcf` ×2 (recorded only, per protocol).
