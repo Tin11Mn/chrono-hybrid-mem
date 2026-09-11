@@ -215,6 +215,15 @@ def main() -> int:
         if row not in todo:
             # still ensure judge_prompt metadata present on already-judged rows
             continue
+        # A retried row (e.g. after a model-drift stop) must reflect only the
+        # FINAL attempt; stale error fields from the aborted attempt are
+        # cleared here. The drift event itself stays in the run log.
+        for key in ("judge_error", "judge_model_drift", "judge_parse_error",
+                    "judge_result", "judge_raw_response", "judge_input_tokens",
+                    "judge_output_tokens", "estimated_judge_cost",
+                    "judge_system_fingerprint", "judge_returned_model",
+                    "judge_latency_ms"):
+            row.pop(key, None)
         prompt = judge_prompt.format(
             question=row.get("question", ""),
             gold_answer=row.get("reference_answer", ""),
