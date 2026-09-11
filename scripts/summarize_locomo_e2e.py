@@ -81,6 +81,41 @@ def summarize_rows(rows):
         "answer_drift_errors": sum(1 for r in rows if r.get("model_drift")),
         "judge_drift_errors": sum(1 for r in rows if r.get("judge_model_drift")),
     }
+    # Retrieval x answer-generation diagnostic matrix (judged questions only).
+    # Distinguishes the retrieval bottleneck from the answer-generation
+    # bottleneck; diagnostic only, never a tuning signal.
+    judged = [r for r in ok if r.get("judge_result") in ("CORRECT", "WRONG")]
+    def _judge_correct(r):
+        return r.get("judge_result") == "CORRECT"
+    def _hit(r, k):
+        return bool(r.get("hit{}".format(k)))
+    matrix = {}
+    for name, hit in (("hit10", lambda r: _hit(r, 10)),
+                      ("miss10", lambda r: not _hit(r, 10))):
+        subset = [r for r in judged if hit(r)]
+        matrix[name] = {
+            "n": len(subset),
+            "judge_correct": sum(1 for r in subset if _judge_correct(r)),
+            "judge_wrong": sum(1 for r in subset if not _judge_correct(r)),
+        }
+    out["retrieval_answer_matrix"] = matrix
+    out["judge_accuracy_by_retrieval"] = {}
+    for k in (1, 3, 10):
+        subset = [r for r in judged if _hit(r, k)]
+        out["judge_accuracy_by_retrieval"]["hit{}".format(k)] = round(
+            sum(1 for r in subset if _judge_correct(r)) / len(subset), 4) if subset else None
+    miss10 = [r for r in judged if not _hit(r, 10)]
+    out["judge_accuracy_by_retrieval"]["miss10"] = round(
+        sum(1 for r in miss10 if _judge_correct(r)) / len(miss10), 4) if miss10 else None
+    # Notable-phenomenon counters (diagnostic; no on-the-fly fixes allowed).
+    out["phenomena"] = {
+        "retrieval_hit_but_judge_wrong": matrix["hit10"]["judge_wrong"],
+        "retrieval_miss_but_judge_correct": matrix["miss10"]["judge_correct"],
+        "f1_mem0_zero_but_judge_correct": sum(
+            1 for r in judged if _judge_correct(r) and not (r.get("f1_mem0") or 0.0)),
+        "f1_official_zero_but_judge_correct": sum(
+            1 for r in judged if _judge_correct(r) and not (r.get("f1_official") or 0.0)),
+    }
     return out
 
 

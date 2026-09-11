@@ -267,6 +267,31 @@ def upsert_row(path, row):
         append_jsonl(path, row)
 
 
+def save_raw_output(run_dir: Path, question_id: str, phase: str,
+                    payload: dict) -> None:
+    """Persist one raw model response under raw_model_outputs/."""
+    raw_dir = run_dir / "raw_model_outputs"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = question_id.replace(":", "_")
+    (raw_dir / "{}.{}.json".format(safe_id, phase)).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_checkpoint(run_dir: Path, per_q_path: Path, spent: float) -> None:
+    """Refresh checkpoint.json from the current per_question.jsonl state."""
+    rows = read_jsonl(per_q_path) if per_q_path.exists() else []
+    checkpoint = {
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "answered_ok": sum(1 for r in rows if r.get("status") == "ok"),
+        "answered_error": [r["question_id"] for r in rows
+                           if r.get("status") != "ok"],
+        "judged": sum(1 for r in rows if r.get("judge_result") in ("CORRECT", "WRONG")),
+        "spend_estimated_usd": round(spent, 6),
+        "per_question_path": str(per_q_path),
+    }
+    write_jsonl_atomic(run_dir / "checkpoint.json", [checkpoint])
+
+
 def main():
     ap = argparse.ArgumentParser(description="LoCoMo E2E QA (frozen retrieval).")
     ap.add_argument("--artifact-glob", default=str(P3_LOCOMO / "sfv2-full-*.json"))
@@ -285,6 +310,13 @@ def main():
                          "1-4 (deterministic offset order) instead of the "
                          "global first-N. Smoke-20 uses --stratify 5.")
     ap.add_argument("--question-offset", type=int, default=0)
+    ap.add_argument("--manifest", default=None,
+                    help="Path to question_manifest.json. First run freezes the "
+                         "stratified selection into this file (deterministic "
+                         "offset prefix per category, chosen before any API "
+                         "call and without looking at answers or retrieval "
+                         "outcomes); every later run verifies its SHA256 "
+                         "against run_config.json and fails closed on drift.")
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--timeout", type=float, default=120.0)
@@ -364,6 +396,72 @@ def main():
         r["question_id"] for r in read_jsonl(per_q_path)
         if r.get("status") == "ok"
     } if args.resume else set()
+
+    # Question manifest: freeze the exact selection before any API call and
+    # verify it (SHA256) on every subsequent run including resumes.
+    manifest_sha = None
+    if args.manifest:
+        manifest_path = Path(args.manifest)
+        if manifest_path.exists():
+            prev_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_sha = sha256_text(manifest_path.read_text(encoding="utf-8"))
+            if cfg_path.exists():
+                prev_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                stored_sha = prev_cfg.get("manifest_sha256")
+                if stored_sha and stored_sha != manifest_sha:
+                    print("ERROR: manifest hash changed ({} -> {}). New run-id "
+                          "required; the frozen question set must not change."
+                          .format(stored_sha[:16], manifest_sha[:16]))
+                    return 6
+            manifest_selected = []
+            for entry in prev_manifest.get("questions", []):
+                offset = int(entry["offset"])
+                if offset not in frozen or offset not in index:
+                    print("ERROR: manifest offset {} not in frozen artifacts "
+                          "or dataset index.".format(offset))
+                    return 6
+                qid = "{}:{}".format(index[offset]["sample_id"],
+                                     index[offset]["qa_index"])
+                if qid != entry["question_id"]:
+                    print("ERROR: manifest question_id mismatch at offset {} "
+                          "({} != {}).".format(offset, qid, entry["question_id"]))
+                    return 6
+                manifest_selected.append(
+                    (offset, frozen[offset], index[offset],
+                     int(index[offset]["category"])))
+            if len(manifest_selected) != len(prev_manifest["questions"]):
+                print("ERROR: manifest verification failed.")
+                return 6
+            selected = manifest_selected
+        else:
+            manifest = {
+                "run_id": run_id,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "selection_rule": (
+                    "deterministic stratified prefix: first N eligible "
+                    "questions per category 1-4 in frozen-artifact offset "
+                    "order (N={}); chosen before any API call, blind to "
+                    "answers, retrieval outcomes, and judge results".format(
+                        args.stratify)),
+                "questions": [
+                    {
+                        "offset": offset,
+                        "question_id": "{}:{}".format(
+                            meta["sample_id"], meta["qa_index"]),
+                        "conversation_id": meta["sample_id"],
+                        "category_id": cat,
+                        "category_name": CATEGORY_NAMES.get(cat),
+                    }
+                    for offset, _qd, meta, cat in selected
+                ],
+            }
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, ensure_ascii=False),
+                encoding="utf-8")
+            manifest_sha = sha256_text(manifest_path.read_text(encoding="utf-8"))
+            print("manifest frozen: {} questions -> {} (sha256 {})".format(
+                len(selected), manifest_path, manifest_sha[:16]))
     todo = [s for s in selected if "{}:{}".format(s[2]["sample_id"], s[2]["qa_index"]) not in already]
 
     print("run={} method={} profile={} artifacts={} eligible_total={} selected={} todo={}".format(
@@ -389,6 +487,8 @@ def main():
         "judge_prompt_hash": sha256_text((REPO / "prompts" / "locomo_judge_mem0.txt").read_text(encoding="utf-8")),
         "top_k_evidence": args.top_k_evidence,
         "question_subset": "category != 5 (non-adversarial)",
+        "manifest": args.manifest,
+        "manifest_sha256": manifest_sha,
         "frozen_retrieval": True,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -463,6 +563,9 @@ def main():
             row["model_drift"] = True
             row["error"] = str(exc)[:200]
             upsert_row(per_q_path, row)
+            save_raw_output(run_dir, row["question_id"], "answer",
+                            {"error": str(exc)[:500], "model_drift": True})
+            write_checkpoint(run_dir, per_q_path, spent)
             print("MODEL DRIFT: {}; checkpoint persisted at {}; stopping.".format(
                 exc, per_q_path))
             return 5
@@ -470,12 +573,28 @@ def main():
             row["status"] = "error"
             row["error"] = str(exc)[:200]
         upsert_row(per_q_path, row)
+        save_raw_output(run_dir, row["question_id"], "answer", {
+            "question_id": row["question_id"],
+            "phase": "answer",
+            "requested_model": args.answer_model,
+            "returned_model": row.get("answer_returned_model"),
+            "system_fingerprint": row.get("answer_system_fingerprint"),
+            "temperature": row.get("answer_temperature"),
+            "raw": row.get("generated_answer"),
+            "input_tokens": row.get("answer_input_tokens"),
+            "output_tokens": row.get("answer_output_tokens"),
+            "latency_ms": row.get("answer_latency_ms"),
+            "status": row.get("status"),
+            "error": row.get("error"),
+        })
+        write_checkpoint(run_dir, per_q_path, spent)
         done += 1
         if done % 10 == 0 or done == len(todo):
             print("  answered {}/{}  spent=${:.4f}".format(done, len(todo), spent))
         if spent >= args.cost_cap_usd:
             print("COST CAP REACHED (${:.4f} >= ${:.2f}); stopping.".format(spent, args.cost_cap_usd))
             break
+    write_checkpoint(run_dir, per_q_path, spent)
     print("done. answered={} spent=${:.4f}".format(done, spent))
     return 0
 

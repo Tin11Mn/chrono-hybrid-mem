@@ -219,6 +219,47 @@ def test_main_stops_on_model_drift(workdir, monkeypatch):
     assert rows[0]["status"] == "error"
 
 
+def test_manifest_freeze_and_tamper_fail_closed(workdir, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("CHATANYWHERE_API_KEY", raising=False)
+    manifest_path = workdir / "question_manifest.json"
+    # dry-run freezes the manifest without any API call
+    argv = sys.argv
+    sys.argv = ["x", "--artifact-glob", GLOB, "--run-id", "t8",
+                "--out-root", str(workdir), "--max-questions", "8",
+                "--stratify", "2", "--manifest", str(manifest_path),
+                "--dry-run"]
+    original_client = e2e.AnswerClient
+    e2e.AnswerClient = StubClient
+    try:
+        assert e2e.main() == 0
+    finally:
+        sys.argv = argv
+        e2e.AnswerClient = original_client
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert len(manifest["questions"]) == 8
+    from collections import Counter
+    cats = Counter(q["category_id"] for q in manifest["questions"])
+    assert set(cats) == {1, 2, 3, 4} and set(cats.values()) == {2}
+    qids = [q["question_id"] for q in manifest["questions"]]
+    assert len(qids) == len(set(qids))  # no duplicates
+    cfg = json.loads((workdir / "t8" / "run_config.json").read_text())
+    assert cfg["manifest_sha256"]
+    # tamper with the frozen manifest -> real runs must fail closed (exit 6)
+    manifest["questions"][0]["question_id"] = "conv-99:0"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    e2e.AnswerClient = StubClient
+    argv = sys.argv
+    sys.argv = ["x", "--artifact-glob", GLOB, "--run-id", "t8",
+                "--out-root", str(workdir), "--max-questions", "8",
+                "--stratify", "2", "--manifest", str(manifest_path), "--resume"]
+    try:
+        assert e2e.main() == 6
+    finally:
+        sys.argv = argv
+        e2e.AnswerClient = original_client
+
+
 def test_cost_cap_stops_early(workdir, monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)

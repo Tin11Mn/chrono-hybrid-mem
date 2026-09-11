@@ -32,3 +32,4 @@ htmlcov/
 Thumbs.db
 .env.*
 *.key
+results/

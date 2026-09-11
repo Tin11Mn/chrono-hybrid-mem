@@ -116,6 +116,33 @@ def write_jsonl_atomic(path: Path, rows: list[dict]) -> None:
     os.replace(tmp, path)
 
 
+def save_raw_output(run_dir: Path, question_id: str, phase: str,
+                    payload: dict) -> None:
+    """Persist one raw model response under raw_model_outputs/."""
+    raw_dir = run_dir / "raw_model_outputs"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    safe_id = question_id.replace(":", "_")
+    (raw_dir / "{}.{}.json".format(safe_id, phase)).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_checkpoint(run_dir: Path, per_q_path: Path, rows: list[dict]) -> None:
+    """Refresh checkpoint.json from the current per_question.jsonl state."""
+    checkpoint = {
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "answered_ok": sum(1 for r in rows if r.get("status") == "ok"),
+        "answered_error": [r["question_id"] for r in rows
+                           if r.get("status") != "ok"],
+        "judged": sum(1 for r in rows
+                      if r.get("judge_result") in ("CORRECT", "WRONG")),
+        "spend_estimated_usd": round(sum(
+            (r.get("estimated_answer_cost") or 0.0)
+            + (r.get("estimated_judge_cost") or 0.0) for r in rows), 6),
+        "per_question_path": str(per_q_path),
+    }
+    write_jsonl_atomic(run_dir / "checkpoint.json", [checkpoint])
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Binary judge for LoCoMo answers.")
     ap.add_argument("--run-dir", required=True)
@@ -223,16 +250,35 @@ def main() -> int:
             row["judge_error"] = str(exc)[:200]
             row["judge_model_drift"] = True
             write_jsonl_atomic(per_q_path, rows)
+            save_raw_output(run_dir, row["question_id"], "judge",
+                            {"error": str(exc)[:500], "model_drift": True})
+            write_checkpoint(run_dir, per_q_path, rows)
             print("MODEL DRIFT: {}; checkpoint persisted at {}; stopping.".format(
                 exc, per_q_path))
             return 5
         except Exception as exc:  # record, keep going; resumable
             row["judge_error"] = str(exc)[:200]
+        save_raw_output(run_dir, row["question_id"], "judge", {
+            "question_id": row["question_id"],
+            "phase": "judge",
+            "requested_model": args.judge_model,
+            "returned_model": row.get("judge_returned_model"),
+            "system_fingerprint": row.get("judge_system_fingerprint"),
+            "temperature": row.get("judge_temperature"),
+            "raw": row.get("judge_raw_response"),
+            "parsed_label": row.get("judge_result"),
+            "input_tokens": row.get("judge_input_tokens"),
+            "output_tokens": row.get("judge_output_tokens"),
+            "latency_ms": row.get("judge_latency_ms"),
+            "judge_error": row.get("judge_error"),
+        })
         done += 1
         if done % 25 == 0 or done == len(todo):
             write_jsonl_atomic(per_q_path, rows)
+            write_checkpoint(run_dir, per_q_path, rows)
             print("  judged {}/{}".format(done, len(todo)))
     write_jsonl_atomic(per_q_path, rows)
+    write_checkpoint(run_dir, per_q_path, rows)
     judged = sum(1 for r in rows if r.get("judge_result") == "CORRECT")
     total = sum(1 for r in rows if r.get("judge_result") in {"CORRECT", "WRONG"})
     print("done. judged_total={} correct={} acc={}".format(
