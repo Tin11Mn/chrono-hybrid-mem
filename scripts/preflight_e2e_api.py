@@ -51,9 +51,6 @@ def main() -> int:
             question="Where does Alice work?",
             gold_answer="Microsoft",
             generated_answer="Alice works at Microsoft."))
-    except jd.ModelDriftError as exc:
-        print("JUDGE PREFLIGHT FAIL (model drift): {}".format(exc))
-        return 1
     except Exception as exc:
         print("JUDGE PREFLIGHT FAIL: {}".format(exc))
         return 1
@@ -64,7 +61,9 @@ def main() -> int:
 
     usage_ok = out["input_tokens"] > 0 and jout["input_tokens"] > 0
     label_ok = label in ("CORRECT", "WRONG")
-    passed = usage_ok and label_ok  # model ids already enforced by the clients
+    identity_ok = (out.get("valid_model_identity") is True
+                   and jout.get("valid_model_identity") is True)
+    passed = usage_ok and label_ok and identity_ok
     print("preflight: {}".format("PASS" if passed else "FAIL"))
     return 0 if passed else 1
 

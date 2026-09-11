@@ -67,6 +67,17 @@ def summarize_rows(rows):
     gold = sum(r.get("n_gold", 0) or 0 for r in ok)
     out["evidence_recall_at_10"] = (hits / gold) if gold else None
     out["n_gold_total"] = gold
+    def _judge_attempts_of(r):
+        """Normalized attempt records; legacy rows count as one accepted."""
+        if r.get("judge_attempts"):
+            return r["judge_attempts"]
+        if r.get("judge_returned_model"):
+            return [{"attempt": 1, "requested_model": r.get("judge_model_requested"),
+                     "returned_model": r.get("judge_returned_model"),
+                     "system_fingerprint": r.get("judge_system_fingerprint"),
+                     "valid_model_identity": True, "status": "accepted"}]
+        return []
+
     # gateway model verification: returned-model and system-fingerprint
     # distributions (fingerprints may vary freely; only recorded, never failed).
     out["model_verification"] = {
@@ -79,7 +90,38 @@ def summarize_rows(rows):
         "judge_system_fingerprints": dict(_count(r.get("judge_system_fingerprint") for r in ok
                                                  if r.get("judge_system_fingerprint"))),
         "answer_drift_errors": sum(1 for r in rows if r.get("model_drift")),
-        "judge_drift_errors": sum(1 for r in rows if r.get("judge_model_drift")),
+        "judge_drift_errors": len([
+            a for r in rows for a in _judge_attempts_of(r)
+            if a.get("status") == "model_drift"]),
+    }
+
+    # Model routing reliability across ALL judge attempts (fixed-100 protocol:
+    # formal metrics require the accepted returned-model distribution to be
+    # 100% gpt-4o-mini-2024-07-18).
+    attempts = [a for r in rows for a in _judge_attempts_of(r)]
+    acc = [a for a in attempts if a.get("status") == "accepted"]
+    drift = [a for a in attempts if a.get("status") == "model_drift"]
+    transport = [a for a in attempts if a.get("status") == "transport_error"]
+    per_q_attempts = [len(_judge_attempts_of(r)) for r in rows
+                      if r.get("judge_returned_model") or r.get("judge_attempts")]
+    out["model_routing_reliability"] = {
+        "total_judge_attempts": len(attempts),
+        "valid_judge_responses": len(acc),
+        "model_drift_attempts": len(drift),
+        "transport_error_attempts": len(transport),
+        "drift_rate_per_attempt": (round(len(drift) / len(attempts), 4)
+                                   if attempts else None),
+        "returned_model_distribution_all_attempts": dict(
+            _count(a.get("returned_model") for a in attempts)),
+        "accepted_returned_model_distribution": dict(
+            _count(a.get("returned_model") for a in acc)),
+        "system_fingerprint_distribution_all_attempts": dict(
+            _count(a.get("system_fingerprint") for a in attempts)),
+        "questions_requiring_retry": sum(1 for n in per_q_attempts if n > 1),
+        "max_attempts_for_any_question": max(per_q_attempts, default=0),
+        "accepted_purity_ok": (
+            all(a.get("returned_model") == "gpt-4o-mini-2024-07-18"
+                for a in acc) if acc else False),
     }
     # Retrieval x answer-generation diagnostic matrix (judged questions only).
     # Distinguishes the retrieval bottleneck from the answer-generation

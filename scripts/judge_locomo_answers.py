@@ -33,6 +33,10 @@ DEFAULT_BASE_URL = "https://api.chatanywhere.tech/v1"
 API_KEY_ENV = "CHATANYWHERE_API_KEY"
 REQUESTED_MODEL = "gpt-4o-mini"
 EXPECTED_RETURNED_MODEL = "gpt-4o-mini-2024-07-18"
+# Identity-validated retry budget per question (frozen 2026-09-12): a judge
+# response is accepted only when returned_model == EXPECTED_RETURNED_MODEL;
+# after 3 failed attempts for one question the whole run stops (NO-GO signal).
+MAX_JUDGE_ATTEMPTS = 3
 
 
 class ModelDriftError(RuntimeError):
@@ -86,15 +90,18 @@ class JudgeClient:
         )
         latency = (time.time() - t0) * 1000
         returned_model = getattr(resp, "model", None)
-        if returned_model != EXPECTED_RETURNED_MODEL:
-            raise ModelDriftError(
-                "judge model drift: requested {} but gateway returned {}".format(
-                    self.model, returned_model))
+        # Identity gate: the response is VALID only when the gateway returned
+        # the frozen snapshot id. Invalid responses are reported via
+        # valid_model_identity/status; the caller owns the per-question retry
+        # policy and must never score them.
+        valid = returned_model == EXPECTED_RETURNED_MODEL
         choice = resp.choices[0].message.content or ""
         usage = getattr(resp, "usage", None)
         return {
             "raw": choice,
             "model_returned": returned_model,
+            "valid_model_identity": valid,
+            "status": "accepted" if valid else "model_drift",
             "system_fingerprint": getattr(resp, "system_fingerprint", None),
             "latency_ms": latency,
             "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
@@ -216,8 +223,9 @@ def main() -> int:
             # still ensure judge_prompt metadata present on already-judged rows
             continue
         # A retried row (e.g. after a model-drift stop) must reflect only the
-        # FINAL attempt; stale error fields from the aborted attempt are
-        # cleared here. The drift event itself stays in the run log.
+        # FINAL accepted attempt; stale fields from aborted attempts are
+        # cleared here. The drift history itself is preserved below in
+        # judge_attempts and in the run log.
         for key in ("judge_error", "judge_model_drift", "judge_parse_error",
                     "judge_result", "judge_raw_response", "judge_input_tokens",
                     "judge_output_tokens", "estimated_judge_cost",
@@ -229,44 +237,84 @@ def main() -> int:
             gold_answer=row.get("reference_answer", ""),
             generated_answer=row.get("generated_answer", ""),
         )
-        try:
-            out = client.judge(prompt)
-            label = parse_label(out["raw"])
-            judge_cost = (out["input_tokens"] * args.price_in_per_1m
-                          + out["output_tokens"] * args.price_out_per_1m) / 1e6
-            answer_spent += judge_cost
-            row["judge_result"] = label
-            row["judge_raw_response"] = out["raw"]
-            row["judge_model"] = args.judge_model
-            row["judge_model_requested"] = args.judge_model
-            row["judge_model_returned"] = out["model_returned"]
-            row["judge_returned_model"] = out["model_returned"]
-            row["judge_gateway"] = GATEWAY
-            row["judge_api_base_url"] = base_url
-            row["judge_temperature"] = 0.0
-            row["judge_system_fingerprint"] = out.get("system_fingerprint")
-            row["judge_prompt_version"] = "mem0.v1"
-            row["judge_prompt_hash"] = judge_prompt_hash
-            row["judge_latency_ms"] = round(out["latency_ms"], 1)
-            row["judge_input_tokens"] = out["input_tokens"]
-            row["judge_output_tokens"] = out["output_tokens"]
-            row["estimated_judge_cost"] = round(judge_cost, 6)
-            row["cumulative_cost"] = round(answer_spent, 6)
-            if label is None:
-                row["judge_parse_error"] = True
-        except ModelDriftError as exc:
-            # Fail closed: persist what is known, start no further judge calls.
-            row["judge_error"] = str(exc)[:200]
-            row["judge_model_drift"] = True
+        # Identity-validated retry: identical inputs every attempt; the ONLY
+        # retry triggers are returned-model identity mismatch or a transport
+        # failure, never the judge content. Max 3 attempts, then STOP.
+        attempts = []
+        accepted = None
+        for attempt_no in range(1, MAX_JUDGE_ATTEMPTS + 1):
+            try:
+                out = client.judge(prompt)
+            except Exception as exc:
+                attempts.append({
+                    "attempt": attempt_no,
+                    "requested_model": args.judge_model,
+                    "returned_model": None,
+                    "system_fingerprint": None,
+                    "valid_model_identity": False,
+                    "status": "transport_error",
+                    "error": str(exc)[:200],
+                })
+                continue
+            attempts.append({
+                "attempt": attempt_no,
+                "requested_model": args.judge_model,
+                "returned_model": out.get("model_returned"),
+                "system_fingerprint": out.get("system_fingerprint"),
+                "valid_model_identity": bool(out.get("valid_model_identity")),
+                "status": out.get("status"),
+                "input_tokens": out.get("input_tokens", 0),
+                "output_tokens": out.get("output_tokens", 0),
+            })
+            answer_spent += (out.get("input_tokens", 0) * args.price_in_per_1m
+                             + out.get("output_tokens", 0) * args.price_out_per_1m) / 1e6
+            if out.get("valid_model_identity") is True:
+                accepted = out
+                break
+        row["judge_attempts"] = attempts
+        drift_cost = sum(
+            (a.get("input_tokens") or 0) * args.price_in_per_1m
+            + (a.get("output_tokens") or 0) * args.price_out_per_1m
+            for a in attempts if a.get("status") != "accepted") / 1e6
+        if drift_cost:
+            row["judge_drift_cost"] = round(drift_cost, 6)
+        if accepted is None:
+            # 3 attempts without a single valid snapshot -> NO-GO signal.
+            row["judge_error"] = (
+                "no {} response after {} attempts ({})".format(
+                    EXPECTED_RETURNED_MODEL, len(attempts),
+                    ",".join(a["status"] for a in attempts)))
             write_jsonl_atomic(per_q_path, rows)
-            save_raw_output(run_dir, row["question_id"], "judge",
-                            {"error": str(exc)[:500], "model_drift": True})
             write_checkpoint(run_dir, per_q_path, rows)
-            print("MODEL DRIFT: {}; checkpoint persisted at {}; stopping.".format(
-                exc, per_q_path))
-            return 5
-        except Exception as exc:  # record, keep going; resumable
-            row["judge_error"] = str(exc)[:200]
+            print("JUDGE GIVE-UP: {} after {} attempts ({}); checkpoint "
+                  "persisted; STOPPING WHOLE RUN.".format(
+                      row["question_id"], len(attempts),
+                      ",".join(a["status"] for a in attempts)))
+            return 7
+        # Only the accepted attempt feeds any field used by metrics; drifted
+        # response content is never persisted to the row.
+        label = parse_label(accepted["raw"])
+        judge_cost = (accepted["input_tokens"] * args.price_in_per_1m
+                      + accepted["output_tokens"] * args.price_out_per_1m) / 1e6
+        row["judge_result"] = label
+        row["judge_raw_response"] = accepted["raw"]
+        row["judge_model"] = args.judge_model
+        row["judge_model_requested"] = args.judge_model
+        row["judge_model_returned"] = accepted["model_returned"]
+        row["judge_returned_model"] = accepted["model_returned"]
+        row["judge_gateway"] = GATEWAY
+        row["judge_api_base_url"] = base_url
+        row["judge_temperature"] = 0.0
+        row["judge_system_fingerprint"] = accepted.get("system_fingerprint")
+        row["judge_prompt_version"] = "mem0.v1"
+        row["judge_prompt_hash"] = judge_prompt_hash
+        row["judge_latency_ms"] = round(accepted["latency_ms"], 1)
+        row["judge_input_tokens"] = accepted["input_tokens"]
+        row["judge_output_tokens"] = accepted["output_tokens"]
+        row["estimated_judge_cost"] = round(judge_cost, 6)
+        row["cumulative_cost"] = round(answer_spent, 6)
+        if label is None:
+            row["judge_parse_error"] = True
         save_raw_output(run_dir, row["question_id"], "judge", {
             "question_id": row["question_id"],
             "phase": "judge",
@@ -280,6 +328,7 @@ def main() -> int:
             "output_tokens": row.get("judge_output_tokens"),
             "latency_ms": row.get("judge_latency_ms"),
             "judge_error": row.get("judge_error"),
+            "judge_attempts": attempts,
         })
         done += 1
         if done % 25 == 0 or done == len(todo):

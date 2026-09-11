@@ -21,6 +21,7 @@ HERE = Path(__file__).resolve()
 REPO = HERE.parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 import evaluate_locomo_e2e as e2e  # noqa: E402
+import judge_locomo_answers as jd  # noqa: E402
 import summarize_locomo_e2e as summ  # noqa: E402
 
 # Captured before any test stubs e2e.AnswerClient.
@@ -272,6 +273,88 @@ def test_manifest_freeze_and_tamper_fail_closed(workdir, monkeypatch):
     finally:
         sys.argv = argv
         e2e.AnswerClient = original_client
+
+
+class FlakyJudgeStub:
+    """JudgeClient stand-in: drifts the first two calls, then accepts."""
+
+    def __init__(self, base_url, model, timeout):
+        self.calls = 0
+
+    def judge(self, prompt):
+        self.calls += 1
+        if self.calls <= 2:
+            return {"raw": '{"label":"WRONG"}', "model_returned": "gpt-4.1-mini-2025-04-14",
+                    "valid_model_identity": False, "status": "model_drift",
+                    "system_fingerprint": "fp_drift", "latency_ms": 1.0,
+                    "input_tokens": 10, "output_tokens": 2}
+        return {"raw": '{"label":"CORRECT"}',
+                "model_returned": "gpt-4o-mini-2024-07-18",
+                "valid_model_identity": True, "status": "accepted",
+                "system_fingerprint": "fp_ok", "latency_ms": 1.0,
+                "input_tokens": 10, "output_tokens": 2}
+
+
+class AlwaysDriftJudgeStub:
+    """JudgeClient stand-in that never returns a valid snapshot."""
+
+    def __init__(self, base_url, model, timeout):
+        pass
+
+    def judge(self, prompt):
+        return {"raw": '{"label":"CORRECT"}', "model_returned": "gpt-4.1-mini-2025-04-14",
+                "valid_model_identity": False, "status": "model_drift",
+                "system_fingerprint": "fp_drift", "latency_ms": 1.0,
+                "input_tokens": 10, "output_tokens": 2}
+
+
+def test_judge_retries_drift_then_accepts(workdir, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("CHATANYWHERE_API_KEY", raising=False)
+    rc, run_dir = _run(workdir, "t9", max_q=1)
+    assert rc == 0
+    argv = sys.argv
+    sys.argv = ["x", "--run-dir", str(run_dir)]
+    original = jd.JudgeClient
+    jd.JudgeClient = FlakyJudgeStub
+    try:
+        rc2 = jd.main()
+    finally:
+        sys.argv = argv
+        jd.JudgeClient = original
+    assert rc2 == 0
+    rows = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+        encoding="utf-8").splitlines() if l.strip()]
+    row = rows[0]
+    assert row["judge_result"] == "CORRECT"
+    assert row["judge_returned_model"] == "gpt-4o-mini-2024-07-18"
+    attempts = row["judge_attempts"]
+    assert [a["status"] for a in attempts] == ["model_drift", "model_drift", "accepted"]
+    # drifted attempt content must not appear anywhere in the row
+    assert all("raw" not in a for a in attempts)
+
+
+def test_judge_gives_up_after_three_drifts(workdir, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("CHATANYWHERE_API_KEY", raising=False)
+    rc, run_dir = _run(workdir, "t10", max_q=1)
+    assert rc == 0
+    argv = sys.argv
+    sys.argv = ["x", "--run-dir", str(run_dir)]
+    original = jd.JudgeClient
+    jd.JudgeClient = AlwaysDriftJudgeStub
+    try:
+        rc2 = jd.main()
+    finally:
+        sys.argv = argv
+        jd.JudgeClient = original
+    assert rc2 == 7  # whole-run stop after 3 invalid attempts
+    rows = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+        encoding="utf-8").splitlines() if l.strip()]
+    row = rows[0]
+    assert len(row["judge_attempts"]) == 3
+    assert row.get("judge_result") is None  # never scored
+    assert "no gpt-4o-mini-2024-07-18 response" in row["judge_error"]
 
 
 def test_cost_cap_stops_early(workdir, monkeypatch):
