@@ -219,6 +219,35 @@ def append_jsonl(path, row):
         os.fsync(fh.fileno())
 
 
+def write_jsonl_atomic(path, rows):
+    tmp = Path(str(path) + ".tmp")
+    tmp.write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n",
+        encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def upsert_row(path, row):
+    """Append a new question row, or atomically replace a prior failed row.
+
+    Resume retries previously failed questions; the retry result must replace
+    the old error row so the JSONL never carries two rows for one question.
+    """
+    replaced = False
+    if path.exists():
+        rows = read_jsonl(path)
+        for index, existing in enumerate(rows):
+            if (existing.get("question_id") == row["question_id"]
+                    and existing.get("status") != "ok"):
+                rows[index] = row
+                replaced = True
+                break
+        if replaced:
+            write_jsonl_atomic(path, rows)
+    if not replaced:
+        append_jsonl(path, row)
+
+
 def main():
     ap = argparse.ArgumentParser(description="LoCoMo E2E QA (frozen retrieval).")
     ap.add_argument("--artifact-glob", default=str(P3_LOCOMO / "sfv2-full-*.json"))
@@ -232,6 +261,10 @@ def main():
     ap.add_argument("--out-root", default=str(REPO / "results" / "locomo_e2e"))
     ap.add_argument("--top-k-evidence", type=int, default=10)
     ap.add_argument("--max-questions", type=int, default=None)
+    ap.add_argument("--stratify", type=int, default=None,
+                    help="Take the first N eligible questions of EACH category "
+                         "1-4 (deterministic offset order) instead of the "
+                         "global first-N. Smoke-20 uses --stratify 5.")
     ap.add_argument("--question-offset", type=int, default=0)
     ap.add_argument("--resume", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
@@ -273,7 +306,13 @@ def main():
     frozen = load_frozen_diags(args.artifact_glob)
 
     # Select eligible questions: cat != 5, offset >= question_offset, capped.
+    # --stratify N picks the first N of each category 1-4 in offset order so a
+    # smoke run covers all four classes regardless of their global frequency.
     selected = []
+    stratified_remaining = (
+        {cat: args.stratify for cat in (1, 2, 3, 4)}
+        if args.stratify is not None else None
+    )
     for offset in sorted(frozen):
         if offset < args.question_offset:
             continue
@@ -286,11 +325,20 @@ def main():
             cat_int = None
         if cat_int == 5:
             continue
+        if stratified_remaining is not None:
+            if cat_int not in stratified_remaining:
+                continue
+            if stratified_remaining[cat_int] <= 0:
+                continue
+            stratified_remaining[cat_int] -= 1
         selected.append((offset, qd, meta, cat_int))
         if args.max_questions is not None and len(selected) >= args.max_questions:
             break
 
-    already = {r["question_id"] for r in read_jsonl(per_q_path)} if args.resume else set()
+    already = {
+        r["question_id"] for r in read_jsonl(per_q_path)
+        if r.get("status") == "ok"
+    } if args.resume else set()
     todo = [s for s in selected if "{}:{}".format(s[2]["sample_id"], s[2]["qa_index"]) not in already]
 
     print("run={} method={} profile={} artifacts={} eligible_total={} selected={} todo={}".format(
@@ -354,7 +402,8 @@ def main():
             "retrieved_evidence": [
                 {"mem_id": rid, "timestamp": smap["mem2ts"].get(rid),
                  "content": smap["mem2content"].get(rid)} for rid in result_ids],
-            "answer_model": args.answer_model, "answer_prompt_version": "mem0.v1",
+            "answer_model": args.answer_model, "answer_model_requested": args.answer_model,
+            "answer_prompt_version": "mem0.v1",
             "answer_prompt_hash": answer_prompt_hash, "answer_temperature": 0.0,
             "top_k_evidence": args.top_k_evidence,
             "hit1": em["hit_at_1"], "hit3": em["hit_at_3"], "hit10": em["hit_at_10"],
@@ -371,13 +420,16 @@ def main():
             row["answer_latency_ms"] = round(out["latency_ms"], 1)
             row["answer_input_tokens"] = out["input_tokens"]
             row["answer_output_tokens"] = out["output_tokens"]
-            spent += (out["input_tokens"] * args.price_in_per_1m
-                      + out["output_tokens"] * args.price_out_per_1m) / 1e6
+            row_cost = (out["input_tokens"] * args.price_in_per_1m
+                        + out["output_tokens"] * args.price_out_per_1m) / 1e6
+            row["estimated_answer_cost"] = round(row_cost, 6)
+            spent += row_cost
+            row["cumulative_cost"] = round(spent, 6)
             row.update(sc.score_answer(out["text"], reference, cat))
         except Exception as exc:
             row["status"] = "error"
             row["error"] = str(exc)[:200]
-        append_jsonl(per_q_path, row)
+        upsert_row(per_q_path, row)
         done += 1
         if done % 10 == 0 or done == len(todo):
             print("  answered {}/{}  spent=${:.4f}".format(done, len(todo), spent))

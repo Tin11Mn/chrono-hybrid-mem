@@ -23,7 +23,7 @@ sys.path.insert(0, str(REPO / "scripts"))
 import evaluate_locomo_e2e as e2e  # noqa: E402
 import summarize_locomo_e2e as summ  # noqa: E402
 
-DATASET = REPO / ".locomo" / "locomo10.json"
+DATASET = (REPO.parent / "chrono-hybrid-mem" / ".locomo" / "locomo10.json")
 P3 = REPO.parent / "chrono-hybrid-mem-p3" / ".locomo"
 GLOB = str(P3 / "sfv2-full-*.json")
 
@@ -52,7 +52,7 @@ def workdir():
         yield Path(d)
 
 
-def _run(tmp_path, run_id="t1", max_q=5, resume=False):
+def _run(tmp_path, run_id="t1", max_q=5, resume=False, client=None):
     argv = sys.argv
     sys.argv = [
         "x", "--artifact-glob", GLOB, "--run-id", run_id,
@@ -60,7 +60,7 @@ def _run(tmp_path, run_id="t1", max_q=5, resume=False):
         "--answer-prompt", "locomo_answer_mem0.txt",
     ] + (["--resume"] if resume else [])
     # monkeypatch the client + skip the paid-endpoint guard
-    e2e.AnswerClient = StubClient
+    e2e.AnswerClient = client or StubClient
     import os
     os.environ.pop("OPENAI_API_KEY", None)
     e2e.os.environ["OPENAI_BASE_URL"] = "http://127.0.0.1:9/v1"  # non-paid sentinel
@@ -119,6 +119,64 @@ def test_config_digest_fail_closed(workdir, monkeypatch):
     (run_dir / "run_config.json").write_text(json.dumps(cfg))
     rc2, _ = _run(workdir, "t3", max_q=2, resume=True)
     assert rc2 == 3  # fail closed
+
+
+class FailOnceStub(StubClient):
+    """Fails the FIRST answer call, succeeds afterwards (retry simulation)."""
+
+    def __init__(self, base_url, model, timeout):
+        super().__init__(base_url, model, timeout)
+        self.failed = False
+
+    def answer(self, prompt):
+        if not self.failed:
+            self.failed = True
+            raise RuntimeError("stub transient failure")
+        return super().answer(prompt)
+
+
+def test_resume_retries_failed_questions(workdir, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    e2e.AnswerClient = FailOnceStub
+    rc1, run_dir = _run(workdir, "t5", max_q=3, client=FailOnceStub)
+    assert rc1 == 0
+    rows1 = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+        encoding="utf-8").splitlines() if l.strip()]
+    failed = [r for r in rows1 if r["status"] == "error"]
+    assert len(failed) == 1
+    # resume must retry the failed question and REPLACE its error row
+    rc2, _ = _run(workdir, "t5", max_q=3, resume=True)
+    assert rc2 == 0
+    rows2 = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+        encoding="utf-8").splitlines() if l.strip()]
+    ids = [r["question_id"] for r in rows2]
+    assert len(ids) == len(set(ids))  # no duplicate rows for any question
+    retried = [r for r in rows2 if r["question_id"] == failed[0]["question_id"]]
+    assert len(retried) == 1 and retried[0]["status"] == "ok"
+
+
+def test_cost_cap_stops_early(workdir, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    # each stub call costs (10*0.15 + 2*0.60)/1e6 = $0.0000027; a $0.000001 cap
+    # must stop after the first paid call
+    rc2 = None
+    argv = sys.argv
+    sys.argv = ["x", "--artifact-glob", GLOB, "--run-id", "t6cap",
+                "--out-root", str(workdir), "--max-questions", "8",
+                "--cost-cap-usd", "0.000001"]
+    e2e.AnswerClient = StubClient
+    try:
+        rc2 = e2e.main()
+    finally:
+        sys.argv = argv
+    assert rc2 == 0
+    rows = [json.loads(l) for l in (workdir / "t6cap" / "per_question.jsonl")
+            .read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(rows) == 1  # cap reached after the first paid call
+    assert rows[0]["estimated_answer_cost"] > 0
+    assert rows[0]["cumulative_cost"] >= rows[0]["estimated_answer_cost"]
 
 
 def test_summarizer_outputs(workdir, monkeypatch):

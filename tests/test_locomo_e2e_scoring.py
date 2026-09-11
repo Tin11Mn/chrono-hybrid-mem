@@ -34,9 +34,16 @@ def _load_official():
         sys.modules.setdefault(m, types.ModuleType(m))
     sys.modules["rouge"].Rouge = lambda: None
     sys.modules["bert_score"].score = lambda *a, **k: None
-    sys.path.insert(0, str(off))
-    import evaluation  # noqa: E402
-    return evaluation
+    # Import under a unique module name: a plain `import evaluation` would
+    # collide with the repo's `evaluation` namespace package if another test
+    # module (e.g. test_graph_paired_evaluation) already cached it.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "locomo_official_evaluation", str(off / "evaluation.py"))
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 @pytest.mark.skipif(

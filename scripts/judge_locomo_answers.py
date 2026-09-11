@@ -104,6 +104,8 @@ def main() -> int:
     ap.add_argument("--judge-base-url", default=None,
                     help="[OI]-compatible endpoint; default uses OPENAI_BASE_URL/api.openai.com")
     ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--price-in-per-1m", type=float, default=0.15)
+    ap.add_argument("--price-out-per-1m", type=float, default=0.60)
     ap.add_argument("--max-questions", type=int, default=None)
     ap.add_argument("--dry-run", action="store_true",
                     help="Print how many would be judged; no API calls.")
@@ -157,6 +159,10 @@ def main() -> int:
 
     client = JudgeClient(base_url, args.judge_model, args.timeout)
     done = 0
+    answer_spent = sum(
+        r.get("estimated_answer_cost", 0.0) or 0.0
+        for r in rows if r.get("status") == "ok"
+    )
     for row in rows:
         if row not in todo:
             # still ensure judge_prompt metadata present on already-judged rows
@@ -169,15 +175,21 @@ def main() -> int:
         try:
             out = client.judge(prompt)
             label = parse_label(out["raw"])
+            judge_cost = (out["input_tokens"] * args.price_in_per_1m
+                          + out["output_tokens"] * args.price_out_per_1m) / 1e6
+            answer_spent += judge_cost
             row["judge_result"] = label
             row["judge_raw_response"] = out["raw"]
             row["judge_model"] = args.judge_model
+            row["judge_model_requested"] = args.judge_model
             row["judge_model_returned"] = out["model_returned"]
             row["judge_prompt_version"] = "mem0.v1"
             row["judge_prompt_hash"] = judge_prompt_hash
             row["judge_latency_ms"] = round(out["latency_ms"], 1)
             row["judge_input_tokens"] = out["input_tokens"]
             row["judge_output_tokens"] = out["output_tokens"]
+            row["estimated_judge_cost"] = round(judge_cost, 6)
+            row["cumulative_cost"] = round(answer_spent, 6)
             if label is None:
                 row["judge_parse_error"] = True
         except Exception as exc:  # record, keep going; resumable
