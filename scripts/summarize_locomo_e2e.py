@@ -1,0 +1,205 @@
+"""Summarize LoCoMo E2E runs: per-category metrics, pooled evidence recall,
+paired bootstrap, and the 1539-question sensitivity.
+
+Reads one or two run dirs (per_question.jsonl) and emits metric_summary.json,
+category_summary.json, and paired_bootstrap.json. All denominators are stated
+explicitly. Bootstrap uses paired resampling (10000 draws, seed 20260826) and
+reports Pr(delta>0) as a "bootstrap probability", never a p-value.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import random
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+HERE = Path(__file__).resolve()
+REPO = HERE.parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+import score_locomo_answers as sc  # noqa: E402
+
+BOOT_SEED = 20260826
+BOOT_DRAWS = 10000
+METRICS = ["f1_official", "f1_mem0", "f1_memoryart", "f1_memoryos",
+           "bleu1_m1", "bleu1_m4", "hit1", "hit3", "hit10", "mrr"]
+CATEGORY_NAMES = {1: "multi_hop", 2: "temporal", 3: "open_domain", 4: "single_hop"}
+
+
+def read_jsonl(path):
+    if not path.exists():
+        return []
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def mean(xs):
+    xs = [x for x in xs if x is not None]
+    return sum(xs) / len(xs) if xs else 0.0
+
+
+def summarize_rows(rows):
+    """Aggregate over the full subset. Denominators stated."""
+    n = len(rows)
+    ok = [r for r in rows if r.get("status") == "ok"]
+    out = {
+        "n_total": n, "n_ok": len(ok),
+        "n_failed": n - len(ok),
+        "status_counts": dict(_count(r.get("status") for r in rows)),
+        "judge": {
+            "n": sum(1 for r in ok if r.get("judge_result") in ("CORRECT", "WRONG")),
+            "correct": sum(1 for r in ok if r.get("judge_result") == "CORRECT"),
+        },
+        "cost_usd": round(sum(_row_cost(r) for r in rows), 6),
+        "tokens": {
+            "answer_input": sum(r.get("answer_input_tokens", 0) or 0 for r in rows),
+            "answer_output": sum(r.get("answer_output_tokens", 0) or 0 for r in rows),
+            "judge_input": sum(r.get("judge_input_tokens", 0) or 0 for r in rows),
+            "judge_output": sum(r.get("judge_output_tokens", 0) or 0 for r in rows),
+        },
+    }
+    j = out["judge"]
+    j["accuracy"] = (j["correct"] / j["n"]) if j["n"] else None
+    for m in METRICS:
+        out[m] = mean([r.get(m) for r in ok])
+    # pooled evidence recall
+    hits = sum(r.get("evidence_hits_at_10", 0) or 0 for r in ok)
+    gold = sum(r.get("n_gold", 0) or 0 for r in ok)
+    out["evidence_recall_at_10"] = (hits / gold) if gold else None
+    out["n_gold_total"] = gold
+    return out
+
+
+def _row_cost(r):
+    ai = r.get("answer_input_tokens", 0) or 0
+    ao = r.get("answer_output_tokens", 0) or 0
+    ji = r.get("judge_input_tokens", 0) or 0
+    jo = r.get("judge_output_tokens", 0) or 0
+    return (ai * 0.15 + ao * 0.60 + ji * 0.15 + jo * 0.60) / 1e6
+
+
+def _count(xs):
+    d = defaultdict(int)
+    for x in xs:
+        d[x] += 1
+    return d
+
+
+def paired_bootstrap(rows_a, rows_b, seed=BOOT_SEED, draws=BOOT_DRAWS):
+    """Paired bootstrap over question-aligned metric deltas (A - B).
+
+    Aligns on question_id; missing questions in either run count as 0 for the
+    metric (failure kept in the denominator), per protocol. Returns for each
+    metric: mean delta, 95% CI, and Pr(delta>0) as a bootstrap probability.
+    """
+    by_b = {r["question_id"]: r for r in rows_b}
+    rng = random.Random(seed)
+    results = {}
+    # build aligned metric vectors
+    aligned = [r for r in rows_a if r.get("status") == "ok"]
+    n = len(aligned)
+    if n == 0:
+        return {"n": 0}
+    for m in METRICS:
+        vec_a = [r.get(m, 0.0) or 0.0 for r in aligned]
+        vec_b = [(by_b.get(r["question_id"], {}).get(m, 0.0) or 0.0) for r in aligned]
+        deltas = [a - b for a, b in zip(vec_a, vec_b)]
+        mean_delta = sum(deltas) / n
+        boot = []
+        for _ in range(draws):
+            s = 0.0
+            for _ in range(n):
+                s += deltas[rng.randrange(n)]
+            boot.append(s / n)
+        boot.sort()
+        lo = boot[int(0.025 * draws)]
+        hi = boot[int(0.975 * draws)]
+        p_gt0 = sum(1 for x in boot if x > 0) / draws
+        wins = sum(1 for d in deltas if d > 0)
+        losses = sum(1 for d in deltas if d < 0)
+        results[m] = {
+            "mean_delta": round(mean_delta, 6),
+            "ci95": [round(lo, 6), round(hi, 6)],
+            "bootstrap_probability_gt0": round(p_gt0, 4),
+            "wins": wins, "losses": losses,
+        }
+    return {"n": n, "seed": seed, "draws": draws, "note":
+            "bootstrap_probability_gt0 is NOT a p-value", "metrics": results}
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Summarize LoCoMo E2E runs.")
+    ap.add_argument("--run-dir", required=True)
+    ap.add_argument("--baseline-dir", default=None,
+                    help="Optional second run dir for paired bootstrap")
+    ap.add_argument("--full-n", type=int, default=1540,
+                    help="Full non-adversarial question count for the sensitivity")
+    args = ap.parse_args()
+
+    run_dir = Path(args.run_dir)
+    rows = read_jsonl(run_dir / "per_question.jsonl")
+    ok = [r for r in rows if r.get("status") == "ok"]
+
+    summary = summarize_rows(rows)
+    # 1539-style sensitivity: judge/metrics over ok questions (already done) AND
+    # a conservative sensitivity treating every missing-of-full-set as failed.
+    missing = max(0, args.full_n - len(ok))
+    summary["sensitivity_full_set"] = {
+        "full_n": args.full_n,
+        "evaluated_ok": len(ok),
+        "missing_or_failed": missing + summary["n_failed"],
+        "note": "missing/failed counted as wrong; conservative lower bound",
+    }
+    j = summary["judge"]
+    if j["n"]:
+        denom = args.full_n
+        summary["sensitivity_full_set"]["judge_accuracy"] = round(j["correct"] / denom, 4)
+
+    # per-category
+    per_cat = defaultdict(list)
+    for r in rows:
+        per_cat[r.get("category_id")].append(r)
+    cat_summary = {}
+    for cat, crows in sorted(per_cat.items(), key=lambda kv: (kv[0] is None, kv[0])):
+        cat_summary[CATEGORY_NAMES.get(cat, str(cat))] = summarize_rows(crows)
+    cat_summary["_by_id"] = {str(k): len(v) for k, v in per_cat.items()}
+
+    (run_dir / "metric_summary.json").write_text(
+        json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    (run_dir / "category_summary.json").write_text(
+        json.dumps(cat_summary, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    print("run:", run_dir.name)
+    print("  n_total={} n_ok={} n_failed={}".format(
+        summary["n_total"], summary["n_ok"], summary["n_failed"]))
+    print("  f1_official={} f1_mem0={} bleu1_m1={}".format(
+        round(summary["f1_official"], 4), round(summary["f1_mem0"], 4),
+        round(summary["bleu1_m1"], 4)))
+    print("  judge_acc={} (n={})".format(summary["judge"]["accuracy"], summary["judge"]["n"]))
+    print("  hit1={} hit3={} hit10={} mrr={} evrec10={}".format(
+        round(summary["hit1"], 4), round(summary["hit3"], 4),
+        round(summary["hit10"], 4), round(summary["mrr"], 4),
+        round(summary["evidence_recall_at_10"], 4) if summary["evidence_recall_at_10"] is not None else None))
+    print("  cost=${:.4f}  tokens(ans_in={} ans_out={} judge_in={} judge_out={})".format(
+        summary["cost_usd"], summary["tokens"]["answer_input"],
+        summary["tokens"]["answer_output"], summary["tokens"]["judge_input"],
+        summary["tokens"]["judge_output"]))
+    print("  per-category n:", {CATEGORY_NAMES.get(int(k), k): v
+                                 for k, v in cat_summary["_by_id"].items() if k != 'None'})
+
+    if args.baseline_dir:
+        base_rows = read_jsonl(Path(args.baseline_dir) / "per_question.jsonl")
+        boot = paired_bootstrap(ok, [r for r in base_rows if r.get("status") == "ok"])
+        (run_dir / "paired_bootstrap.json").write_text(
+            json.dumps(boot, indent=2, ensure_ascii=False), encoding="utf-8")
+        print("  paired bootstrap vs {}: n={}".format(Path(args.baseline_dir).name, boot.get("n")))
+        for m in ("f1_official", "hit1", "mrr"):
+            b = boot["metrics"][m]
+            print("    {}: delta={} ci95={} P(>0)={} wins={} losses={}".format(
+                m, b["mean_delta"], b["ci95"], b["bootstrap_probability_gt0"],
+                b["wins"], b["losses"]))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
