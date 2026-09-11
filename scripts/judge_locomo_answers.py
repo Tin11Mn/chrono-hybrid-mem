@@ -25,6 +25,19 @@ HERE = Path(__file__).resolve()
 REPO = HERE.parent.parent  # chrono-hybrid-mem/
 sys.path.insert(0, str(REPO / "scripts"))
 
+# Gateway configuration: ChatAnywhere-mediated GPT-4o-mini-2024-07-18 access,
+# identical to the Answer path. Request "gpt-4o-mini"; every successful
+# response must report model == EXPECTED_RETURNED_MODEL or the run fails closed.
+GATEWAY = "chatanywhere"
+DEFAULT_BASE_URL = "https://api.chatanywhere.tech/v1"
+API_KEY_ENV = "CHATANYWHERE_API_KEY"
+REQUESTED_MODEL = "gpt-4o-mini"
+EXPECTED_RETURNED_MODEL = "gpt-4o-mini-2024-07-18"
+
+
+class ModelDriftError(RuntimeError):
+    """The gateway returned a model id other than EXPECTED_RETURNED_MODEL."""
+
 
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -57,7 +70,7 @@ class JudgeClient:
         from openai import OpenAI  # local import; only needed when actually judging
         self._client = OpenAI(
             base_url=base_url,
-            api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"),
+            api_key=os.environ.get(API_KEY_ENV, "EMPTY"),
             timeout=timeout,
             max_retries=0,
         )
@@ -72,11 +85,17 @@ class JudgeClient:
             response_format={"type": "json_object"},
         )
         latency = (time.time() - t0) * 1000
+        returned_model = getattr(resp, "model", None)
+        if returned_model != EXPECTED_RETURNED_MODEL:
+            raise ModelDriftError(
+                "judge model drift: requested {} but gateway returned {}".format(
+                    self.model, returned_model))
         choice = resp.choices[0].message.content or ""
         usage = getattr(resp, "usage", None)
         return {
             "raw": choice,
-            "model_returned": getattr(resp, "model", None),
+            "model_returned": returned_model,
+            "system_fingerprint": getattr(resp, "system_fingerprint", None),
             "latency_ms": latency,
             "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
             "output_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
@@ -100,7 +119,7 @@ def write_jsonl_atomic(path: Path, rows: list[dict]) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Binary judge for LoCoMo answers.")
     ap.add_argument("--run-dir", required=True)
-    ap.add_argument("--judge-model", default="gpt-4o-mini-2024-07-18")
+    ap.add_argument("--judge-model", default=REQUESTED_MODEL)
     ap.add_argument("--judge-base-url", default=None,
                     help="[OI]-compatible endpoint; default uses OPENAI_BASE_URL/api.openai.com")
     ap.add_argument("--timeout", type=float, default=120.0)
@@ -138,7 +157,7 @@ def main() -> int:
             return 3
 
     base_url = args.judge_base_url or os.environ.get(
-        "OPENAI_BASE_URL", "https://api.openai.com/v1")
+        "OPENAI_BASE_URL", DEFAULT_BASE_URL)
 
     todo = [r for r in rows
             if r.get("status") == "ok"
@@ -153,8 +172,10 @@ def main() -> int:
         print("dry-run: no API calls.")
         return 0
 
-    if not os.environ.get("OPENAI_API_KEY") and "api.openai.com" in base_url:
-        print("ERROR: OPENAI_API_KEY not set; refusing to call the paid endpoint.")
+    if (not os.environ.get(API_KEY_ENV)
+            and not base_url.startswith(("http://127.0.0.1:", "http://localhost:"))):
+        print("ERROR: {} not set; refusing to call the paid endpoint {}.".format(
+            API_KEY_ENV, base_url))
         return 4
 
     client = JudgeClient(base_url, args.judge_model, args.timeout)
@@ -183,6 +204,11 @@ def main() -> int:
             row["judge_model"] = args.judge_model
             row["judge_model_requested"] = args.judge_model
             row["judge_model_returned"] = out["model_returned"]
+            row["judge_returned_model"] = out["model_returned"]
+            row["judge_gateway"] = GATEWAY
+            row["judge_api_base_url"] = base_url
+            row["judge_temperature"] = 0.0
+            row["judge_system_fingerprint"] = out.get("system_fingerprint")
             row["judge_prompt_version"] = "mem0.v1"
             row["judge_prompt_hash"] = judge_prompt_hash
             row["judge_latency_ms"] = round(out["latency_ms"], 1)
@@ -192,6 +218,14 @@ def main() -> int:
             row["cumulative_cost"] = round(answer_spent, 6)
             if label is None:
                 row["judge_parse_error"] = True
+        except ModelDriftError as exc:
+            # Fail closed: persist what is known, start no further judge calls.
+            row["judge_error"] = str(exc)[:200]
+            row["judge_model_drift"] = True
+            write_jsonl_atomic(per_q_path, rows)
+            print("MODEL DRIFT: {}; checkpoint persisted at {}; stopping.".format(
+                exc, per_q_path))
+            return 5
         except Exception as exc:  # record, keep going; resumable
             row["judge_error"] = str(exc)[:200]
         done += 1

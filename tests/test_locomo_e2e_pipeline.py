@@ -23,6 +23,9 @@ sys.path.insert(0, str(REPO / "scripts"))
 import evaluate_locomo_e2e as e2e  # noqa: E402
 import summarize_locomo_e2e as summ  # noqa: E402
 
+# Captured before any test stubs e2e.AnswerClient.
+_REAL_ANSWER_CLIENT = e2e.AnswerClient
+
 DATASET = (REPO.parent / "chrono-hybrid-mem" / ".locomo" / "locomo10.json")
 P3 = REPO.parent / "chrono-hybrid-mem-p3" / ".locomo"
 GLOB = str(P3 / "sfv2-full-*.json")
@@ -60,6 +63,7 @@ def _run(tmp_path, run_id="t1", max_q=5, resume=False, client=None):
         "--answer-prompt", "locomo_answer_mem0.txt",
     ] + (["--resume"] if resume else [])
     # monkeypatch the client + skip the paid-endpoint guard
+    original_client = e2e.AnswerClient
     e2e.AnswerClient = client or StubClient
     import os
     os.environ.pop("OPENAI_API_KEY", None)
@@ -68,6 +72,7 @@ def _run(tmp_path, run_id="t1", max_q=5, resume=False, client=None):
         rc = e2e.main()
     finally:
         sys.argv = argv
+        e2e.AnswerClient = original_client
     return rc, tmp_path / run_id
 
 
@@ -154,6 +159,64 @@ def test_resume_retries_failed_questions(workdir, monkeypatch):
     assert len(ids) == len(set(ids))  # no duplicate rows for any question
     retried = [r for r in rows2 if r["question_id"] == failed[0]["question_id"]]
     assert len(retried) == 1 and retried[0]["status"] == "ok"
+
+
+def test_answer_client_rejects_model_drift(workdir, monkeypatch):
+    import types
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    client = _REAL_ANSWER_CLIENT("http://127.0.0.1:9/v1", e2e.REQUESTED_MODEL, 5.0)
+
+    def make_resp(model):
+        return types.SimpleNamespace(
+            model=model, system_fingerprint="fp_test",
+            choices=[types.SimpleNamespace(
+                message=types.SimpleNamespace(content="OK"))],
+            usage=types.SimpleNamespace(prompt_tokens=5, completion_tokens=1))
+
+    class FakeCompletions:
+        def __init__(self, model):
+            self.model = model
+
+        def create(self, **kwargs):
+            return make_resp(self.model)
+
+    class FakeChat:
+        def __init__(self, model):
+            self.completions = FakeCompletions(model)
+
+    # wrong returned model -> ModelDriftError (fail closed)
+    client._c = types.SimpleNamespace(chat=FakeChat("gpt-3.5-turbo"))
+    with pytest.raises(e2e.ModelDriftError):
+        client.answer("ping")
+    # expected returned model -> passes, fingerprint captured
+    client._c = types.SimpleNamespace(chat=FakeChat(e2e.EXPECTED_RETURNED_MODEL))
+    out = client.answer("ping")
+    assert out["model_returned"] == e2e.EXPECTED_RETURNED_MODEL
+    assert out["system_fingerprint"] == "fp_test"
+
+
+class DriftStub:
+    """AnswerClient stand-in whose every call raises ModelDriftError."""
+
+    def __init__(self, base_url, model, timeout):
+        pass
+
+    def answer(self, prompt):
+        raise e2e.ModelDriftError(
+            "answer model drift: requested gpt-4o-mini but gateway returned "
+            "gpt-3.5-turbo")
+
+
+def test_main_stops_on_model_drift(workdir, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("CHATANYWHERE_API_KEY", raising=False)
+    rc, run_dir = _run(workdir, "t7", max_q=3, client=DriftStub)
+    assert rc == 5  # drift exit code
+    rows = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+        encoding="utf-8").splitlines() if l.strip()]
+    assert len(rows) == 1  # checkpoint persisted, no further calls
+    assert rows[0]["model_drift"] is True
+    assert rows[0]["status"] == "error"
 
 
 def test_cost_cap_stops_early(workdir, monkeypatch):

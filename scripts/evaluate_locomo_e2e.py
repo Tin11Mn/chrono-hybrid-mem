@@ -42,6 +42,19 @@ ELR_PATH = REPO / "scripts" / "evaluate_locomo_retrieval.py"
 
 CATEGORY_NAMES = {1: "multi_hop", 2: "temporal", 3: "open_domain", 4: "single_hop"}
 
+# Gateway configuration: ChatAnywhere-mediated GPT-4o-mini-2024-07-18 access.
+# The request model is "gpt-4o-mini"; every successful response must report
+# model == EXPECTED_RETURNED_MODEL or the run fails closed.
+GATEWAY = "chatanywhere"
+DEFAULT_BASE_URL = "https://api.chatanywhere.tech/v1"
+API_KEY_ENV = "CHATANYWHERE_API_KEY"
+REQUESTED_MODEL = "gpt-4o-mini"
+EXPECTED_RETURNED_MODEL = "gpt-4o-mini-2024-07-18"
+
+
+class ModelDriftError(RuntimeError):
+    """The gateway returned a model id other than EXPECTED_RETURNED_MODEL."""
+
 
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
@@ -184,7 +197,7 @@ class AnswerClient:
     def __init__(self, base_url, model, timeout):
         from openai import OpenAI  # noqa
         self._c = OpenAI(base_url=base_url,
-                         api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"),
+                         api_key=os.environ.get(API_KEY_ENV, "EMPTY"),
                          timeout=timeout, max_retries=0)
         self.model = model
 
@@ -196,10 +209,16 @@ class AnswerClient:
             temperature=0.0,
         )
         latency = (time.time() - t0) * 1000
+        returned_model = getattr(resp, "model", None)
+        if returned_model != EXPECTED_RETURNED_MODEL:
+            raise ModelDriftError(
+                "answer model drift: requested {} but gateway returned {}".format(
+                    self.model, returned_model))
         usage = getattr(resp, "usage", None)
         return {
             "text": (resp.choices[0].message.content or "").strip(),
-            "model_returned": getattr(resp, "model", None),
+            "model_returned": returned_model,
+            "system_fingerprint": getattr(resp, "system_fingerprint", None),
             "latency_ms": latency,
             "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
             "output_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
@@ -253,7 +272,7 @@ def main():
     ap.add_argument("--artifact-glob", default=str(P3_LOCOMO / "sfv2-full-*.json"))
     ap.add_argument("--method", default="sfv2_qwen3_4b")
     ap.add_argument("--profile", default="mem0", choices=["mem0"])
-    ap.add_argument("--answer-model", default="gpt-4o-mini-2024-07-18")
+    ap.add_argument("--answer-model", default=REQUESTED_MODEL)
     ap.add_argument("--answer-base-url", default=None)
     ap.add_argument("--answer-prompt", default="locomo_answer_mem0.txt")
     ap.add_argument("--dataset", default=str(DEFAULT_DATASET))
@@ -298,7 +317,13 @@ def main():
                   .format(prev.get("config_digest"), digest))
             return 3
     base_url = args.answer_base_url or os.environ.get(
-        "OPENAI_BASE_URL", "https://api.openai.com/v1")
+        "OPENAI_BASE_URL", DEFAULT_BASE_URL)
+    if (not args.dry_run
+            and not os.environ.get(API_KEY_ENV)
+            and not base_url.startswith(("http://127.0.0.1:", "http://localhost:"))):
+        print("ERROR: {} not set; refusing paid endpoint {}.".format(
+            API_KEY_ENV, base_url))
+        return 4
 
     elr = _load_elr()
     samples = json.load(open(args.dataset, encoding="utf-8"))
@@ -350,11 +375,17 @@ def main():
     cfg = {
         "run_id": run_id, "method": args.method, "profile": args.profile,
         "config_digest": digest,
+        "gateway": GATEWAY,
+        "api_base_url": base_url,
+        "requested_model": args.answer_model,
+        "expected_returned_model": EXPECTED_RETURNED_MODEL,
+        "access_note": "ChatAnywhere gateway-mediated GPT-4o-mini-2024-07-18 access",
         "artifact_glob": args.artifact_glob, "artifact_files": [Path(f).name for f in artifact_files],
         "dataset": str(args.dataset), "dataset_sha256": sha256_file(Path(args.dataset)),
         "answer_model": args.answer_model, "answer_prompt": args.answer_prompt,
         "answer_prompt_hash": answer_prompt_hash,
-        "judge_model": "gpt-4o-mini-2024-07-18",
+        "judge_model": "gpt-4o-mini",
+        "judge_expected_returned_model": EXPECTED_RETURNED_MODEL,
         "judge_prompt_hash": sha256_text((REPO / "prompts" / "locomo_judge_mem0.txt").read_text(encoding="utf-8")),
         "top_k_evidence": args.top_k_evidence,
         "question_subset": "category != 5 (non-adversarial)",
@@ -376,10 +407,6 @@ def main():
             print("----- sample rendered answer prompt (offset {}) -----".format(offset))
             print(p[:1200])
         return 0
-
-    if not os.environ.get("OPENAI_API_KEY") and "api.openai.com" in base_url:
-        print("ERROR: OPENAI_API_KEY not set; refusing paid endpoint.")
-        return 4
 
     client = AnswerClient(base_url, args.answer_model, args.timeout)
     spent = 0.0
@@ -403,6 +430,8 @@ def main():
                 {"mem_id": rid, "timestamp": smap["mem2ts"].get(rid),
                  "content": smap["mem2content"].get(rid)} for rid in result_ids],
             "answer_model": args.answer_model, "answer_model_requested": args.answer_model,
+            "gateway": GATEWAY, "api_base_url": base_url,
+            "answer_returned_model": None, "answer_system_fingerprint": None,
             "answer_prompt_version": "mem0.v1",
             "answer_prompt_hash": answer_prompt_hash, "answer_temperature": 0.0,
             "top_k_evidence": args.top_k_evidence,
@@ -417,6 +446,8 @@ def main():
             out = client.answer(prompt)
             row["generated_answer"] = out["text"]
             row["answer_model_returned"] = out["model_returned"]
+            row["answer_returned_model"] = out["model_returned"]
+            row["answer_system_fingerprint"] = out.get("system_fingerprint")
             row["answer_latency_ms"] = round(out["latency_ms"], 1)
             row["answer_input_tokens"] = out["input_tokens"]
             row["answer_output_tokens"] = out["output_tokens"]
@@ -426,6 +457,15 @@ def main():
             spent += row_cost
             row["cumulative_cost"] = round(spent, 6)
             row.update(sc.score_answer(out["text"], reference, cat))
+        except ModelDriftError as exc:
+            # Fail closed: persist the checkpoint row, start no further calls.
+            row["status"] = "error"
+            row["model_drift"] = True
+            row["error"] = str(exc)[:200]
+            upsert_row(per_q_path, row)
+            print("MODEL DRIFT: {}; checkpoint persisted at {}; stopping.".format(
+                exc, per_q_path))
+            return 5
         except Exception as exc:
             row["status"] = "error"
             row["error"] = str(exc)[:200]

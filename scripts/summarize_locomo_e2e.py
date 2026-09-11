@@ -67,6 +67,20 @@ def summarize_rows(rows):
     gold = sum(r.get("n_gold", 0) or 0 for r in ok)
     out["evidence_recall_at_10"] = (hits / gold) if gold else None
     out["n_gold_total"] = gold
+    # gateway model verification: returned-model and system-fingerprint
+    # distributions (fingerprints may vary freely; only recorded, never failed).
+    out["model_verification"] = {
+        "gateway": sorted({r.get("gateway") for r in ok if r.get("gateway")}),
+        "api_base_url": sorted({r.get("api_base_url") for r in ok if r.get("api_base_url")}),
+        "answer_returned_models": dict(_count(r.get("answer_returned_model") for r in ok)),
+        "answer_system_fingerprints": dict(_count(r.get("answer_system_fingerprint") for r in ok)),
+        "judge_returned_models": dict(_count(r.get("judge_returned_model") for r in ok
+                                             if r.get("judge_returned_model"))),
+        "judge_system_fingerprints": dict(_count(r.get("judge_system_fingerprint") for r in ok
+                                                 if r.get("judge_system_fingerprint"))),
+        "answer_drift_errors": sum(1 for r in rows if r.get("model_drift")),
+        "judge_drift_errors": sum(1 for r in rows if r.get("judge_model_drift")),
+    }
     return out
 
 
