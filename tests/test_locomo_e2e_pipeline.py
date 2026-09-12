@@ -46,6 +46,8 @@ class StubClient:
         # leakage guard: the answer prompt must never contain the gold answer
         # text beyond what the evidence itself states (gold is passed separately).
         return {"text": "stub answer", "model_returned": "stub",
+                "valid_model_identity": True, "status": "accepted",
+                "system_fingerprint": "fp_stub",
                 "latency_ms": 1.0, "input_tokens": 10, "output_tokens": 2}
 
 
@@ -128,7 +130,7 @@ def test_config_digest_fail_closed(workdir, monkeypatch):
 
 
 class FailOnceStub(StubClient):
-    """Fails the FIRST answer call, succeeds afterwards (retry simulation)."""
+    """Fails the FIRST answer call with transport error, succeeds afterwards."""
 
     def __init__(self, base_url, model, timeout):
         super().__init__(base_url, model, timeout)
@@ -141,25 +143,70 @@ class FailOnceStub(StubClient):
         return super().answer(prompt)
 
 
-def test_resume_retries_failed_questions(workdir, monkeypatch):
+class AllDriftStub(StubClient):
+    """All attempts return model identity drift."""
+
+    def answer(self, prompt):
+        return {"text": "x", "model_returned": "gpt-4.1-mini-2025-04-14",
+                "valid_model_identity": False, "status": "model_drift",
+                "system_fingerprint": "fp_drift",
+                "latency_ms": 1.0, "input_tokens": 10, "output_tokens": 2}
+
+
+def test_answer_transport_failure_retries_in_question(workdir, monkeypatch):
+    """A single transient failure is retried WITHIN the question (attempt 2
+    succeeds), so no error row surfaces."""
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    e2e.AnswerClient = FailOnceStub
     rc1, run_dir = _run(workdir, "t5", max_q=3, client=FailOnceStub)
     assert rc1 == 0
     rows1 = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
         encoding="utf-8").splitlines() if l.strip()]
-    failed = [r for r in rows1 if r["status"] == "error"]
-    assert len(failed) == 1
-    # resume must retry the failed question and REPLACE its error row
-    rc2, _ = _run(workdir, "t5", max_q=3, resume=True)
-    assert rc2 == 0
-    rows2 = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+    assert len(rows1) == 3 and all(r["status"] == "ok" for r in rows1)
+
+
+class FailTwiceStub(StubClient):
+    """Fails the first TWO calls per question; the third attempt succeeds.
+    Exercises the retry budget (3 attempts) without exhausting it."""
+
+    def __init__(self, base_url, model, timeout):
+        super().__init__(base_url, model, timeout)
+        self.nfail = 0
+
+    def answer(self, prompt):
+        self.nfail += 1
+        if self.nfail <= 2:
+            raise RuntimeError("stub transient failure {}".format(self.nfail))
+        out = super().answer(prompt)
+        out["attempts_observed"] = self.nfail
+        return out
+
+
+def test_answer_two_failures_then_success(workdir, monkeypatch):
+    """A question whose first two calls fail recovers on the 3rd attempt."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    rc, run_dir = _run(workdir, "t5c", max_q=1, client=FailTwiceStub)
+    assert rc == 0
+    rows = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
         encoding="utf-8").splitlines() if l.strip()]
-    ids = [r["question_id"] for r in rows2]
-    assert len(ids) == len(set(ids))  # no duplicate rows for any question
-    retried = [r for r in rows2 if r["question_id"] == failed[0]["question_id"]]
-    assert len(retried) == 1 and retried[0]["status"] == "ok"
+    assert len(rows) == 1 and rows[0]["status"] == "ok"
+    assert rows[0]["attempts"] == 3
+
+
+def test_main_stops_after_three_transport_failures(workdir, monkeypatch):
+    """Exhausting the 3-attempt budget -> error row + whole-run stop (exit 7)."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    rc, run_dir = _run(workdir, "t5b", max_q=3, client=DriftStub)
+    assert rc == 7
+    rows = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+        encoding="utf-8").splitlines() if l.strip()]
+    assert len(rows) == 1
+    assert rows[0]["status"] == "error"
+    assert len(rows[0]["answer_attempts"]) == 3
+    assert [a["status"] for a in rows[0]["answer_attempts"]] == [
+        "transport_error"] * 3
 
 
 def test_answer_client_reports_model_drift(workdir, monkeypatch):
