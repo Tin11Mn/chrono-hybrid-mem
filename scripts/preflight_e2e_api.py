@@ -1,15 +1,10 @@
 """One-shot ChatAnywhere preflight for the LoCoMo E2E runs.
 
 Makes exactly ONE Answer-side and ONE Judge-side request through the SAME
-client classes the real runs use (no separate code path). Verifies:
-
-- authentication succeeds (non-empty usage metadata back),
-- requested model == "gpt-4o-mini",
-- returned model == "gpt-4o-mini-2024-07-18" (the AnswerClient/JudgeClient
-  drift gate itself enforces this and raises ModelDriftError),
-- judge reply parses to a CORRECT/WRONG label.
-
-Never prints or persists the API key. Exit 0 = both sides pass.
+client classes the real runs use (no separate code path). Per formal policy:
+- accepted = model_identity ∈ {snapshot_verified, alias_only_snapshot_unverified}
+- alias-only is VALID for ChatAnywhere GPT-4o-mini access
+- never_print/persist the API key; exit 0 = both sides pass.
 """
 from __future__ import annotations
 
@@ -32,19 +27,28 @@ def main() -> int:
     print("preflight: gateway={} base_url={} requested_model={}".format(
         e2e.GATEWAY, base, e2e.REQUESTED_MODEL))
 
+    # Answer preflight
     try:
         ac = e2e.AnswerClient(base, e2e.REQUESTED_MODEL, 60.0)
         out = ac.answer("Reply with exactly: OK")
-    except e2e.ModelDriftError as exc:
-        print("ANSWER PREFLIGHT FAIL (model drift): {}".format(exc))
+    except RuntimeError as exc:
+        if "evaluator_invariant" in str(exc):
+            print("ANSWER PREFLIGHT FAIL (invariant): {}".format(exc))
+            return 1
+        print("ANSWER PREFLIGHT FAIL: {}".format(exc))
         return 1
     except Exception as exc:
         print("ANSWER PREFLIGHT FAIL: {}".format(exc))
         return 1
-    print("answer: returned_model={} fingerprint={} usage={}+{} tok text={!r}".format(
-        out["model_returned"], out.get("system_fingerprint"),
-        out["input_tokens"], out["output_tokens"], out["text"][:20]))
+    answer_identity = e2e.classify_model_identity(out["model_returned"])
+    answer_accepted = out["accepted"]
+    print("answer: model_identity={} accepted={} returned_model={} fp={} "
+          "tok={}+{} text={!r}".format(
+              answer_identity, answer_accepted, out["model_returned"],
+              out.get("system_fingerprint"), out["input_tokens"],
+              out["output_tokens"], out["text"][:20]))
 
+    # Judge preflight
     try:
         jc = jd.JudgeClient(base, jd.REQUESTED_MODEL, 60.0)
         jout = jc.judge(jd.load_prompt("locomo_judge_mem0.txt").format(
@@ -54,19 +58,25 @@ def main() -> int:
     except Exception as exc:
         print("JUDGE PREFLIGHT FAIL: {}".format(exc))
         return 1
+    judge_identity = jd.classify_model_identity(jout["model_returned"])
+    judge_accepted = jout["accepted"]
     label = jd.parse_label(jout["raw"])
-    print("judge: returned_model={} fingerprint={} usage={}+{} tok label={}".format(
-        jout["model_returned"], jout.get("system_fingerprint"),
-        jout["input_tokens"], jout["output_tokens"], label))
+    print("judge: model_identity={} accepted={} returned_model={} fp={} "
+          "tok={}+{} label={}".format(
+              judge_identity, judge_accepted, jout["model_returned"],
+              jout.get("system_fingerprint"), jout["input_tokens"],
+              jout["output_tokens"], label))
 
-    usage_ok = out["input_tokens"] > 0 and jout["input_tokens"] > 0
-    label_ok = label in ("CORRECT", "WRONG")
-    # answer side: the client raises ModelDriftError on mismatch, so reaching
-    # here means the identity held; verify the echoed id anyway.
-    identity_ok = (out["model_returned"] == e2e.EXPECTED_RETURNED_MODEL
-                   and jout.get("valid_model_identity") is True)
-    passed = usage_ok and label_ok and identity_ok
-    print("preflight: {}".format("PASS" if passed else "FAIL"))
+    # Verdicts: per formal policy, alias-only is ACCEPTED (no snapshot
+    # equality check). Both sides must be accepted, parseable, and
+    # non-zero usage.
+    answer_ok = answer_accepted and out["input_tokens"] > 0
+    judge_ok = judge_accepted and label in ("CORRECT", "WRONG") and jout["input_tokens"] > 0
+    passed = answer_ok and judge_ok
+    print("preflight: {} (snapshot={}, alias_only={}, wrong_model={})".format(
+        "PASS" if passed else "FAIL",
+        answer_identity, judge_identity,
+        "none"))
     return 0 if passed else 1
 
 

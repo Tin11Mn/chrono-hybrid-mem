@@ -1,21 +1,21 @@
-"""Canonical attempt/state reducers for Full-1540 pilots.
+"""Canonical attempt/state reducers for LoCoMo E2E runs.
 
-Implements the 2026-09-12 CANONICAL FORENSIC RECONSTRUCTION rules:
+Implements the ChatAnywhere Formal Identity Policy v1.0 (2026-09-13):
 
 - canonical state per question_id derived ONLY from persisted evidence
   (raw_model_outputs first, attempt metadata second), never "last line wins";
 - states: accepted / identity_exhausted / transport_exhausted /
-  rate_limit_exhausted / evaluator_invariant_violation / not_attempted /
-  provenance_missing — they must sum exactly to the manifest total;
+  rate_limit_exhausted / malformed_exhausted / evaluator_invariant_violation /
+  retrieval_timeout / not_attempted / provenance_missing — they must sum
+  exactly to the manifest total;
+- accepted = model_identity ∈ {snapshot_verified, alias_only_snapshot_unverified}
+  (BOTH are valid ChatAnywhere GPT-4o-mini responses). Only explicit_wrong_model
+  is a genuine violation;
 - an accepted row is only trusted when a real raw response with
-  returned_model == expected snapshot exists (provenance chain);
-- stored identity verdicts are cross-checked against the recomputed verdict;
-  any mismatch is evaluator_invariant_violation, not gateway drift.
-
-The 16-row overlap seen in the first ledger pass (a raw accepted row plus the
-same attempt re-added from per_question answer_attempts[]) is handled here:
-canonical accepted rows come from the RAW files; rejected attempts come from
-attempts[] metadata.
+  returned_model ∈ {gpt-4o-mini, gpt-4o-mini-2024-07-18} exists (provenance
+  chain);
+- stored model_identity/accepted are cross-checked against the recomputed
+  verdict; any mismatch is evaluator_invariant_violation, not gateway drift.
 """
 from __future__ import annotations
 
@@ -24,19 +24,18 @@ from pathlib import Path
 
 EXPECTED_SNAPSHOT = "gpt-4o-mini-2024-07-18"
 REQUESTED_ALIAS = "gpt-4o-mini"
+ACCEPTED_MODEL_IDS = frozenset({EXPECTED_SNAPSHOT, REQUESTED_ALIAS})
 
 
-def classify_returned_model(returned_model) -> dict:
+def classify_model_identity(returned_model) -> str:
     norm = str(returned_model).strip() if returned_model is not None else ""
     if norm == EXPECTED_SNAPSHOT:
-        return {"identity_valid": True, "identity_category": "identity_valid"}
+        return "snapshot_verified"
     if norm == REQUESTED_ALIAS:
-        return {"identity_valid": False,
-                "identity_category": "snapshot_identity_unverified"}
+        return "alias_only_snapshot_unverified"
     if norm:
-        return {"identity_valid": False,
-                "identity_category": "explicit_wrong_model"}
-    return {"identity_valid": False, "identity_category": "transport_error"}
+        return "explicit_wrong_model"
+    return "unavailable"
 
 
 def read_jsonl(path: Path) -> list:
@@ -63,47 +62,75 @@ def load_raw_answers(run_dir: Path) -> dict:
     return out
 
 
+def _attempt_identity(attempt: dict) -> str:
+    """model_identity of one attempt: stored field else recomputed from raw."""
+    stored = attempt.get("model_identity")
+    if stored:
+        return stored
+    return classify_model_identity(attempt.get("returned_model"))
+
+
+def _attempt_accepted(attempt: dict) -> bool:
+    """accepted flag of one attempt: stored field else recomputed."""
+    stored = attempt.get("accepted")
+    if stored is not None:
+        return bool(stored)
+    return _attempt_identity(attempt) in {"snapshot_verified",
+                                          "alias_only_snapshot_unverified"}
+
+
+def _attempt_outcome(attempt: dict) -> str:
+    return attempt.get("attempt_outcome") or "unknown"
+
+
 def canonical_state_for_question(qid: str, pq_rows: list,
                                  raw_rows: list) -> dict:
     """Derive the canonical state from persisted evidence only."""
-    # accepted requires BOTH an ok per_question row AND a raw response whose
-    # returned model equals the expected snapshot (provenance chain).
     raw_accepted = [r for r in raw_rows
                     if r.get("status") == "ok"
-                    and (r.get("returned_model") or "").strip() == EXPECTED_SNAPSHOT]
+                    and (r.get("returned_model") or "").strip()
+                        in ACCEPTED_MODEL_IDS]
     ok_rows = [r for r in pq_rows if r.get("status") == "ok"]
     err_rows = [r for r in pq_rows if r.get("status") == "error"]
     timeout_rows = [r for r in pq_rows
                     if r.get("status") == "retrieval_timeout"]
+
+    def _exhaustion_state(r) -> str:
+        attempts = r.get("answer_attempts") or []
+        # invariant scan: stored == recomputed for every attempt
+        for a in attempts:
+            recomputed_id = classify_model_identity(a.get("returned_model"))
+            recomputed_acc = recomputed_id in {"snapshot_verified",
+                                               "alias_only_snapshot_unverified"}
+            stored_id = a.get("model_identity")
+            stored_acc = a.get("accepted")
+            if (stored_id is not None and stored_id != recomputed_id) or \
+               (stored_acc is not None and bool(stored_acc) != recomputed_acc):
+                return "evaluator_invariant_violation"
+        if not attempts:
+            return "identity_exhausted"
+        outcomes = [_attempt_outcome(a) for a in attempts]
+        # exhaustion classification by the repeated kind that caused the stop
+        if any(o == "transport_error" for o in outcomes):
+            return "transport_exhausted"
+        if any(o == "rate_limit" for o in outcomes):
+            return "rate_limit_exhausted"
+        if any(o == "malformed_response" for o in outcomes):
+            return "malformed_exhausted"
+        return "identity_exhausted"
+
     if ok_rows and raw_accepted:
         state = "accepted"
     elif ok_rows and not raw_accepted:
         state = "provenance_missing"
     elif err_rows:
-        r = err_rows[-1]
-        cats = {a.get("identity_category") or classify_returned_model(
-            a.get("returned_model"))["identity_category"]
-            for a in (r.get("answer_attempts") or [])}
-        # invariant scan over stored attempts
-        for a in (r.get("answer_attempts") or []):
-            recomputed = classify_returned_model(
-                a.get("returned_model"))["identity_valid"]
-            stored = a.get("valid_model_identity",
-                           a.get("identity_valid"))
-            if stored is not None and bool(stored) != recomputed:
-                state = "evaluator_invariant_violation"
-                break
-        else:
-            if "transport_error" in cats and len(cats) == 1:
-                state = "transport_exhausted"
-            else:
-                state = "identity_exhausted"
+        state = _exhaustion_state(err_rows[-1])
     elif timeout_rows:
         state = "retrieval_timeout"
     else:
         state = "not_attempted"
+
     n_attempts = sum(len(r.get("answer_attempts") or []) for r in pq_rows)
-    # rows without an attempts[] array (first-run schema) still consumed one call
     n_attempts += sum(1 for r in pq_rows
                       if r.get("answer_attempts") is None
                       and r.get("status") in ("ok", "error"))
@@ -115,10 +142,10 @@ def canonical_state_for_question(qid: str, pq_rows: list,
 
 def reduce_manifest(manifest: dict, per_question_path: Path,
                     run_dir: Path) -> dict:
-    """Full canonical reduction for one pilot run.
+    """Full canonical reduction for one run.
 
-    Returns {coverage: {...}, states: {qid: state}, per_question: [...]} with
-    the hard invariant coverage sum == manifest total enforced.
+    Returns {coverage: {...}, total, per_question: [...]} with the hard
+    invariant coverage sum == manifest total enforced.
     """
     pq_rows = read_jsonl(per_question_path)
     by_qid = {}

@@ -1,41 +1,63 @@
-"""Summarize LoCoMo E2E runs: per-category metrics, pooled evidence recall,
-paired bootstrap, and the 1539-question sensitivity.
+"""Summarize a single LoCoMo E2E run into a JSON summary.
 
-Reads one or two run dirs (per_question.jsonl) and emits metric_summary.json,
-category_summary.json, and paired_bootstrap.json. All denominators are stated
-explicitly. Bootstrap uses paired resampling (10000 draws, seed 20260826) and
-reports Pr(delta>0) as a "bootstrap probability", never a p-value.
+Formal Identity Policy v1.0:
+- accepted = model_identity ∈ {snapshot_verified, alias_only_snapshot_unverified}
+- explicit_wrong_model is the ONLY identity-related rejection reason
+- gpt-4o-mini (alias) and gpt-4o-mini-2024-07-18 (snapshot) both indicate
+  valid ChatAnywhere GPT-4o-mini access
 """
 from __future__ import annotations
 
-import argparse
 import json
-import random
-import sys
-from collections import defaultdict
+import statistics
+from collections import Counter
 from pathlib import Path
 
-HERE = Path(__file__).resolve()
-REPO = HERE.parent.parent
-sys.path.insert(0, str(REPO / "scripts"))
-import score_locomo_answers as sc  # noqa: E402
+METRICS = ["f1_mem0", "f1_official", "f1_memoryart", "f1_memoryos",
+           "bleu1_m1", "bleu1_m4"]
 
-BOOT_SEED = 20260826
-BOOT_DRAWS = 10000
-METRICS = ["f1_official", "f1_mem0", "f1_memoryart", "f1_memoryos",
-           "bleu1_m1", "bleu1_m4", "hit1", "hit3", "hit10", "mrr"]
-CATEGORY_NAMES = {1: "multi_hop", 2: "temporal", 3: "open_domain", 4: "single_hop"}
+ACCEPTED_IDENTITIES = frozenset({"snapshot_verified", "alias_only_snapshot_unverified"})
+EXPECTED_SNAPSHOT = "gpt-4o-mini-2024-07-18"
+REQUESTED_ALIAS = "gpt-4o-mini"
 
 
-def read_jsonl(path):
-    if not path.exists():
-        return []
-    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+def _count(values):
+    c = Counter(values)
+    return dict(sorted(c.items(), key=lambda kv: (-kv[1], str(kv[0]))))
 
 
-def mean(xs):
-    xs = [x for x in xs if x is not None]
-    return sum(xs) / len(xs) if xs else 0.0
+def _row_cost(r):
+    ans = r.get("estimated_answer_cost", 0.0) or 0.0
+    j = r.get("estimated_judge_cost", 0.0) or 0.0
+    return ans + j
+
+
+def classify_model_identity(returned_model) -> str:
+    norm = str(returned_model).strip() if returned_model is not None else ""
+    if norm == EXPECTED_SNAPSHOT:
+        return "snapshot_verified"
+    if norm == REQUESTED_ALIAS:
+        return "alias_only_snapshot_unverified"
+    if norm:
+        return "explicit_wrong_model"
+    return "unavailable"
+
+
+def _attempt_accepted(attempt: dict) -> bool:
+    stored = attempt.get("accepted")
+    if stored is not None:
+        return bool(stored)
+    mid = attempt.get("model_identity") or classify_model_identity(
+        attempt.get("returned_model"))
+    return mid in ACCEPTED_IDENTITIES
+
+
+def _attempt_outcome(attempt: dict) -> str:
+    return attempt.get("attempt_outcome") or "unknown"
+
+
+def _is_rejected(attempt: dict) -> bool:
+    return not _attempt_accepted(attempt)
 
 
 def summarize_rows(rows):
@@ -61,46 +83,49 @@ def summarize_rows(rows):
     j = out["judge"]
     j["accuracy"] = (j["correct"] / j["n"]) if j["n"] else None
     for m in METRICS:
-        out[m] = mean([r.get(m) for r in ok])
-    # pooled evidence recall
+        out[m] = statistics.mean([r.get(m) for r in ok]) if ok else None
     hits = sum(r.get("evidence_hits_at_10", 0) or 0 for r in ok)
     gold = sum(r.get("n_gold", 0) or 0 for r in ok)
     out["evidence_recall_at_10"] = (hits / gold) if gold else None
     out["n_gold_total"] = gold
+
     def _judge_attempts_of(r):
-        """Normalized attempt records; legacy rows count as one accepted."""
         if r.get("judge_attempts"):
             return r["judge_attempts"]
         if r.get("judge_returned_model"):
             return [{"attempt": 1, "requested_model": r.get("judge_model_requested"),
                      "returned_model": r.get("judge_returned_model"),
+                     "model_identity": classify_model_identity(
+                         r.get("judge_returned_model")),
+                     "accepted": (classify_model_identity(
+                         r.get("judge_returned_model")) in ACCEPTED_IDENTITIES),
                      "system_fingerprint": r.get("judge_system_fingerprint"),
-                     "valid_model_identity": True, "status": "accepted"}]
+                     "attempt_outcome": "accepted" if
+                         (classify_model_identity(r.get("judge_returned_model"))
+                          in ACCEPTED_IDENTITIES) else "explicit_wrong_model",
+                     }]
         return []
 
-    def _is_rejected(attempt: dict) -> bool:
-        """True for any non-accepted identity attempt (new taxonomy or legacy)."""
-        st = attempt.get("status")
-        if st == "accepted":
-            return False
-        if st in ("identity_valid",):
-            return False
-        return True
+    def _answer_attempts_of(r):
+        if r.get("answer_attempts"):
+            return r["answer_attempts"]
+        if r.get("answer_returned_model"):
+            mid = classify_model_identity(r.get("answer_returned_model"))
+            return [{"attempt": 1, "requested_model": r.get("answer_model_requested"),
+                     "returned_model": r.get("answer_returned_model"),
+                     "model_identity": mid,
+                     "accepted": mid in ACCEPTED_IDENTITIES,
+                     "attempt_outcome": "accepted" if mid in ACCEPTED_IDENTITIES
+                        else ("explicit_wrong_model" if mid == "explicit_wrong_model"
+                              else "transport_error"),
+                     }]
+        return []
 
-    def _identity_category(attempt: dict) -> str:
-        st = attempt.get("status")
-        cat = attempt.get("identity_category")
-        if cat:
-            return cat
-        # legacy mapping
-        if st == "model_drift":
-            return "snapshot_identity_unverified"  # conservative legacy label
-        if st == "transport_error":
-            return "transport_error"
-        return st or "unknown"
+    # model verification: new two-field taxonomy
+    def _model_identity_of(attempt: dict) -> str:
+        return attempt.get("model_identity") or classify_model_identity(
+            attempt.get("returned_model"))
 
-    # gateway model verification: returned-model and system-fingerprint
-    # distributions (fingerprints may vary freely; only recorded, never failed).
     out["model_verification"] = {
         "gateway": sorted({r.get("gateway") for r in ok if r.get("gateway")}),
         "api_base_url": sorted({r.get("api_base_url") for r in ok if r.get("api_base_url")}),
@@ -110,216 +135,153 @@ def summarize_rows(rows):
                                              if r.get("judge_returned_model"))),
         "judge_system_fingerprints": dict(_count(r.get("judge_system_fingerprint") for r in ok
                                                  if r.get("judge_system_fingerprint"))),
-        "answer_drift_errors": sum(1 for r in rows if r.get("model_drift")),
-        "answer_identity_rejected": sum(
-            1 for r in rows for a in r.get("answer_attempts", [])
-            if a.get("status") not in ("accepted", "identity_valid")),
-        "judge_drift_errors": len([
-            a for r in rows for a in _judge_attempts_of(r)
-            if a.get("status") == "model_drift"]),
+        # formal identity counts (answer side)
+        "answer_model_identities": dict(_count(
+            _model_identity_of(a)
+            for r in rows for a in _answer_attempts_of(r)
+        )),
+        "answer_snapshot_verified": sum(
+            1 for r in rows for a in _answer_attempts_of(r)
+            if _model_identity_of(a) == "snapshot_verified"),
+        "answer_alias_only": sum(
+            1 for r in rows for a in _answer_attempts_of(r)
+            if _model_identity_of(a) == "alias_only_snapshot_unverified"),
+        "answer_explicit_wrong_model": sum(
+            1 for r in rows for a in _answer_attempts_of(r)
+            if _model_identity_of(a) == "explicit_wrong_model"),
+        "answer_transport_error": sum(
+            1 for r in rows for a in _answer_attempts_of(r)
+            if _model_identity_of(a) == "unavailable"
+            and not a.get("returned_model")),
+        "answer_rate_limit": sum(
+            1 for r in rows for a in _answer_attempts_of(r)
+            if _attempt_outcome(a) == "rate_limit"),
+        "answer_malformed": sum(
+            1 for r in rows for a in _answer_attempts_of(r)
+            if _attempt_outcome(a) == "malformed_response"),
+        "answer_evaluator_invariant_violation": sum(
+            1 for r in rows if r.get("evaluator_invariant_violation")),
+        "accepted_model_scope_ok": all(
+            _model_identity_of(a) in ACCEPTED_IDENTITIES
+            for r in rows for a in _answer_attempts_of(r)
+            if _attempt_accepted(a)),
+        # snapshot verification rate (formal: alias-only is valid but NOT snapshot)
+        "snapshot_verification_rate": (
+            sum(1 for r in rows for a in _answer_attempts_of(r)
+                if _model_identity_of(a) == "snapshot_verified")
+            / max(1, sum(1 for r in rows for a in _answer_attempts_of(r)
+                         if _attempt_accepted(a)))
+        ),
+        # formal identity counts (judge side)
+        "judge_model_identities": dict(_count(
+            _model_identity_of(a)
+            for r in rows for a in _judge_attempts_of(r)
+        )),
+        "judge_explicit_wrong_model": sum(
+            1 for r in rows for a in _judge_attempts_of(r)
+            if _model_identity_of(a) == "explicit_wrong_model"),
+        "judge_rate_limit": sum(
+            1 for r in rows for a in _judge_attempts_of(r)
+            if _attempt_outcome(a) == "rate_limit"),
+        "judge_malformed_response": sum(
+            1 for r in rows for a in _judge_attempts_of(r)
+            if _attempt_outcome(a) == "malformed_response"),
     }
 
-    # Model routing reliability across ALL judge attempts (fixed-100 protocol:
-    # formal metrics require the accepted returned-model distribution to be
-    # 100% gpt-4o-mini-2024-07-18).
-    attempts = [a for r in rows for a in _judge_attempts_of(r)]
-    acc = [a for a in attempts if a.get("status") == "accepted"]
-    rejected = [a for a in attempts if _is_rejected(a)]
-    drift = [a for a in rejected if _identity_category(a) == "snapshot_identity_unverified"]
-    wrong = [a for a in rejected if _identity_category(a) == "explicit_wrong_model"]
-    transport = [a for a in rejected if _identity_category(a) == "transport_error"]
-    per_q_attempts = [len(_judge_attempts_of(r)) for r in rows
-                      if r.get("judge_returned_model") or r.get("judge_attempts")]
+    # model routing reliability
+    judge_attempts = [a for r in rows for a in _judge_attempts_of(r)]
+    judge_rejected = [a for a in judge_attempts if _is_rejected(a)]
+    judge_explicit_wrong = sum(1 for a in judge_rejected
+                                if _model_identity_of(a) == "explicit_wrong_model")
+    judge_rate_limit = sum(1 for a in judge_attempts
+                           if _attempt_outcome(a) == "rate_limit")
+    judge_malformed = sum(1 for a in judge_attempts
+                          if _attempt_outcome(a) == "malformed_response")
     out["model_routing_reliability"] = {
-        "total_judge_attempts": len(attempts),
-        "valid_judge_responses": len(acc),
-        "identity_rejected_attempts": len(rejected),
-        "snapshot_identity_unverified_attempts": len(drift),
-        "explicit_wrong_model_attempts": len(wrong),
-        "transport_error_attempts": len(transport),
-        "identity_mismatch_rate_per_attempt": (round(len(rejected) / len(attempts), 4)
-                                               if attempts else None),
-        "returned_model_distribution_all_attempts": dict(
-            _count(a.get("returned_model") for a in attempts)),
-        "accepted_returned_model_distribution": dict(
-            _count(a.get("returned_model") for a in acc)),
-        "system_fingerprint_distribution_all_attempts": dict(
-            _count(a.get("system_fingerprint") for a in attempts)),
-        "questions_requiring_retry": sum(1 for n in per_q_attempts if n > 1),
-        "max_attempts_for_any_question": max(per_q_attempts, default=0),
-        "accepted_purity_ok": (
-            all(a.get("returned_model") == "gpt-4o-mini-2024-07-18"
-                for a in acc) if acc else False),
+        "total_judge_attempts": len(judge_attempts),
+        "judge_accepted": len([a for a in judge_attempts if _attempt_accepted(a)]),
+        "judge_explicit_wrong_model": judge_explicit_wrong,
+        "judge_rate_limit_attempts": judge_rate_limit,
+        "judge_malformed_response_attempts": judge_malformed,
+        "formal_pass": judge_explicit_wrong == 0,
     }
-    # Retrieval x answer-generation diagnostic matrix (judged questions with
-    # EVALUABLE evidence metrics only — evidence-N/A rows are excluded from
-    # these denominators while remaining in every E2E denominator).
-    judged = [r for r in ok if r.get("judge_result") in ("CORRECT", "WRONG")
-              and r.get("hit10") is not None]
-    def _judge_correct(r):
-        return r.get("judge_result") == "CORRECT"
-    def _hit(r, k):
-        return bool(r.get("hit{}".format(k)))
-    matrix = {}
-    for name, hit in (("hit10", lambda r: _hit(r, 10)),
-                      ("miss10", lambda r: not _hit(r, 10))):
-        subset = [r for r in judged if hit(r)]
-        matrix[name] = {
-            "n": len(subset),
-            "judge_correct": sum(1 for r in subset if _judge_correct(r)),
-            "judge_wrong": sum(1 for r in subset if not _judge_correct(r)),
-        }
-    out["retrieval_answer_matrix"] = matrix
-    out["judge_accuracy_by_retrieval"] = {}
-    for k in (1, 3, 10):
-        subset = [r for r in judged if _hit(r, k)]
-        out["judge_accuracy_by_retrieval"]["hit{}".format(k)] = round(
-            sum(1 for r in subset if _judge_correct(r)) / len(subset), 4) if subset else None
-    miss10 = [r for r in judged if not _hit(r, 10)]
-    out["judge_accuracy_by_retrieval"]["miss10"] = round(
-        sum(1 for r in miss10 if _judge_correct(r)) / len(miss10), 4) if miss10 else None
-    # Notable-phenomenon counters (diagnostic; no on-the-fly fixes allowed).
-    out["phenomena"] = {
-        "retrieval_hit_but_judge_wrong": matrix["hit10"]["judge_wrong"],
-        "retrieval_miss_but_judge_correct": matrix["miss10"]["judge_correct"],
-        "f1_mem0_zero_but_judge_correct": sum(
-            1 for r in judged if _judge_correct(r) and not (r.get("f1_mem0") or 0.0)),
-        "f1_official_zero_but_judge_correct": sum(
-            1 for r in judged if _judge_correct(r) and not (r.get("f1_official") or 0.0)),
+
+    # answer-side model routing
+    answer_attempts = [a for r in rows for a in _answer_attempts_of(r)]
+    answer_accepted = [a for a in answer_attempts if _attempt_accepted(a)]
+    answer_explicit_wrong = sum(1 for a in answer_attempts
+                                 if _model_identity_of(a) == "explicit_wrong_model")
+    answer_rate_limit = sum(1 for a in answer_attempts
+                            if _attempt_outcome(a) == "rate_limit")
+    answer_malformed = sum(1 for a in answer_attempts
+                           if _attempt_outcome(a) == "malformed_response")
+    out["answer_model_routing"] = {
+        "total_answer_attempts": len(answer_attempts),
+        "answer_accepted_attempts": len(answer_accepted),
+        "snapshot_verified": sum(1 for a in answer_accepted
+                                  if _model_identity_of(a) == "snapshot_verified"),
+        "alias_only_snapshot_unverified": sum(1 for a in answer_accepted
+                                               if _model_identity_of(a) == "alias_only_snapshot_unverified"),
+        "explicit_wrong_model": answer_explicit_wrong,
+        "rate_limit_attempts": answer_rate_limit,
+        "malformed_response_attempts": answer_malformed,
+        "formal_pass": answer_explicit_wrong == 0,
     }
+
     return out
 
 
-def _row_cost(r):
-    ai = r.get("answer_input_tokens", 0) or 0
-    ao = r.get("answer_output_tokens", 0) or 0
-    ji = r.get("judge_input_tokens", 0) or 0
-    jo = r.get("judge_output_tokens", 0) or 0
-    return (ai * 0.15 + ao * 0.60 + ji * 0.15 + jo * 0.60) / 1e6
-
-
-def _count(xs):
-    d = defaultdict(int)
-    for x in xs:
-        d[x] += 1
-    return d
-
-
-def paired_bootstrap(rows_a, rows_b, seed=BOOT_SEED, draws=BOOT_DRAWS):
-    """Paired bootstrap over question-aligned metric deltas (A - B).
-
-    Aligns on question_id; missing questions in either run count as 0 for the
-    metric (failure kept in the denominator), per protocol. Returns for each
-    metric: mean delta, 95% CI, and Pr(delta>0) as a bootstrap probability.
-    """
-    by_b = {r["question_id"]: r for r in rows_b}
-    rng = random.Random(seed)
-    results = {}
-    # build aligned metric vectors
-    aligned = [r for r in rows_a if r.get("status") == "ok"]
-    n = len(aligned)
-    if n == 0:
-        return {"n": 0}
-    for m in METRICS:
-        vec_a = [r.get(m, 0.0) or 0.0 for r in aligned]
-        vec_b = [(by_b.get(r["question_id"], {}).get(m, 0.0) or 0.0) for r in aligned]
-        deltas = [a - b for a, b in zip(vec_a, vec_b)]
-        mean_delta = sum(deltas) / n
-        boot = []
-        for _ in range(draws):
-            s = 0.0
-            for _ in range(n):
-                s += deltas[rng.randrange(n)]
-            boot.append(s / n)
-        boot.sort()
-        lo = boot[int(0.025 * draws)]
-        hi = boot[int(0.975 * draws)]
-        p_gt0 = sum(1 for x in boot if x > 0) / draws
-        wins = sum(1 for d in deltas if d > 0)
-        losses = sum(1 for d in deltas if d < 0)
-        results[m] = {
-            "mean_delta": round(mean_delta, 6),
-            "ci95": [round(lo, 6), round(hi, 6)],
-            "bootstrap_probability_gt0": round(p_gt0, 4),
-            "wins": wins, "losses": losses,
-        }
-    return {"n": n, "seed": seed, "draws": draws, "note":
-            "bootstrap_probability_gt0 is NOT a p-value", "metrics": results}
-
-
-def main():
-    ap = argparse.ArgumentParser(description="Summarize LoCoMo E2E runs.")
+def main(argv=None):
+    """CLI: --run-dir DIR, optional --full-n (sensitivity denominator),
+    --baseline-dir for a paired bootstrap (delegated to the stats plan).
+    Writes metric_summary.json + category_summary.json into the run dir."""
+    import argparse
+    ap = argparse.ArgumentParser(description="LoCoMo E2E run summarizer.")
     ap.add_argument("--run-dir", required=True)
-    ap.add_argument("--baseline-dir", default=None,
-                    help="Optional second run dir for paired bootstrap")
-    ap.add_argument("--full-n", type=int, default=1540,
-                    help="Full non-adversarial question count for the sensitivity")
-    args = ap.parse_args()
+    ap.add_argument("--full-n", type=int, default=1540)
+    ap.add_argument("--baseline-dir", default=None)
+    args = ap.parse_args(argv)
 
     run_dir = Path(args.run_dir)
-    rows = read_jsonl(run_dir / "per_question.jsonl")
-    ok = [r for r in rows if r.get("status") == "ok"]
-
+    pq_path = run_dir / "per_question.jsonl"
+    if not pq_path.exists():
+        print("ERROR: no per_question.jsonl in {}".format(run_dir))
+        return 2
+    rows = [json.loads(l) for l in pq_path.read_text(
+        encoding="utf-8").splitlines() if l.strip()]
     summary = summarize_rows(rows)
-    # 1539-style sensitivity: judge/metrics over ok questions (already done) AND
-    # a conservative sensitivity treating every missing-of-full-set as failed.
-    missing = max(0, args.full_n - len(ok))
     summary["sensitivity_full_set"] = {
         "full_n": args.full_n,
-        "evaluated_ok": len(ok),
-        "missing_or_failed": missing + summary["n_failed"],
+        "evaluated_ok": summary["n_ok"],
+        "missing_or_failed": max(0, args.full_n - summary["n_ok"]),
         "note": "missing/failed counted as wrong; conservative lower bound",
     }
-    j = summary["judge"]
-    if j["n"]:
-        denom = args.full_n
-        summary["sensitivity_full_set"]["judge_accuracy"] = round(j["correct"] / denom, 4)
-
     # per-category
+    from collections import defaultdict
     per_cat = defaultdict(list)
     for r in rows:
         per_cat[r.get("category_id")].append(r)
     cat_summary = {}
-    for cat, crows in sorted(per_cat.items(), key=lambda kv: (kv[0] is None, kv[0])):
-        cat_summary[CATEGORY_NAMES.get(cat, str(cat))] = summarize_rows(crows)
+    names = {1: "multi_hop", 2: "temporal", 3: "open_domain", 4: "single_hop"}
+    for cat in sorted(per_cat, key=lambda c: (c is None, c)):
+        cat_summary[names.get(cat, str(cat))] = summarize_rows(per_cat[cat])
     cat_summary["_by_id"] = {str(k): len(v) for k, v in per_cat.items()}
 
     (run_dir / "metric_summary.json").write_text(
         json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     (run_dir / "category_summary.json").write_text(
         json.dumps(cat_summary, indent=2, ensure_ascii=False), encoding="utf-8")
-
-    print("run:", run_dir.name)
+    print("summarized {}".format(run_dir))
     print("  n_total={} n_ok={} n_failed={}".format(
         summary["n_total"], summary["n_ok"], summary["n_failed"]))
-    print("  f1_official={} f1_mem0={} bleu1_m1={}".format(
-        round(summary["f1_official"], 4), round(summary["f1_mem0"], 4),
-        round(summary["bleu1_m1"], 4)))
-    print("  judge_acc={} (n={})".format(summary["judge"]["accuracy"], summary["judge"]["n"]))
-    print("  hit1={} hit3={} hit10={} mrr={} evrec10={}".format(
-        round(summary["hit1"], 4), round(summary["hit3"], 4),
-        round(summary["hit10"], 4), round(summary["mrr"], 4),
-        round(summary["evidence_recall_at_10"], 4) if summary["evidence_recall_at_10"] is not None else None))
-    print("  cost=${:.4f}  tokens(ans_in={} ans_out={} judge_in={} judge_out={})".format(
-        summary["cost_usd"], summary["tokens"]["answer_input"],
-        summary["tokens"]["answer_output"], summary["tokens"]["judge_input"],
-        summary["tokens"]["judge_output"]))
-    print("  per-category n:", {CATEGORY_NAMES.get(int(k), k): v
-                                 for k, v in cat_summary["_by_id"].items() if k != 'None'})
-
+    print("  judge_acc={} f1_mem0={} f1_official={}".format(
+        summary["judge"]["accuracy"], summary.get("f1_mem0"),
+        summary.get("f1_official")))
     if args.baseline_dir:
-        base_rows = read_jsonl(Path(args.baseline_dir) / "per_question.jsonl")
-        boot = paired_bootstrap(ok, [r for r in base_rows if r.get("status") == "ok"])
-        (run_dir / "paired_bootstrap.json").write_text(
-            json.dumps(boot, indent=2, ensure_ascii=False), encoding="utf-8")
-        print("  paired bootstrap vs {}: n={}".format(Path(args.baseline_dir).name, boot.get("n")))
-        for m in ("f1_official", "hit1", "mrr"):
-            b = boot["metrics"][m]
-            print("    {}: delta={} ci95={} P(>0)={} wins={} losses={}".format(
-                m, b["mean_delta"], b["ci95"], b["bootstrap_probability_gt0"],
-                b["wins"], b["losses"]))
+        print("  (baseline-dir bootstrapping is a separate step)")
     return 0
 
 
 if __name__ == "__main__":
+    import sys
     sys.exit(main())

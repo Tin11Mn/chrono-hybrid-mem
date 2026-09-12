@@ -13,6 +13,7 @@ constraint. Default model is gpt-4o-mini-2024-07-18 (user decision #6).
 from __future__ import annotations
 
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -25,54 +26,98 @@ HERE = Path(__file__).resolve()
 REPO = HERE.parent.parent  # chrono-hybrid-mem/
 sys.path.insert(0, str(REPO / "scripts"))
 
-# Gateway configuration: ChatAnywhere-mediated GPT-4o-mini-2024-07-18 access,
-# identical to the Answer path. Request "gpt-4o-mini"; every successful
-# response must report model == EXPECTED_RETURNED_MODEL or the run fails closed.
+# Gateway configuration: ChatAnywhere-mediated GPT-4o-mini access, identical
+# to the Answer path. Request "gpt-4o-mini"; BOTH the dated snapshot id and
+# the alias are valid ChatAnywhere GPT-4o-mini responses (Formal Identity
+# Policy v1.0).
 GATEWAY = "chatanywhere"
 DEFAULT_BASE_URL = "https://api.chatanywhere.tech/v1"
 API_KEY_ENV = "CHATANYWHERE_API_KEY"
 REQUESTED_MODEL = "gpt-4o-mini"
 EXPECTED_RETURNED_MODEL = "gpt-4o-mini-2024-07-18"
-# Identity-validated retry budget per question (frozen 2026-09-12): a judge
-# response is accepted only when returned_model == EXPECTED_RETURNED_MODEL;
-# after 3 failed attempts for one question the whole run stops (NO-GO signal).
-MAX_JUDGE_ATTEMPTS = 3
+# Retry budget (frozen 2026-09-13): single-kind streak 3, or total 9 with the
+# 9th still failed -> STOP.
+MAX_JUDGE_ATTEMPTS = 3               # per-identity-kind streak limit
+MAX_TOTAL_ATTEMPTS_PER_QUESTION = 9  # defensive hard cap (9th allowed)
+GLOBAL_429_STOP = 5
+RATE_LIMIT_BACKOFFS = (10.0, 30.0, 60.0)
+
+# Accepted identities: BOTH snapshot and alias-only are valid ChatAnywhere
+# GPT-4o-mini responses. Only explicit_wrong_model is a genuine violation.
+ACCEPTED_IDENTITIES = frozenset({
+    "snapshot_verified",
+    "alias_only_snapshot_unverified",
+})
 
 
-# Identity taxonomy mirrors evaluate_locomo_e2e (frozen 2026-09-12):
-# identity_valid / snapshot_identity_unverified / explicit_wrong_model /
-# evaluator_invariant_violation. "model_drift" is deprecated as ambiguous.
-
-
-def classify_returned_model(returned_model: object) -> dict:
-    """Classify one returned-model identity verdict (see e2e helper)."""
+def classify_model_identity(returned_model: object) -> str:
+    """Pure classification of the RETURNED MODEL STRING."""
     norm = (str(returned_model).strip()
             if returned_model is not None else "")
-    recomputed = (norm == EXPECTED_RETURNED_MODEL)
-    if recomputed:
-        return {"identity_valid": True, "identity_category": "identity_valid"}
+    if norm == EXPECTED_RETURNED_MODEL:
+        return "snapshot_verified"
     if norm == REQUESTED_MODEL:
-        return {"identity_valid": False,
-                "identity_category": "snapshot_identity_unverified"}
+        return "alias_only_snapshot_unverified"
     if norm:
-        return {"identity_valid": False,
-                "identity_category": "explicit_wrong_model"}
-    return {"identity_valid": False, "identity_category": "transport_error"}
+        return "explicit_wrong_model"
+    return "unavailable"
 
 
-def verify_identity_invariant(question_id: str, attempt_index: int,
-                              returned_model: object, stored_valid: object,
-                              status: str) -> str:
-    """Return the identity category, asserting stored==recomputed."""
-    verdict = classify_returned_model(returned_model)
-    recomputed = verdict["identity_valid"]
-    if stored_valid is not None and bool(stored_valid) != recomputed:
+def is_429_exception(exc: BaseException) -> bool:
+    status = getattr(exc, "status_code", None)
+    if status == 429:
+        return True
+    obj = getattr(exc, "response", None)
+    if obj is not None and getattr(obj, "status_code", None) == 429:
+        return True
+    return False
+
+
+def retry_after_seconds(exc: BaseException) -> float | None:
+    headers = getattr(exc, "headers", None)
+    if headers is None:
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            headers = getattr(resp, "headers", None)
+    if headers is None or not hasattr(headers, "get"):
+        return None
+    raw = headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        when = parsedate_to_datetime(str(raw))
+        return max(0.0, (when - datetime.datetime.now(datetime.timezone.utc))
+                   .total_seconds())
+    except Exception:
+        return None
+
+
+def verify_attempt_invariant(question_id: str, attempt_index: int,
+                             returned_model: object, model_identity: str,
+                             accepted: bool) -> str:
+    """Recompute model_identity/accepted from the RAW returned string and
+    assert them equal to the stored fields. Raise RuntimeError (mapped by the
+    caller to evaluator_invariant_violation -> STOP) on any mismatch."""
+    recomputed_identity = classify_model_identity(returned_model)
+    recomputed_accepted = recomputed_identity in ACCEPTED_IDENTITIES
+    if model_identity != recomputed_identity:
         raise RuntimeError(
             "evaluator_invariant_violation qid={} attempt={} returned={!r} "
-            "stored_valid={} recomputed={}".format(
+            "stored_model_identity={!r} recomputed={!r}".format(
                 question_id, attempt_index, returned_model,
-                stored_valid, recomputed))
-    return verdict["identity_category"]
+                model_identity, recomputed_identity))
+    if bool(accepted) != recomputed_accepted:
+        raise RuntimeError(
+            "evaluator_invariant_violation qid={} attempt={} returned={!r} "
+            "stored_accepted={!r} recomputed_accepted={!r}".format(
+                question_id, attempt_index, returned_model,
+                accepted, recomputed_accepted))
+    return recomputed_identity
 
 
 class ModelDriftError(RuntimeError):
@@ -127,16 +172,20 @@ class JudgeClient:
         )
         latency = (time.time() - t0) * 1000
         returned_model = getattr(resp, "model", None)
-        cat = classify_returned_model(returned_model)
-        valid = cat["identity_valid"]
+        model_identity = classify_model_identity(returned_model)
+        accepted = model_identity in ACCEPTED_IDENTITIES
+        if model_identity == "unavailable":
+            attempt_outcome = "malformed_response"
+        else:
+            attempt_outcome = "accepted" if accepted else "explicit_wrong_model"
         choice = resp.choices[0].message.content or ""
         usage = getattr(resp, "usage", None)
         return {
             "raw": choice,
             "model_returned": returned_model,
-            "valid_model_identity": valid,
-            "identity_category": cat["identity_category"],
-            "status": "accepted" if valid else cat["identity_category"],
+            "model_identity": model_identity,
+            "accepted": accepted,
+            "attempt_outcome": attempt_outcome,
             "system_fingerprint": getattr(resp, "system_fingerprint", None),
             "latency_ms": latency,
             "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
@@ -272,64 +321,107 @@ def main() -> int:
             gold_answer=row.get("reference_answer", ""),
             generated_answer=row.get("generated_answer", ""),
         )
-        # Identity-validated retry: identical inputs every attempt; the ONLY
-        # retry triggers are returned-model identity mismatch or a transport
-        # failure, never the judge content. Max 3 attempts, then STOP.
+        # Identity-validated retry (Formal Identity Policy v1.0): accepted =
+        # snapshot_verified OR alias_only_snapshot_unverified; streaks per
+        # failure kind reset on differing outcome; STOP when a streak hits 3
+        # or total_attempts hits 9 with the 9th still failed.
         attempts = []
         accepted = None
-        for attempt_no in range(1, MAX_JUDGE_ATTEMPTS + 1):
+        streaks = {"explicit_wrong_model": 0, "transport_error": 0,
+                   "rate_limit": 0, "malformed_response": 0}
+        for attempt_no in range(1, MAX_TOTAL_ATTEMPTS_PER_QUESTION + 1):
             try:
                 out = client.judge(prompt)
             except Exception as exc:
-                attempts.append({
-                    "attempt": attempt_no,
-                    "requested_model": args.judge_model,
-                    "returned_model": None,
-                    "system_fingerprint": None,
-                    "identity_valid": False,
-                    "identity_category": "transport_error",
-                    "status": "transport_error",
-                    "error": str(exc)[:200],
-                })
+                if is_429_exception(exc):
+                    outcome = "rate_limit"
+                    wait = retry_after_seconds(exc) or (
+                        RATE_LIMIT_BACKOFFS[min(streaks["rate_limit"],
+                                                len(RATE_LIMIT_BACKOFFS) - 1)])
+                    attempts.append({
+                        "attempt": attempt_no,
+                        "requested_model": args.judge_model,
+                        "returned_model": None,
+                        "model_identity": "unavailable",
+                        "accepted": False,
+                        "attempt_outcome": outcome,
+                        "retry_after_s": wait,
+                        "error": str(exc)[:200],
+                    })
+                    if wait:
+                        time.sleep(wait)
+                else:
+                    outcome = "transport_error"
+                    attempts.append({
+                        "attempt": attempt_no,
+                        "requested_model": args.judge_model,
+                        "returned_model": None,
+                        "model_identity": "unavailable",
+                        "accepted": False,
+                        "attempt_outcome": outcome,
+                        "error": str(exc)[:200],
+                    })
+                for k in streaks:
+                    if k == outcome:
+                        streaks[k] += 1
+                    else:
+                        streaks[k] = 0
+                if streaks[outcome] >= MAX_JUDGE_ATTEMPTS:
+                    break
                 continue
-            cat = verify_identity_invariant(
+            model_identity = classify_model_identity(out.get("model_returned"))
+            accepted_flag = model_identity in ACCEPTED_IDENTITIES
+            if model_identity == "unavailable":
+                outcome = "malformed_response"
+                accepted_flag = False
+            else:
+                outcome = "accepted" if accepted_flag else "explicit_wrong_model"
+            verify_attempt_invariant(
                 row["question_id"], attempt_no, out.get("model_returned"),
-                out.get("valid_model_identity"), out.get("status"))
+                model_identity, accepted_flag)
             attempts.append({
                 "attempt": attempt_no,
                 "requested_model": args.judge_model,
                 "returned_model": out.get("model_returned"),
                 "system_fingerprint": out.get("system_fingerprint"),
-                "identity_valid": out.get("valid_model_identity") is True,
-                "identity_category": cat,
-                "status": "accepted" if cat == "identity_valid" else cat,
+                "model_identity": model_identity,
+                "accepted": accepted_flag,
+                "attempt_outcome": outcome,
                 "input_tokens": out.get("input_tokens", 0),
                 "output_tokens": out.get("output_tokens", 0),
             })
             answer_spent += (out.get("input_tokens", 0) * args.price_in_per_1m
                              + out.get("output_tokens", 0) * args.price_out_per_1m) / 1e6
-            if cat == "identity_valid":
+            # increment the current outcome streak; reset every other kind
+            for k in streaks:
+                if k == outcome:
+                    streaks[k] += 1
+                else:
+                    streaks[k] = 0
+            if accepted_flag:
                 accepted = out
+                break
+            if streaks[outcome] >= MAX_JUDGE_ATTEMPTS:
                 break
         row["judge_attempts"] = attempts
         drift_cost = sum(
             (a.get("input_tokens") or 0) * args.price_in_per_1m
             + (a.get("output_tokens") or 0) * args.price_out_per_1m
-            for a in attempts if a.get("status") != "accepted") / 1e6
+            for a in attempts if not a.get("accepted")) / 1e6
         if drift_cost:
             row["judge_drift_cost"] = round(drift_cost, 6)
         if accepted is None:
-            # 3 attempts without a single valid snapshot -> NO-GO signal.
+            # exhaustion -> NO-GO signal.
             row["judge_error"] = (
-                "no {} response after {} attempts ({})".format(
-                    EXPECTED_RETURNED_MODEL, len(attempts),
-                    ",".join(a["status"] for a in attempts)))
+                "no valid response after {} attempts ({})".format(
+                    len(attempts),
+                    ",".join(a["attempt_outcome"] for a in attempts)))
             write_jsonl_atomic(per_q_path, rows)
             write_checkpoint(run_dir, per_q_path, rows)
             print("JUDGE GIVE-UP: {} after {} attempts ({}); checkpoint "
                   "persisted; STOPPING WHOLE RUN.".format(
                       row["question_id"], len(attempts),
-                      ",".join(a["status"] for a in attempts)))
+                      ",".join(a["attempt_outcome"] for a in attempts)))
             return 7
         # Only the accepted attempt feeds any field used by metrics; drifted
         # response content is never persisted to the row.
