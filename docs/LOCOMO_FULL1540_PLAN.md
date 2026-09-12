@@ -140,3 +140,23 @@ resamples, seed 20260826, "bootstrap probability" naming discipline).
    not during E2E execution.
 3. Preflight: Answer + Judge identity checks immediately before each
    method's run.
+
+## 12. Amendments (2026-09-12, approved at execution start — reporting only)
+
+1. **Wording for the 9 evidence-unresolvable questions**: the paper describes
+   them as **4 questions with no annotated evidence** and **5 questions with
+   malformed evidence identifiers** — never as a blanket "dataset defects".
+2. **N=1539 sensitivity analysis**: the formal primary result keeps the
+   established protocol (P4-A+BM25 offset 758 `retrieval_timeout` → F1=0,
+   BLEU=0, Judge=incorrect, kept in N=1540). After all three methods
+   complete, an additional zero-API-cost sensitivity re-computation excludes
+   offset 758 from ALL three methods (N=1539): f1_mem0 / BLEU-1 / Judge
+   accuracy deltas for P4-A+BM25 vs SF v2+4B with paired bootstrap 95% CI
+   and Pr(Δ>0). N=1539 is a robustness check only; N=1540 remains the
+   primary.
+3. The 9 evidence-unresolvable questions enter E2E N=1540 normally; their
+   evidence metrics are always **N/A**; they never enter Hit/Miss conditional
+   evidence diagnostics.
+
+No protocol, method, prompt, scorer, manifest, or retrieval-artifact change
+is authorized beyond these reporting-only items.

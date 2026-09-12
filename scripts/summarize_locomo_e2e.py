@@ -123,10 +123,11 @@ def summarize_rows(rows):
             all(a.get("returned_model") == "gpt-4o-mini-2024-07-18"
                 for a in acc) if acc else False),
     }
-    # Retrieval x answer-generation diagnostic matrix (judged questions only).
-    # Distinguishes the retrieval bottleneck from the answer-generation
-    # bottleneck; diagnostic only, never a tuning signal.
-    judged = [r for r in ok if r.get("judge_result") in ("CORRECT", "WRONG")]
+    # Retrieval x answer-generation diagnostic matrix (judged questions with
+    # EVALUABLE evidence metrics only — evidence-N/A rows are excluded from
+    # these denominators while remaining in every E2E denominator).
+    judged = [r for r in ok if r.get("judge_result") in ("CORRECT", "WRONG")
+              and r.get("hit10") is not None]
     def _judge_correct(r):
         return r.get("judge_result") == "CORRECT"
     def _hit(r, k):

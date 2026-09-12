@@ -153,7 +153,7 @@ def load_frozen_diags(pattern: str) -> dict:
 
 
 def config_digest(artifact_files, dataset_path, answer_prompt_hash, answer_model,
-                  profile, top_k):
+                  profile, top_k, extra=None):
     payload = {
         "artifact_sha256": [sha256_file(Path(f)) for f in sorted(artifact_files)],
         "dataset_sha256": sha256_file(Path(dataset_path)),
@@ -162,6 +162,8 @@ def config_digest(artifact_files, dataset_path, answer_prompt_hash, answer_model
         "profile": profile,
         "top_k_evidence": top_k,
     }
+    if extra:
+        payload["extra"] = extra
     return sha256_text(json.dumps(payload, sort_keys=True))
 
 
@@ -318,6 +320,18 @@ def main():
                          "outcomes); every later run verifies its SHA256 "
                          "against run_config.json and fails closed on drift.")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--e2e-manifest", default=None,
+                    help="Full-1540 mode: the question set comes from this "
+                         "manifest (all cat!=5 entries). Frozen artifacts are "
+                         "used where retrieval_offset exists; the 9 "
+                         "evidence-unresolvable questions and offset 758 take "
+                         "their retrieval from --supplement-dir for this "
+                         "--method. A supplement retrieval_timeout row is "
+                         "prescored F1=0/BLEU=0/Judge=incorrect with no API "
+                         "call, per the frozen protocol.")
+    ap.add_argument("--supplement-dir", default=None,
+                    help="Directory holding {p1,p4a_bm25,sfv2_4b}.jsonl "
+                         "supplement rows (required with --e2e-manifest)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--timeout", type=float, default=120.0)
     ap.add_argument("--cost-cap-usd", type=float, default=5.0)
@@ -338,8 +352,14 @@ def main():
     if not artifact_files:
         print("ERROR: no artifacts match {}".format(args.artifact_glob))
         return 2
+    full1540_extra = None
+    if args.e2e_manifest:
+        mk = {"sfv2_qwen3_4b": "sfv2_4b"}.get(args.method, args.method)
+        full1540_extra = "e2e-manifest:{}:{}".format(
+            mk, Path(args.supplement_dir or "").name)
     digest = config_digest(artifact_files, args.dataset, answer_prompt_hash,
-                           args.answer_model, args.profile, args.top_k_evidence)
+                           args.answer_model, args.profile, args.top_k_evidence,
+                           extra=full1540_extra)
 
     # Fail-closed resume check.
     if cfg_path.exists():
@@ -362,40 +382,121 @@ def main():
     index, per_sample = build_question_index(samples, elr)
     frozen = load_frozen_diags(args.artifact_glob)
 
-    # Select eligible questions: cat != 5, offset >= question_offset, capped.
-    # --stratify N picks the first N of each category 1-4 in offset order so a
-    # smoke run covers all four classes regardless of their global frequency.
-    selected = []
-    stratified_remaining = (
-        {cat: args.stratify for cat in (1, 2, 3, 4)}
-        if args.stratify is not None else None
-    )
-    for offset in sorted(frozen):
-        if offset < args.question_offset:
-            continue
-        qd = frozen[offset]
-        meta = index[offset]
-        cat = meta["category"]
-        try:
-            cat_int = int(cat)
-        except Exception:
-            cat_int = None
-        if cat_int == 5:
-            continue
-        if stratified_remaining is not None:
-            if cat_int not in stratified_remaining:
-                continue
-            if stratified_remaining[cat_int] <= 0:
-                continue
-            stratified_remaining[cat_int] -= 1
-        selected.append((offset, qd, meta, cat_int))
-        if args.max_questions is not None and len(selected) >= args.max_questions:
-            break
-
     already = {
         r["question_id"] for r in read_jsonl(per_q_path)
         if r.get("status") == "ok"
     } if args.resume else set()
+
+    manifest_sha = None
+    if args.e2e_manifest:
+        # Full-1540 mode: the manifest defines the question set; retrieval is
+        # taken from the frozen artifacts where available and from the
+        # supplement JSONL for the 9 evidence-unresolvable questions and
+        # offset 758. The manifest hash is verified on every launch.
+        import hashlib as _hashlib
+        manifest_path = Path(args.e2e_manifest)
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_sha = _hashlib.sha256(
+            manifest_path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        if cfg_path.exists():
+            prev = json.loads(cfg_path.read_text(encoding="utf-8"))
+            stored = prev.get("manifest_sha256")
+            if stored and stored != manifest_sha:
+                print("ERROR: full1540 manifest hash changed ({} -> {}).".format(
+                    stored[:16], manifest_sha[:16]))
+                return 6
+        method_key = {"sfv2_qwen3_4b": "sfv2_4b"}.get(args.method, args.method)
+        if not args.supplement_dir:
+            print("ERROR: --e2e-manifest requires --supplement-dir.")
+            return 2
+        supp_path = Path(args.supplement_dir) / "{}.jsonl".format(method_key)
+        supplement = {}
+        if supp_path.exists():
+            for line in supp_path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    r = json.loads(line)
+                    supplement[r["question_id"]] = r
+        meta_by_qid = {}
+        for sample in samples:
+            sid = str(sample.get("sample_id"))
+            for qa_index, qa in enumerate(sample.get("qa", [])):
+                if isinstance(qa, dict):
+                    meta_by_qid["{}:{}".format(sid, qa_index)] = {
+                        "sample_id": sid, "qa_index": qa_index,
+                        "question": qa.get("question"),
+                        "answer": qa.get("answer"),
+                        "category": qa.get("category")}
+        selected = []
+        for entry in manifest_data["questions"]:
+            qid = entry["question_id"]
+            meta = meta_by_qid.get(qid)
+            if meta is None:
+                print("ERROR: manifest question {} not found in dataset.".format(qid))
+                return 6
+            cat = int(entry["category_id"])
+            ro = entry["retrieval_offset"]
+            if ro is not None and ro != 758:
+                qd = frozen.get(ro)
+                if qd is None:
+                    print("ERROR: frozen retrieval missing for offset {} ({}).".format(
+                        ro, qid))
+                    return 6
+                selected.append((entry["offset"], qd, meta, cat))
+                continue
+            supp = supplement.get(qid)
+            if supp is None:
+                print("ERROR: no supplement row for {} (method {}).".format(
+                    qid, method_key))
+                return 6
+            qd = {
+                "result_ids": list(supp.get("retrieval_ids", [])),
+                "gold_mem_ids": list(supp.get("gold_mem_ids_dedup_first", [])),
+                "question_offset": None,
+            }
+            if supp.get("retrieval_status") != "ok":
+                # Frozen protocol: retrieval_timeout -> prescored failure row,
+                # no API call, kept in the N=1540 denominator.
+                qd["_retrieval_timeout"] = True
+            if ro is None:
+                # Evidence-unresolvable: gold cannot map to mem ids.
+                qd["_evidence_na"] = True
+            selected.append((entry["offset"], qd, meta, cat))
+        print("full1540 manifest mode: {} questions (frozen {} / supplement {})".format(
+            len(selected),
+            sum(1 for q in manifest_data["questions"]
+                if q["retrieval_offset"] is not None and q["retrieval_offset"] != 758),
+            sum(1 for q in manifest_data["questions"]
+                if q["retrieval_offset"] is None or q["retrieval_offset"] == 758)))
+    else:
+        # Select eligible questions: cat != 5, offset >= question_offset, capped.
+        # --stratify N picks the first N of each category 1-4 in offset order so a
+        # smoke run covers all four classes regardless of their global frequency.
+        selected = []
+        stratified_remaining = (
+            {cat: args.stratify for cat in (1, 2, 3, 4)}
+            if args.stratify is not None else None
+        )
+        for offset in sorted(frozen):
+            if offset < args.question_offset:
+                continue
+            qd = frozen[offset]
+            meta = index[offset]
+            cat = meta["category"]
+            try:
+                cat_int = int(cat)
+            except Exception:
+                cat_int = None
+            if cat_int == 5:
+                continue
+            if stratified_remaining is not None:
+                if cat_int not in stratified_remaining:
+                    continue
+                if stratified_remaining[cat_int] <= 0:
+                    continue
+                stratified_remaining[cat_int] -= 1
+            selected.append((offset, qd, meta, cat_int))
+            if args.max_questions is not None and len(selected) >= args.max_questions:
+                break
 
     # Question manifest: freeze the exact selection before any API call and
     # verify it (SHA256) on every subsequent run including resumes.
@@ -492,6 +593,8 @@ def main():
         "question_subset": "category != 5 (non-adversarial)",
         "manifest": args.manifest,
         "manifest_sha256": manifest_sha,
+        "e2e_manifest": args.e2e_manifest,
+        "supplement_dir": args.supplement_dir,
         "frozen_retrieval": True,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
@@ -521,6 +624,7 @@ def main():
                    for rid in result_ids]
         prompt = render_answer_prompt(answer_template, entries, [], meta["question"])
         em = sc.evidence_metrics(qd["result_ids"], qd["gold_mem_ids"])
+        ev_na = bool(qd.get("_evidence_na"))
         reference = meta["answer"] if meta["answer"] is not None else ""
         row = {
             "question_id": "{}:{}".format(meta["sample_id"], meta["qa_index"]),
@@ -538,13 +642,32 @@ def main():
             "answer_prompt_version": "mem0.v1",
             "answer_prompt_hash": answer_prompt_hash, "answer_temperature": 0.0,
             "top_k_evidence": args.top_k_evidence,
-            "hit1": em["hit_at_1"], "hit3": em["hit_at_3"], "hit10": em["hit_at_10"],
-            "mrr": em["mrr"], "n_gold": em["n_gold"],
-            "evidence_hits_at_10": em["evidence_hits_at_10"],
-            "first_gold_rank": em["first_gold_rank"],
+            "hit1": None if ev_na else em["hit_at_1"],
+            "hit3": None if ev_na else em["hit_at_3"],
+            "hit10": None if ev_na else em["hit_at_10"],
+            "mrr": None if ev_na else em["mrr"], "n_gold": em["n_gold"],
+            "evidence_hits_at_10": None if ev_na else em["evidence_hits_at_10"],
+            "first_gold_rank": None if ev_na else em["first_gold_rank"],
+            "evidence_metrics": "N/A" if ev_na else "ok",
             "status": "ok", "attempts": 1, "error": None,
             "run_id": run_id, "method": args.method, "config_digest": digest,
         }
+        if qd.get("_retrieval_timeout"):
+            # Frozen protocol: retrieval_timeout -> prescored failure row with
+            # NO API call, kept in the N=1540 denominator.
+            row.update({
+                "status": "retrieval_timeout",
+                "generated_answer": None,
+                "f1_mem0": 0.0, "f1_official": 0.0, "f1_memoryart": 0.0,
+                "f1_memoryos": 0.0, "bleu1_m1": 0.0, "bleu1_m4": 0.0,
+                "judge_result": "WRONG", "judge_source": "retrieval_timeout_policy",
+                "error": "retrieval_timeout per frozen protocol; no API call",
+            })
+            upsert_row(per_q_path, row)
+            write_checkpoint(run_dir, per_q_path, spent)
+            done += 1
+            print("  [timeout-prescored] {} (no API call)".format(row["question_id"]))
+            continue
         try:
             out = client.answer(prompt)
             row["generated_answer"] = out["text"]
