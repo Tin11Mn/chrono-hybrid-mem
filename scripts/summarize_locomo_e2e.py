@@ -78,6 +78,27 @@ def summarize_rows(rows):
                      "valid_model_identity": True, "status": "accepted"}]
         return []
 
+    def _is_rejected(attempt: dict) -> bool:
+        """True for any non-accepted identity attempt (new taxonomy or legacy)."""
+        st = attempt.get("status")
+        if st == "accepted":
+            return False
+        if st in ("identity_valid",):
+            return False
+        return True
+
+    def _identity_category(attempt: dict) -> str:
+        st = attempt.get("status")
+        cat = attempt.get("identity_category")
+        if cat:
+            return cat
+        # legacy mapping
+        if st == "model_drift":
+            return "snapshot_identity_unverified"  # conservative legacy label
+        if st == "transport_error":
+            return "transport_error"
+        return st or "unknown"
+
     # gateway model verification: returned-model and system-fingerprint
     # distributions (fingerprints may vary freely; only recorded, never failed).
     out["model_verification"] = {
@@ -90,6 +111,9 @@ def summarize_rows(rows):
         "judge_system_fingerprints": dict(_count(r.get("judge_system_fingerprint") for r in ok
                                                  if r.get("judge_system_fingerprint"))),
         "answer_drift_errors": sum(1 for r in rows if r.get("model_drift")),
+        "answer_identity_rejected": sum(
+            1 for r in rows for a in r.get("answer_attempts", [])
+            if a.get("status") not in ("accepted", "identity_valid")),
         "judge_drift_errors": len([
             a for r in rows for a in _judge_attempts_of(r)
             if a.get("status") == "model_drift"]),
@@ -100,17 +124,21 @@ def summarize_rows(rows):
     # 100% gpt-4o-mini-2024-07-18).
     attempts = [a for r in rows for a in _judge_attempts_of(r)]
     acc = [a for a in attempts if a.get("status") == "accepted"]
-    drift = [a for a in attempts if a.get("status") == "model_drift"]
-    transport = [a for a in attempts if a.get("status") == "transport_error"]
+    rejected = [a for a in attempts if _is_rejected(a)]
+    drift = [a for a in rejected if _identity_category(a) == "snapshot_identity_unverified"]
+    wrong = [a for a in rejected if _identity_category(a) == "explicit_wrong_model"]
+    transport = [a for a in rejected if _identity_category(a) == "transport_error"]
     per_q_attempts = [len(_judge_attempts_of(r)) for r in rows
                       if r.get("judge_returned_model") or r.get("judge_attempts")]
     out["model_routing_reliability"] = {
         "total_judge_attempts": len(attempts),
         "valid_judge_responses": len(acc),
-        "model_drift_attempts": len(drift),
+        "identity_rejected_attempts": len(rejected),
+        "snapshot_identity_unverified_attempts": len(drift),
+        "explicit_wrong_model_attempts": len(wrong),
         "transport_error_attempts": len(transport),
-        "drift_rate_per_attempt": (round(len(drift) / len(attempts), 4)
-                                   if attempts else None),
+        "identity_mismatch_rate_per_attempt": (round(len(rejected) / len(attempts), 4)
+                                               if attempts else None),
         "returned_model_distribution_all_attempts": dict(
             _count(a.get("returned_model") for a in attempts)),
         "accepted_returned_model_distribution": dict(

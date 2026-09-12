@@ -39,8 +39,45 @@ EXPECTED_RETURNED_MODEL = "gpt-4o-mini-2024-07-18"
 MAX_JUDGE_ATTEMPTS = 3
 
 
+# Identity taxonomy mirrors evaluate_locomo_e2e (frozen 2026-09-12):
+# identity_valid / snapshot_identity_unverified / explicit_wrong_model /
+# evaluator_invariant_violation. "model_drift" is deprecated as ambiguous.
+
+
+def classify_returned_model(returned_model: object) -> dict:
+    """Classify one returned-model identity verdict (see e2e helper)."""
+    norm = (str(returned_model).strip()
+            if returned_model is not None else "")
+    recomputed = (norm == EXPECTED_RETURNED_MODEL)
+    if recomputed:
+        return {"identity_valid": True, "identity_category": "identity_valid"}
+    if norm == REQUESTED_MODEL:
+        return {"identity_valid": False,
+                "identity_category": "snapshot_identity_unverified"}
+    if norm:
+        return {"identity_valid": False,
+                "identity_category": "explicit_wrong_model"}
+    return {"identity_valid": False, "identity_category": "transport_error"}
+
+
+def verify_identity_invariant(question_id: str, attempt_index: int,
+                              returned_model: object, stored_valid: object,
+                              status: str) -> str:
+    """Return the identity category, asserting stored==recomputed."""
+    verdict = classify_returned_model(returned_model)
+    recomputed = verdict["identity_valid"]
+    if stored_valid is not None and bool(stored_valid) != recomputed:
+        raise RuntimeError(
+            "evaluator_invariant_violation qid={} attempt={} returned={!r} "
+            "stored_valid={} recomputed={}".format(
+                question_id, attempt_index, returned_model,
+                stored_valid, recomputed))
+    return verdict["identity_category"]
+
+
 class ModelDriftError(RuntimeError):
-    """The gateway returned a model id other than EXPECTED_RETURNED_MODEL."""
+    """Reserved for residual raise paths; identity classification now uses
+    verify_identity_invariant instead of this label."""
 
 
 def sha256_text(s: str) -> str:
@@ -90,18 +127,16 @@ class JudgeClient:
         )
         latency = (time.time() - t0) * 1000
         returned_model = getattr(resp, "model", None)
-        # Identity gate: the response is VALID only when the gateway returned
-        # the frozen snapshot id. Invalid responses are reported via
-        # valid_model_identity/status; the caller owns the per-question retry
-        # policy and must never score them.
-        valid = returned_model == EXPECTED_RETURNED_MODEL
+        cat = classify_returned_model(returned_model)
+        valid = cat["identity_valid"]
         choice = resp.choices[0].message.content or ""
         usage = getattr(resp, "usage", None)
         return {
             "raw": choice,
             "model_returned": returned_model,
             "valid_model_identity": valid,
-            "status": "accepted" if valid else "model_drift",
+            "identity_category": cat["identity_category"],
+            "status": "accepted" if valid else cat["identity_category"],
             "system_fingerprint": getattr(resp, "system_fingerprint", None),
             "latency_ms": latency,
             "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
@@ -251,24 +286,29 @@ def main() -> int:
                     "requested_model": args.judge_model,
                     "returned_model": None,
                     "system_fingerprint": None,
-                    "valid_model_identity": False,
+                    "identity_valid": False,
+                    "identity_category": "transport_error",
                     "status": "transport_error",
                     "error": str(exc)[:200],
                 })
                 continue
+            cat = verify_identity_invariant(
+                row["question_id"], attempt_no, out.get("model_returned"),
+                out.get("valid_model_identity"), out.get("status"))
             attempts.append({
                 "attempt": attempt_no,
                 "requested_model": args.judge_model,
                 "returned_model": out.get("model_returned"),
                 "system_fingerprint": out.get("system_fingerprint"),
-                "valid_model_identity": bool(out.get("valid_model_identity")),
-                "status": out.get("status"),
+                "identity_valid": out.get("valid_model_identity") is True,
+                "identity_category": cat,
+                "status": "accepted" if cat == "identity_valid" else cat,
                 "input_tokens": out.get("input_tokens", 0),
                 "output_tokens": out.get("output_tokens", 0),
             })
             answer_spent += (out.get("input_tokens", 0) * args.price_in_per_1m
                              + out.get("output_tokens", 0) * args.price_out_per_1m) / 1e6
-            if out.get("valid_model_identity") is True:
+            if cat == "identity_valid":
                 accepted = out
                 break
         row["judge_attempts"] = attempts

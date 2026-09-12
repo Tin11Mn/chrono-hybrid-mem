@@ -45,8 +45,10 @@ class StubClient:
         self.calls += 1
         # leakage guard: the answer prompt must never contain the gold answer
         # text beyond what the evidence itself states (gold is passed separately).
-        return {"text": "stub answer", "model_returned": "stub",
-                "valid_model_identity": True, "status": "accepted",
+        return {"text": "stub answer",
+                "model_returned": "gpt-4o-mini-2024-07-18",
+                "valid_model_identity": True, "identity_category": "identity_valid",
+                "status": "accepted",
                 "system_fingerprint": "fp_stub",
                 "latency_ms": 1.0, "input_tokens": 10, "output_tokens": 2}
 
@@ -91,7 +93,8 @@ def test_full_pipeline_and_schema(workdir, monkeypatch):
                 "reference_answer", "retrieved_evidence_ids", "generated_answer",
                 "answer_model", "answer_prompt_hash",
                 "f1_official", "f1_mem0", "bleu1_m1", "hit1", "hit3", "hit10",
-                "mrr", "n_gold", "status", "run_id", "method", "config_digest"}
+                "mrr", "n_gold", "status", "run_id", "method", "config_digest",
+                "answer_attempts"}
     for r in rows:
         assert required <= set(r), required - set(r)
         assert r["status"] == "ok"
@@ -130,27 +133,43 @@ def test_config_digest_fail_closed(workdir, monkeypatch):
 
 
 class FailOnceStub(StubClient):
-    """Fails the FIRST answer call with transport error, succeeds afterwards."""
+    """Fails the FIRST answer call with transport error, succeeds afterwards.
+
+    Uses a per-question failure flag via the row's own state so the failure is
+    scoped to the first attempt of each question individually.
+    """
 
     def __init__(self, base_url, model, timeout):
         super().__init__(base_url, model, timeout)
-        self.failed = False
+        self.failed_qids = set()
 
     def answer(self, prompt):
-        if not self.failed:
-            self.failed = True
-            raise RuntimeError("stub transient failure")
+        # Scope the one-shot failure to the FIRST attempt of each question: the
+        # question text (unique per row) serves as the key.
+        qid = None
+        for line in prompt.splitlines():
+            if line.startswith("Question: "):
+                qid = line[len("Question: "):].strip()
+                break
+        if qid is not None and qid not in self.failed_qids:
+            self.failed_qids.add(qid)
+            raise RuntimeError("stub transient failure for {}".format(qid))
         return super().answer(prompt)
 
 
 class AllDriftStub(StubClient):
-    """All attempts return model identity drift."""
+    """All attempts return model identity drift (snapshot_identity_unverified)."""
 
     def answer(self, prompt):
-        return {"text": "x", "model_returned": "gpt-4.1-mini-2025-04-14",
-                "valid_model_identity": False, "status": "model_drift",
+        return {"text": "x", "model_returned": "gpt-4o-mini",
+                "valid_model_identity": False, "identity_category": "snapshot_identity_unverified",
+                "status": "snapshot_identity_unverified",
                 "system_fingerprint": "fp_drift",
                 "latency_ms": 1.0, "input_tokens": 10, "output_tokens": 2}
+
+
+class AlwaysDriftAnswerStub(AllDriftStub):
+    """Backwards-compatible alias for the all-drift answer stub."""
 
 
 def test_answer_transport_failure_retries_in_question(workdir, monkeypatch):
@@ -236,7 +255,8 @@ def test_answer_client_reports_model_drift(workdir, monkeypatch):
     client._c = types.SimpleNamespace(chat=FakeChat("gpt-3.5-turbo"))
     out = client.answer("ping")
     assert out["valid_model_identity"] is False
-    assert out["status"] == "model_drift"
+    assert out["status"] == "explicit_wrong_model"
+    assert out["identity_category"] == "explicit_wrong_model"
     assert out["model_returned"] == "gpt-3.5-turbo"
     # expected returned model -> passes, fingerprint captured
     client._c = types.SimpleNamespace(chat=FakeChat(e2e.EXPECTED_RETURNED_MODEL))
@@ -262,8 +282,10 @@ class AlwaysDriftAnswerStub:
         pass
 
     def answer(self, prompt):
-        return {"text": "x", "model_returned": "gpt-4.1-mini-2025-04-14",
-                "valid_model_identity": False, "status": "model_drift",
+        return {"text": "x", "model_returned": "gpt-4o-mini",
+                "valid_model_identity": False,
+                "identity_category": "snapshot_identity_unverified",
+                "status": "snapshot_identity_unverified",
                 "system_fingerprint": "fp_drift", "latency_ms": 1.0,
                 "input_tokens": 10, "output_tokens": 2}
 
@@ -279,7 +301,7 @@ def test_main_stops_on_model_drift(workdir, monkeypatch):
     assert len(rows) == 1  # checkpoint persisted, no further questions
     assert len(rows[0]["answer_attempts"]) == 3
     assert rows[0]["status"] == "error"
-    assert rows[0]["answer_model_drift"] is True
+    assert rows[0]["identity_exhausted"] is True
     assert rows[0].get("generated_answer") is None  # drift content never scored
 
 
@@ -359,8 +381,10 @@ class FlakyJudgeStub:
     def judge(self, prompt):
         self.calls += 1
         if self.calls <= 2:
-            return {"raw": '{"label":"WRONG"}', "model_returned": "gpt-4.1-mini-2025-04-14",
-                    "valid_model_identity": False, "status": "model_drift",
+            return {"raw": '{"label":"WRONG"}', "model_returned": "gpt-4o-mini",
+                    "valid_model_identity": False,
+                    "identity_category": "snapshot_identity_unverified",
+                    "status": "snapshot_identity_unverified",
                     "system_fingerprint": "fp_drift", "latency_ms": 1.0,
                     "input_tokens": 10, "output_tokens": 2}
         return {"raw": '{"label":"CORRECT"}',
@@ -377,8 +401,10 @@ class AlwaysDriftJudgeStub:
         pass
 
     def judge(self, prompt):
-        return {"raw": '{"label":"CORRECT"}', "model_returned": "gpt-4.1-mini-2025-04-14",
-                "valid_model_identity": False, "status": "model_drift",
+        return {"raw": '{"label":"CORRECT"}', "model_returned": "gpt-4o-mini",
+                "valid_model_identity": False,
+                "identity_category": "snapshot_identity_unverified",
+                "status": "snapshot_identity_unverified",
                 "system_fingerprint": "fp_drift", "latency_ms": 1.0,
                 "input_tokens": 10, "output_tokens": 2}
 
@@ -404,7 +430,8 @@ def test_judge_retries_drift_then_accepts(workdir, monkeypatch):
     assert row["judge_result"] == "CORRECT"
     assert row["judge_returned_model"] == "gpt-4o-mini-2024-07-18"
     attempts = row["judge_attempts"]
-    assert [a["status"] for a in attempts] == ["model_drift", "model_drift", "accepted"]
+    assert [a["status"] for a in attempts] == [
+        "snapshot_identity_unverified", "snapshot_identity_unverified", "accepted"]
     # drifted attempt content must not appear anywhere in the row
     assert all("raw" not in a for a in attempts)
 

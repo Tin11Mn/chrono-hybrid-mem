@@ -54,6 +54,60 @@ EXPECTED_RETURNED_MODEL = "gpt-4o-mini-2024-07-18"
 # mirrors MAX_JUDGE_ATTEMPTS): 3 attempts, then STOP the whole run.
 MAX_ANSWER_ATTEMPTS = 3
 
+# Identity taxonomy (frozen 2026-09-12, replaces the ambiguous "model_drift"):
+# - identity_valid: normalized returned model == expected snapshot
+# - snapshot_identity_unverified: returned model is the request alias but does
+#   NOT equal the exact snapshot (gateway failed to pin the snapshot)
+# - explicit_wrong_model: returned model is some other concrete model id
+# - evaluator_invariant_violation: stored identity verdict contradicts the
+#   recomputed verdict (evaluator bug -> MUST stop, never retry)
+NORMALIZED_MODEL_CANONICAL = {
+    "gpt-4o-mini-2024-07-18": "gpt-4o-mini-2024-07-18",
+}
+
+
+def classify_returned_model(returned_model: object) -> dict:
+    """Classify one returned-model identity verdict.
+
+    Returns {"identity_valid": bool, "identity_category": str}. The category
+    is derived from the RAW returned string plus the frozen expectation, never
+    from stored attempt metadata (the stored field is checked separately for
+    invariant violations).
+    """
+    norm = (str(returned_model).strip()
+            if returned_model is not None else "")
+    recomputed = (norm == EXPECTED_RETURNED_MODEL)
+    if recomputed:
+        return {"identity_valid": True, "identity_category": "identity_valid"}
+    if norm == REQUESTED_MODEL:
+        return {"identity_valid": False,
+                "identity_category": "snapshot_identity_unverified"}
+    if norm:
+        return {"identity_valid": False,
+                "identity_category": "explicit_wrong_model"}
+    return {"identity_valid": False, "identity_category": "transport_error"}
+
+
+def verify_identity_invariant(question_id: str, attempt_index: int,
+                              returned_model: object, stored_valid: object,
+                              status: str) -> str:
+    """Return the identity category, asserting stored==recomputed.
+
+    Raises RuntimeError (evaluator_invariant_violation) when the stored
+    identity verdict contradicts the recomputed verdict — that is an
+    evaluator bug and must STOP, never enter retry.
+    """
+    verdict = classify_returned_model(returned_model)
+    recomputed = verdict["identity_valid"]
+    stored_bool = bool(stored_valid)
+    if recomputed != stored_bool and stored_valid is not None:
+        raise RuntimeError(
+            "evaluator_invariant_violation qid={} attempt={} returned={!r} "
+            "stored_valid={} recomputed={}".format(
+                question_id, attempt_index, returned_model,
+                stored_valid, recomputed))
+    return verdict["identity_category"]
+
 
 class ModelDriftError(RuntimeError):
     """The gateway returned a model id other than EXPECTED_RETURNED_MODEL."""
@@ -219,13 +273,15 @@ class AnswerClient:
         # snapshot id. Invalid responses are reported via
         # valid_model_identity/status; the caller owns the per-question retry
         # policy and must never score them.
-        valid = returned_model == EXPECTED_RETURNED_MODEL
+        cat = classify_returned_model(returned_model)
+        valid = cat["identity_valid"]
         usage = getattr(resp, "usage", None)
         return {
             "text": (resp.choices[0].message.content or "").strip(),
             "model_returned": returned_model,
             "valid_model_identity": valid,
-            "status": "accepted" if valid else "model_drift",
+            "identity_category": cat["identity_category"],
+            "status": "accepted" if valid else cat["identity_category"],
             "system_fingerprint": getattr(resp, "system_fingerprint", None),
             "latency_ms": latency,
             "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
@@ -690,38 +746,43 @@ def main():
                         "requested_model": args.answer_model,
                         "returned_model": None,
                         "system_fingerprint": None,
-                        "valid_model_identity": False,
+                        "identity_valid": False,
+                        "identity_category": "transport_error",
                         "status": "transport_error",
                         "error": str(exc)[:200],
                     })
                     continue
+                cat = verify_identity_invariant(
+                    row["question_id"], attempt_no, out.get("model_returned"),
+                    out.get("valid_model_identity"), out.get("status"))
                 attempts.append({
                     "attempt": attempt_no,
                     "requested_model": args.answer_model,
                     "returned_model": out.get("model_returned"),
                     "system_fingerprint": out.get("system_fingerprint"),
-                    "valid_model_identity": bool(out.get("valid_model_identity")),
-                    "status": out.get("status"),
+                    "identity_valid": out.get("valid_model_identity") is True,
+                    "identity_category": cat,
+                    "status": "accepted" if cat == "identity_valid" else cat,
                     "input_tokens": out.get("input_tokens", 0),
                     "output_tokens": out.get("output_tokens", 0),
                 })
                 spent += (out.get("input_tokens", 0) * args.price_in_per_1m
                           + out.get("output_tokens", 0) * args.price_out_per_1m) / 1e6
-                if out.get("valid_model_identity") is True:
+                if cat == "identity_valid":
                     accepted = out
                     break
             row["answer_attempts"] = attempts
             drift_cost = sum(
                 (a.get("input_tokens") or 0) * args.price_in_per_1m
                 + (a.get("output_tokens") or 0) * args.price_out_per_1m
-                for a in attempts if a.get("status") != "accepted") / 1e6
+                for a in attempts if a.get("status") != "identity_valid") / 1e6
             if drift_cost:
                 row["answer_drift_cost"] = round(drift_cost, 6)
             if accepted is None:
                 # 3 attempts without a valid snapshot -> NO-GO signal.
                 row["status"] = "error"
-                row["answer_model_drift"] = any(
-                    a.get("status") == "model_drift" for a in attempts)
+                row["identity_exhausted"] = True
+                row["answer_attempts"] = attempts  # preserve attempt ledger
                 row["error"] = (
                     "no {} response after {} attempts ({})".format(
                         EXPECTED_RETURNED_MODEL, len(attempts),
@@ -729,7 +790,7 @@ def main():
                 upsert_row(per_q_path, row)
                 save_raw_output(run_dir, row["question_id"], "answer", {
                     "question_id": row["question_id"], "phase": "answer",
-                    "judge_attempts": attempts,
+                    "attempts": attempts,
                     "status": row["status"], "error": row["error"]})
                 write_checkpoint(run_dir, per_q_path, spent)
                 print("ANSWER GIVE-UP: {} after {} attempts ({}); checkpoint "
