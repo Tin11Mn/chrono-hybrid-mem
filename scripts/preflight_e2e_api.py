@@ -61,7 +61,9 @@ def main() -> int:
 
     usage_ok = out["input_tokens"] > 0 and jout["input_tokens"] > 0
     label_ok = label in ("CORRECT", "WRONG")
-    identity_ok = (out.get("valid_model_identity") is True
+    # answer side: the client raises ModelDriftError on mismatch, so reaching
+    # here means the identity held; verify the echoed id anyway.
+    identity_ok = (out["model_returned"] == e2e.EXPECTED_RETURNED_MODEL
                    and jout.get("valid_model_identity") is True)
     passed = usage_ok and label_ok and identity_ok
     print("preflight: {}".format("PASS" if passed else "FAIL"))
