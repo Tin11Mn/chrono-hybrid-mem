@@ -162,7 +162,7 @@ def test_resume_retries_failed_questions(workdir, monkeypatch):
     assert len(retried) == 1 and retried[0]["status"] == "ok"
 
 
-def test_answer_client_rejects_model_drift(workdir, monkeypatch):
+def test_answer_client_reports_model_drift(workdir, monkeypatch):
     import types
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
     client = _REAL_ANSWER_CLIENT("http://127.0.0.1:9/v1", e2e.REQUESTED_MODEL, 5.0)
@@ -185,39 +185,67 @@ def test_answer_client_rejects_model_drift(workdir, monkeypatch):
         def __init__(self, model):
             self.completions = FakeCompletions(model)
 
-    # wrong returned model -> ModelDriftError (fail closed)
+    # wrong returned model -> invalid identity, never scored
     client._c = types.SimpleNamespace(chat=FakeChat("gpt-3.5-turbo"))
-    with pytest.raises(e2e.ModelDriftError):
-        client.answer("ping")
+    out = client.answer("ping")
+    assert out["valid_model_identity"] is False
+    assert out["status"] == "model_drift"
+    assert out["model_returned"] == "gpt-3.5-turbo"
     # expected returned model -> passes, fingerprint captured
     client._c = types.SimpleNamespace(chat=FakeChat(e2e.EXPECTED_RETURNED_MODEL))
     out = client.answer("ping")
-    assert out["model_returned"] == e2e.EXPECTED_RETURNED_MODEL
+    assert out["valid_model_identity"] is True
     assert out["system_fingerprint"] == "fp_test"
 
 
 class DriftStub:
-    """AnswerClient stand-in whose every call raises ModelDriftError."""
+    """AnswerClient stand-in whose every call raises (transport failure)."""
 
     def __init__(self, base_url, model, timeout):
         pass
 
     def answer(self, prompt):
-        raise e2e.ModelDriftError(
-            "answer model drift: requested gpt-4o-mini but gateway returned "
-            "gpt-3.5-turbo")
+        raise RuntimeError("stub transport failure")
+
+
+class AlwaysDriftAnswerStub:
+    """AnswerClient stand-in that never returns a valid snapshot."""
+
+    def __init__(self, base_url, model, timeout):
+        pass
+
+    def answer(self, prompt):
+        return {"text": "x", "model_returned": "gpt-4.1-mini-2025-04-14",
+                "valid_model_identity": False, "status": "model_drift",
+                "system_fingerprint": "fp_drift", "latency_ms": 1.0,
+                "input_tokens": 10, "output_tokens": 2}
 
 
 def test_main_stops_on_model_drift(workdir, monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
     monkeypatch.delenv("CHATANYWHERE_API_KEY", raising=False)
-    rc, run_dir = _run(workdir, "t7", max_q=3, client=DriftStub)
-    assert rc == 5  # drift exit code
+    # identity drift on every attempt: 3 attempts then whole-run stop (exit 7)
+    rc, run_dir = _run(workdir, "t7", max_q=3, client=AlwaysDriftAnswerStub)
+    assert rc == 7
     rows = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
         encoding="utf-8").splitlines() if l.strip()]
-    assert len(rows) == 1  # checkpoint persisted, no further calls
-    assert rows[0]["model_drift"] is True
+    assert len(rows) == 1  # checkpoint persisted, no further questions
+    assert len(rows[0]["answer_attempts"]) == 3
     assert rows[0]["status"] == "error"
+    assert rows[0]["answer_model_drift"] is True
+    assert rows[0].get("generated_answer") is None  # drift content never scored
+
+
+def test_main_stops_on_transport_failure(workdir, monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("CHATANYWHERE_API_KEY", raising=False)
+    rc, run_dir = _run(workdir, "t7b", max_q=3, client=DriftStub)
+    assert rc == 7
+    rows = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+        encoding="utf-8").splitlines() if l.strip()]
+    assert len(rows) == 1
+    statuses = [a["status"] for a in rows[0]["answer_attempts"]]
+    assert statuses == ["transport_error"] * 3
 
 
 def test_manifest_freeze_and_tamper_fail_closed(workdir, monkeypatch):

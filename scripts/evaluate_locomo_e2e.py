@@ -50,6 +50,9 @@ DEFAULT_BASE_URL = "https://api.chatanywhere.tech/v1"
 API_KEY_ENV = "CHATANYWHERE_API_KEY"
 REQUESTED_MODEL = "gpt-4o-mini"
 EXPECTED_RETURNED_MODEL = "gpt-4o-mini-2024-07-18"
+# Identity-validated retry budget per question per phase (frozen 2026-09-12,
+# mirrors MAX_JUDGE_ATTEMPTS): 3 attempts, then STOP the whole run.
+MAX_ANSWER_ATTEMPTS = 3
 
 
 class ModelDriftError(RuntimeError):
@@ -212,14 +215,17 @@ class AnswerClient:
         )
         latency = (time.time() - t0) * 1000
         returned_model = getattr(resp, "model", None)
-        if returned_model != EXPECTED_RETURNED_MODEL:
-            raise ModelDriftError(
-                "answer model drift: requested {} but gateway returned {}".format(
-                    self.model, returned_model))
+        # Identity gate: VALID only when the gateway returned the frozen
+        # snapshot id. Invalid responses are reported via
+        # valid_model_identity/status; the caller owns the per-question retry
+        # policy and must never score them.
+        valid = returned_model == EXPECTED_RETURNED_MODEL
         usage = getattr(resp, "usage", None)
         return {
             "text": (resp.choices[0].message.content or "").strip(),
             "model_returned": returned_model,
+            "valid_model_identity": valid,
+            "status": "accepted" if valid else "model_drift",
             "system_fingerprint": getattr(resp, "system_fingerprint", None),
             "latency_ms": latency,
             "input_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
@@ -669,7 +675,69 @@ def main():
             print("  [timeout-prescored] {} (no API call)".format(row["question_id"]))
             continue
         try:
-            out = client.answer(prompt)
+            # Identity-validated retry (frozen Full-1540 policy): identical
+            # inputs every attempt; retry ONLY on returned-model identity
+            # mismatch or transport failure, never on content. Max 3 attempts,
+            # then STOP the whole run.
+            attempts = []
+            accepted = None
+            for attempt_no in range(1, MAX_ANSWER_ATTEMPTS + 1):
+                try:
+                    out = client.answer(prompt)
+                except Exception as exc:
+                    attempts.append({
+                        "attempt": attempt_no,
+                        "requested_model": args.answer_model,
+                        "returned_model": None,
+                        "system_fingerprint": None,
+                        "valid_model_identity": False,
+                        "status": "transport_error",
+                        "error": str(exc)[:200],
+                    })
+                    continue
+                attempts.append({
+                    "attempt": attempt_no,
+                    "requested_model": args.answer_model,
+                    "returned_model": out.get("model_returned"),
+                    "system_fingerprint": out.get("system_fingerprint"),
+                    "valid_model_identity": bool(out.get("valid_model_identity")),
+                    "status": out.get("status"),
+                    "input_tokens": out.get("input_tokens", 0),
+                    "output_tokens": out.get("output_tokens", 0),
+                })
+                spent += (out.get("input_tokens", 0) * args.price_in_per_1m
+                          + out.get("output_tokens", 0) * args.price_out_per_1m) / 1e6
+                if out.get("valid_model_identity") is True:
+                    accepted = out
+                    break
+            row["answer_attempts"] = attempts
+            drift_cost = sum(
+                (a.get("input_tokens") or 0) * args.price_in_per_1m
+                + (a.get("output_tokens") or 0) * args.price_out_per_1m
+                for a in attempts if a.get("status") != "accepted") / 1e6
+            if drift_cost:
+                row["answer_drift_cost"] = round(drift_cost, 6)
+            if accepted is None:
+                # 3 attempts without a valid snapshot -> NO-GO signal.
+                row["status"] = "error"
+                row["answer_model_drift"] = any(
+                    a.get("status") == "model_drift" for a in attempts)
+                row["error"] = (
+                    "no {} response after {} attempts ({})".format(
+                        EXPECTED_RETURNED_MODEL, len(attempts),
+                        ",".join(a["status"] for a in attempts)))
+                upsert_row(per_q_path, row)
+                save_raw_output(run_dir, row["question_id"], "answer", {
+                    "question_id": row["question_id"], "phase": "answer",
+                    "judge_attempts": attempts,
+                    "status": row["status"], "error": row["error"]})
+                write_checkpoint(run_dir, per_q_path, spent)
+                print("ANSWER GIVE-UP: {} after {} attempts ({}); checkpoint "
+                      "persisted; STOPPING WHOLE RUN.".format(
+                          row["question_id"], len(attempts),
+                          ",".join(a["status"] for a in attempts)))
+                return 7
+            out = accepted
             row["generated_answer"] = out["text"]
             row["answer_model_returned"] = out["model_returned"]
             row["answer_returned_model"] = out["model_returned"]
@@ -680,11 +748,11 @@ def main():
             row_cost = (out["input_tokens"] * args.price_in_per_1m
                         + out["output_tokens"] * args.price_out_per_1m) / 1e6
             row["estimated_answer_cost"] = round(row_cost, 6)
-            spent += row_cost
+            row["attempts"] = len(attempts)
             row["cumulative_cost"] = round(spent, 6)
             row.update(sc.score_answer(out["text"], reference, cat))
         except ModelDriftError as exc:
-            # Fail closed: persist the checkpoint row, start no further calls.
+            # Retained for any residual raise path: fail closed.
             row["status"] = "error"
             row["model_drift"] = True
             row["error"] = str(exc)[:200]
