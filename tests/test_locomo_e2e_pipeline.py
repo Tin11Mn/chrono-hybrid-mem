@@ -411,6 +411,41 @@ class AlwaysDriftJudgeStub:
                 "input_tokens": 10, "output_tokens": 2}
 
 
+class RateLimitError(Exception):
+    """Simulates an OpenAI HTTP 429 response."""
+    def __init__(self):
+        super().__init__("429 rate limit")
+        self.status_code = 429
+        self.headers = {"Retry-After": "0.1"}
+
+
+class AlwaysRateLimitJudgeStub:
+    """Every judge call raises 429 → per-q streak exhaustion."""
+
+    def __init__(self, base_url, model, timeout):
+        pass
+
+    def judge(self, prompt):
+        raise RateLimitError()
+
+
+class FlakyRateLimitJudgeStub:
+    """Two 429s then one success → verifies global counter resets."""
+
+    def __init__(self, base_url, model, timeout):
+        self.calls = 0
+
+    def judge(self, prompt):
+        self.calls += 1
+        if self.calls <= 2:
+            raise RateLimitError()
+        return {"raw": '{"label":"CORRECT"}', "model_returned": "gpt-4o-mini",
+                "model_identity": "alias_only_snapshot_unverified", "accepted": True,
+                "attempt_outcome": "accepted",
+                "system_fingerprint": "fp_ok", "latency_ms": 1.0,
+                "input_tokens": 10, "output_tokens": 2}
+
+
 def test_judge_retries_drift_then_accepts(workdir, monkeypatch):
     monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
     monkeypatch.delenv("CHATANYWHERE_API_KEY", raising=False)
@@ -506,3 +541,56 @@ def test_summarizer_outputs(workdir, monkeypatch):
     assert "sensitivity_full_set" in ms and ms["sensitivity_full_set"]["full_n"] == 1540
     assert 0.0 <= ms["evidence_recall_at_10"] <= 1.0
     assert "_by_id" in cs
+
+
+def test_judge_429_per_question_exhaustion(workdir, monkeypatch):
+    """3 consecutive 429s on same question → rate_limit_exhausted, STOP."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("CHATANYWHERE_API_KEY", raising=False)
+    rc, run_dir = _run(workdir, "t11", max_q=1)
+    assert rc == 0
+    argv = sys.argv
+    sys.argv = ["x", "--run-dir", str(run_dir)]
+    original = jd.JudgeClient
+    jd.JudgeClient = AlwaysRateLimitJudgeStub
+    try:
+        rc2 = jd.main()
+    finally:
+        sys.argv = argv
+        jd.JudgeClient = original
+    assert rc2 == 7
+    rows = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+        encoding="utf-8").splitlines() if l.strip()]
+    row = rows[0]
+    attempts = row["judge_attempts"]
+    assert len(attempts) == 3
+    assert all(a["attempt_outcome"] == "rate_limit" for a in attempts)
+    assert row.get("judge_result") is None
+    assert row.get("judge_error") is not None
+
+
+def test_global_429_resets_on_success(workdir, monkeypatch):
+    """Two 429s then one success resets global counter; no global STOP."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:9/v1")
+    monkeypatch.delenv("CHATANYWHERE_API_KEY", raising=False)
+    rc, run_dir = _run(workdir, "t12", max_q=1)
+    assert rc == 0
+    argv = sys.argv
+    sys.argv = ["x", "--run-dir", str(run_dir)]
+    original = jd.JudgeClient
+    jd.JudgeClient = FlakyRateLimitJudgeStub
+    try:
+        rc2 = jd.main()
+    finally:
+        sys.argv = argv
+        jd.JudgeClient = original
+    assert rc2 == 0
+    rows = [json.loads(l) for l in (run_dir / "per_question.jsonl").read_text(
+        encoding="utf-8").splitlines() if l.strip()]
+    row = rows[0]
+    attempts = row["judge_attempts"]
+    assert len(attempts) == 3
+    assert attempts[0]["attempt_outcome"] == "rate_limit"
+    assert attempts[1]["attempt_outcome"] == "rate_limit"
+    assert attempts[2]["attempt_outcome"] == "accepted"
+    assert row["judge_result"] == "CORRECT"

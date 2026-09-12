@@ -298,6 +298,7 @@ def main() -> int:
 
     client = JudgeClient(base_url, args.judge_model, args.timeout)
     done = 0
+    global_consecutive_429 = 0
     answer_spent = sum(
         r.get("estimated_answer_cost", 0.0) or 0.0
         for r in rows if r.get("status") == "ok"
@@ -334,6 +335,17 @@ def main() -> int:
                 out = client.judge(prompt)
             except Exception as exc:
                 if is_429_exception(exc):
+                    global_consecutive_429 += 1
+                    if global_consecutive_429 >= GLOBAL_429_STOP:
+                        row["judge_error"] = (
+                            "persistent 429: {} consecutive".format(
+                                global_consecutive_429))
+                        row["rate_limit_exhausted"] = True
+                        write_jsonl_atomic(per_q_path, rows)
+                        write_checkpoint(run_dir, per_q_path, rows)
+                        print("JUDGE PERSISTENT 429 ({}) -> STOP".format(
+                            global_consecutive_429))
+                        return 7
                     outcome = "rate_limit"
                     wait = retry_after_seconds(exc) or (
                         RATE_LIMIT_BACKOFFS[min(streaks["rate_limit"],
@@ -351,6 +363,7 @@ def main() -> int:
                     if wait:
                         time.sleep(wait)
                 else:
+                    global_consecutive_429 = 0
                     outcome = "transport_error"
                     attempts.append({
                         "attempt": attempt_no,
@@ -369,6 +382,7 @@ def main() -> int:
                 if streaks[outcome] >= MAX_JUDGE_ATTEMPTS:
                     break
                 continue
+            global_consecutive_429 = 0  # successful response resets
             model_identity = classify_model_identity(out.get("model_returned"))
             accepted_flag = model_identity in ACCEPTED_IDENTITIES
             if model_identity == "unavailable":

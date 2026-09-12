@@ -147,12 +147,24 @@ STOP only when:
 1. same question: 3 consecutive `explicit_wrong_model`
 2. same question: 3 consecutive `transport_error`
 3. same question: 3 consecutive `malformed_response`
-4. persistent 429: `global_consecutive_429 ≥ 5`
+3b. same question: 3 consecutive `rate_limit` → `rate_limit_exhausted`
+4. persistent 429 (global): `global_consecutive_429 ≥ 5` (resets to 0 on
+   any non-429 attempt; ensures a rare 429 within a long run is safe, while
+   a sustained barrage still stops the run)
 5. provenance invariant failure (`accepted` without raw)
 6. manifest / config / prompt hash mismatch
 7. gold leakage
 8. evaluator_invariant_violation
 9. `total_attempts` reaches 9 with the 9th still retryable-failed
+
+Guards 3b and 4 are **independent, orthogonal**:
+- 3b = single-question drought (e.g. 3 rapid 429s on one question, but the
+  run recovers on the next question — a pattern that is unusual and worth
+  stopping to report).
+- 4 = global exhaustion (e.g. the same 10 questions get 50 429s one after
+  another — a systemic outage the single-question guard would miss).
+
+Both are implemented. Whichever triggers first causes the STOP.
 
 NEVER STOP because of `returned_model == "gpt-4o-mini"`.
 
