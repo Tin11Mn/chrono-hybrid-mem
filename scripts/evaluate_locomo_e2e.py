@@ -461,7 +461,7 @@ def main():
         return 2
     full1540_extra = None
     if args.e2e_manifest:
-        mk = {"sfv2_qwen3_4b": "sfv2_4b"}.get(args.method, args.method)
+        mk = {"sfv2_qwen3_4b": "sfv2_4b", "p4a-bm25": "p4a_bm25"}.get(args.method, args.method)
         full1540_extra = "e2e-manifest:{}:{}".format(
             mk, Path(args.supplement_dir or "").name)
     digest = config_digest(artifact_files, args.dataset, answer_prompt_hash,
@@ -512,7 +512,7 @@ def main():
                 print("ERROR: full1540 manifest hash changed ({} -> {}).".format(
                     stored[:16], manifest_sha[:16]))
                 return 6
-        method_key = {"sfv2_qwen3_4b": "sfv2_4b"}.get(args.method, args.method)
+        method_key = {"sfv2_qwen3_4b": "sfv2_4b", "p4a-bm25": "p4a_bm25"}.get(args.method, args.method)
         if not args.supplement_dir:
             print("ERROR: --e2e-manifest requires --supplement-dir.")
             return 2
