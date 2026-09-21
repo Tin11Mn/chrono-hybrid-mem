@@ -1,3 +1,9 @@
+# Historical SFv2 cost/latency estimate
+
+This report estimates the optional SFv2 research path. It is not a measured
+performance report for the current lightweight Cycle 2 submission, whose
+SFv2 path is disabled by default.
+
 # CYCLE2_COST_LATENCY_REPORT.md
 
 ## 真实成本与延迟分析

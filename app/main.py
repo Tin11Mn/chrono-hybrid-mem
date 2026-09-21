@@ -41,6 +41,12 @@ def evidence_need_retrieval_from_environment() -> bool:
     return os.getenv("MEMORY_EVIDENCE_NEED_RETRIEVAL", "true").lower() == "true"
 
 
+def need_select_by_bm25_from_environment() -> bool:
+    """Select reserved evidence-need candidates by their BM25 score."""
+
+    return os.getenv("MEMORY_NEED_SELECT_BY_BM25", "true").lower() == "true"
+
+
 def adjacent_turn_expansion_from_environment() -> bool:
     return os.getenv("MEMORY_ADJACENT_TURN_EXPANSION", "false").lower() == "true"
 
@@ -335,6 +341,7 @@ def create_app(database_path: str = None) -> FastAPI:
     structured_query_plan = structured_query_plan_from_environment()
     set_aware_rerank = set_aware_rerank_from_environment()
     evidence_need_retrieval = evidence_need_retrieval_from_environment()
+    need_select_by_bm25 = need_select_by_bm25_from_environment()
     adjacent_turn_expansion = adjacent_turn_expansion_from_environment()
     evidence_graph = evidence_graph_from_environment()
     evidence_anchors = evidence_anchors_from_environment()
@@ -450,6 +457,7 @@ def create_app(database_path: str = None) -> FastAPI:
         structured_query_plan=structured_query_plan,
         set_aware_rerank=set_aware_rerank,
         evidence_need_retrieval=evidence_need_retrieval,
+        need_select_by_bm25=need_select_by_bm25,
         evidence_graph=evidence_graph,
         evidence_anchors=evidence_anchors,
         **graph_options,

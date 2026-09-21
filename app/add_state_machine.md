@@ -1,6 +1,11 @@
 # Add Transaction State Machine
 
-## Cycle 2 Compliance: Online SFv2 Add Protocol
+## Conditional SFv2 Add Protocol
+
+This state machine applies only when the optional `session_fact_layer` path is
+explicitly wired and enabled. The current standard API submission keeps that
+path disabled; raw-message persistence and Search contract remain the primary
+submission behavior.
 
 ### State Definitions
 

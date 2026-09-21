@@ -62,3 +62,24 @@ def test_search_enforces_user_isolation_and_response_shape(tmp_path):
     assert result["created_at"].endswith("Z")
     assert other.json() == {"data": []}
     assert empty.json() == {"data": []}
+
+
+def test_competition_bearer_auth_is_enforced_when_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEMORY_SYSTEM_KEY", "test-system-key")
+    client = make_client(tmp_path)
+    payload = add_payload("auth-request", "auth-user")
+
+    assert client.post("/add", json=payload).status_code == 401
+    response = client.post(
+        "/add",
+        json=payload,
+        headers={"Authorization": "Bearer test-system-key"},
+    )
+    assert response.status_code == 200
+
+    search = client.post(
+        "/search",
+        json={"query": "tea", "user_id": "auth-user", "top_k": 10},
+        headers={"Authorization": "Bearer test-system-key"},
+    )
+    assert search.status_code == 200

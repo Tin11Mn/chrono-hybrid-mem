@@ -28,9 +28,9 @@ def _make_store(db_path: str = ":memory:", session_fact_layer: bool = True):
     return MemoryStore(db_path, model=mock_model, session_fact_layer=session_fact_layer)
 
 
-def test_online_session_facts_generated_on_add():
+def test_online_session_facts_generated_on_add(tmp_path):
     """Test that session facts are generated synchronously during Add."""
-    store = _make_store()
+    store = _make_store(str(tmp_path / "online-facts.db"))
     store.initialize()
     
     request = AddRequest(
@@ -52,23 +52,23 @@ def test_online_session_facts_generated_on_add():
             "SELECT id, fact_text, version FROM session_facts WHERE user_id = ? AND session_id = ?",
             ("user-alice", "session-001"),
         ).fetchall()
-    
-    assert len(rows) == 2, f"Expected 2 session facts, got {len(rows)}"
-    assert rows[0]["fact_text"] == "Alice prefers tea over coffee."
-    assert rows[1]["fact_text"] == "Bob works at Acme Corp."
-    
-    # Verify provenance
-    for row in rows:
-        src_rows = conn.execute(
-            "SELECT source_message_id FROM session_fact_sources WHERE session_fact_id = ?",
-            (row["id"],),
-        ).fetchall()
-        assert len(src_rows) > 0, f"Fact {row['id']} has no provenance"
+
+        assert len(rows) == 2, f"Expected 2 session facts, got {len(rows)}"
+        assert rows[0]["fact_text"] == "Alice prefers tea over coffee."
+        assert rows[1]["fact_text"] == "Bob works at Acme Corp."
+
+        # Verify provenance while the connection is open.
+        for row in rows:
+            src_rows = conn.execute(
+                "SELECT source_message_id FROM session_fact_sources WHERE session_fact_id = ?",
+                (row["id"],),
+            ).fetchall()
+            assert len(src_rows) > 0, f"Fact {row['id']} has no provenance"
 
 
-def test_session_facts_are_replaced_not_accumulated():
+def test_session_facts_are_replaced_not_accumulated(tmp_path):
     """Test that adding a second chunk replaces stale facts."""
-    store = _make_store()
+    store = _make_store(str(tmp_path / "replacement.db"))
     store.initialize()
     
     # First chunk
@@ -107,9 +107,9 @@ def test_session_facts_are_replaced_not_accumulated():
     assert count == 1, f"Expected 1 session fact after replacement, got {count}"
 
 
-def test_cross_user_isolation():
+def test_cross_user_isolation(tmp_path):
     """Test that session facts are isolated by user_id."""
-    store = _make_store()
+    store = _make_store(str(tmp_path / "isolation.db"))
     store.initialize()
     
     request1 = AddRequest(
@@ -136,13 +136,15 @@ def test_cross_user_isolation():
             "SELECT COUNT(*) as cnt FROM session_facts WHERE user_id = 'user-bob'",
         ).fetchone()["cnt"]
     
-    assert alice_count == 2
-    assert bob_count == 2
+    # Each user has one raw source message, so only one of the two mocked facts
+    # has a valid provenance source for that user.
+    assert alice_count == 1
+    assert bob_count == 1
 
 
-def test_request_id_idempotency():
+def test_request_id_idempotency(tmp_path):
     """Test that duplicate request_id is idempotent."""
-    store = _make_store()
+    store = _make_store(str(tmp_path / "idempotency.db"))
     store.initialize()
     
     request = AddRequest(
@@ -159,21 +161,20 @@ def test_request_id_idempotency():
     store.add(request)
     
     with store._connection() as conn:
-        msg_count = conn.execute(
-            "SELECT COUNT(*) as cnt FROM raw_messages WHERE request_id = 'test-004'",
+        ingestion_count = conn.execute(
+            "SELECT COUNT(*) as cnt FROM ingestions WHERE request_id = 'test-004'",
         ).fetchone()["cnt"]
-        # Note: request_id is in ingestions, not raw_messages directly
-        # But we can check raw_messages count
         raw_count = conn.execute(
             "SELECT COUNT(*) as cnt FROM raw_messages WHERE user_id = 'user-alice'",
         ).fetchone()["cnt"]
-    
+
+    assert ingestion_count == 1
     assert raw_count == 1, f"Expected 1 message, got {raw_count}"
 
 
-def test_provenance_chain_valid():
+def test_provenance_chain_valid(tmp_path):
     """Test that every session fact traces back to a real raw message."""
-    store = _make_store()
+    store = _make_store(str(tmp_path / "provenance.db"))
     store.initialize()
     
     request = AddRequest(
@@ -203,9 +204,9 @@ def test_provenance_chain_valid():
             assert len(sources) > 0, f"Fact {fact['id']} has no valid provenance"
 
 
-def test_session_facts_not_returned_in_search():
+def test_session_facts_not_returned_in_search(tmp_path):
     """Test that search returns raw messages, not session fact text."""
-    store = _make_store()
+    store = _make_store(str(tmp_path / "raw-search.db"))
     store.initialize()
     
     request = AddRequest(

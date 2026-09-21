@@ -1,3 +1,8 @@
+# 历史研究报告说明
+
+本文件记录的是 SFv2 研究接线过程，不是当前标准 Docker 提交版本的能力声明。
+当前提交材料将 SFv2 标记为 OFF，直到它通过 `app.main`、运行依赖和端到端评测的完整验证。
+
 # CYCLE2_SFV2_PORT_REPORT.md
 
 ## SF v2 Online Port Report
@@ -133,7 +138,7 @@ CREATE TABLE session_fact_sources (
 **环境变量**:
 ```bash
 export MEMORY_SYSTEM_KEY="your-secret-token"
-export OPENAI_API_KEY="sk-..."
+export OPENAI_API_KEY="<runtime-secret>"
 ```
 
 **启动**:

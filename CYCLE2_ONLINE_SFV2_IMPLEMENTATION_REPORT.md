@@ -1,3 +1,10 @@
+# Historical research report
+
+This file records the SFv2 research implementation. It does not mean that
+SFv2 is enabled by default in the current standard Docker submission path.
+The current submission materials mark SFv2 as OFF until `app.main`, runtime
+dependencies, and end-to-end evaluation are all verified.
+
 # Cycle 2 Online SFv2 Implementation Report
 
 ## Overview

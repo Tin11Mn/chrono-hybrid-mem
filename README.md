@@ -252,7 +252,7 @@ curl -X POST http://localhost:8000/add \
     "user_id": "run:1:conversation:0",
     "session_id": "run:1:session:0",
     "messages": [
-      {"role": "user", "content": "Alice prefers tea.", "timestamp": 1787068800}
+      {"role": "user", "content": "Alice prefers tea.", "timestamp": 1787068800000}
     ]
   }'
 ```
@@ -297,6 +297,7 @@ curl -X POST http://localhost:8000/search \
 | `MEMORY_DB_PATH` | 本地 SQLite 路径；Docker 默认使用 `/data/chrono_hybrid_mem.db` |
 | `MEMORY_REQUIRE_MODEL` | `false`；如要求模型后端在缺少密钥时启动失败，请设为 `true` |
 | `MEMORY_STRUCTURED_QUERY_PLAN` | API 服务中为 `true`；如需进行扁平规划器消融实验，请设为 `false` |
+| `MEMORY_NEED_SELECT_BY_BM25` | `true`；按 BM25 选择 evidence-need 保留候选 |
 | `OPENAI_API_KEY` | 启用远程模型路径；应以运行时密钥方式注入 |
 | `MEMORY_TEMPORAL_BONUS` | `0`；可选的有界词法时间加成 |
 
@@ -384,7 +385,7 @@ assets/      shared project artwork
 
 - Python 3.11 和固定版本的依赖文件定义了受支持的环境。
 - SQLite 是原始消息的持久化来源；生成的数据库和评测输出会被忽略。
-- 精确的 `user_id` 谓词用于隔离已存储记录，但 API 不包含内置身份验证。生产部署必须验证调用方身份，并在外层服务中将其身份与 `user_id` 绑定。
+- 精确的 `user_id` 谓词用于隔离已存储记录；配置 `MEMORY_SYSTEM_KEY` 后，`/add` 和 `/search` 会要求 Bearer Token。生产部署仍应使用 HTTPS、限流，并将调用方身份与 `user_id` 绑定。
 - 查询、选项和记忆文本均被视为不可信的提示数据；候选允许列表可以限制模型输出。这是一项缓解措施，而不是对完全防止提示注入的承诺。
 - 启用 OpenAI 支持的路径，会把相关的消息/查询/候选内容发送给所配置的远程模型服务。
 - 本仓库不提供数据库静态加密、TLS 终止或 API 速率限制。
