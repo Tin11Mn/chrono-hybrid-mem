@@ -1595,13 +1595,19 @@ class MemoryStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
-                    source_message_id INTEGER NOT NULL,
                     fact_text TEXT NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
-                    UNIQUE(source_message_id, fact_text)
+                    UNIQUE(session_id, fact_text)
                 );
                 CREATE INDEX IF NOT EXISTS session_facts_user_idx
-                    ON session_facts(user_id, source_message_id);
+                    ON session_facts(user_id, session_id);
+                CREATE TABLE IF NOT EXISTS session_fact_sources (
+                    session_fact_id INTEGER NOT NULL,
+                    source_message_id INTEGER NOT NULL,
+                    FOREIGN KEY (session_fact_id) REFERENCES session_facts(id) ON DELETE CASCADE,
+                    PRIMARY KEY (session_fact_id, source_message_id)
+                );
                 """
             )
             if not (self.evidence_graph or self.evidence_anchors):
@@ -3541,6 +3547,29 @@ class MemoryStore:
                 "INSERT INTO session_porter_fts(session_id, user_id, content) VALUES (?, ?, ?)",
                 (request.session_id, request.user_id, session_content),
             )
+            # Cycle 2: sync session-fact generation for online SFv2 compliance.
+            if self.session_fact_layer and self.model:
+                try:
+                    session_msgs = self.get_session_messages_for_facts(
+                        request.user_id, request.session_id
+                    )
+                    generated_facts = self.model.generate_session_facts(
+                        user_id=request.user_id,
+                        session_id=request.session_id,
+                        messages=session_msgs,
+                    )
+                    self.replace_session_facts(
+                        user_id=request.user_id,
+                        session_id=request.session_id,
+                        new_facts=generated_facts,
+                    )
+                except Exception as exc:
+                    # A session-fact generation failure must not abort the Add.
+                    # Log and proceed; raw messages are already persisted.
+                    import logging
+                    logging.getLogger("chrono_hybrid_mem").warning(
+                        "session_fact_generation_failed: %s", exc
+                    )
 
     def add_session_facts(
         self,
@@ -3583,6 +3612,96 @@ class MemoryStore:
                     )
                 except sqlite3.IntegrityError:
                     continue
+
+    def replace_session_facts(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        new_facts: List[Dict[str, object]],
+    ) -> int:
+        """Atomically replace all session facts for a (user_id, session_id) pair.
+
+        Uses explicit transaction: DELETE existing facts + their provenance,
+        INSERT new facts, INSERT provenance mappings. On any error, ROLLBACK.
+        Returns the number of facts inserted.
+        """
+        if not new_facts:
+            return 0
+        now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN")
+                # Delete old facts (CASCADE will remove sources too)
+                connection.execute(
+                    "DELETE FROM session_facts WHERE user_id = ? AND session_id = ?",
+                    (user_id, session_id),
+                )
+                inserted = 0
+                for item in new_facts:
+                    if not isinstance(item, dict):
+                        continue
+                    fact_text = str(item.get("fact_text", "")).strip()
+                    if not fact_text:
+                        continue
+                    src_ids = item.get("source_message_ids", [])
+                    if not isinstance(src_ids, list) or not src_ids:
+                        continue
+                    # Validate all source IDs exist in raw_messages
+                    valid_src_ids = []
+                    for sid in src_ids:
+                        try:
+                            mid = int(str(sid).replace("mem_", ""))
+                        except (TypeError, ValueError):
+                            continue
+                        row = connection.execute(
+                            "SELECT 1 FROM raw_messages WHERE id = ? AND user_id = ?",
+                            (mid, user_id),
+                        ).fetchone()
+                        if row:
+                            valid_src_ids.append(mid)
+                    if not valid_src_ids:
+                        continue
+                    cursor = connection.execute(
+                        """INSERT INTO session_facts(
+                               user_id, session_id, fact_text, version, created_at)
+                           VALUES (?, ?, ?, 1, ?)""",
+                        (user_id, session_id, fact_text, now),
+                    )
+                    sf_id = cursor.lastrowid
+                    for mid in valid_src_ids:
+                        connection.execute(
+                            "INSERT INTO session_fact_sources(session_fact_id, source_message_id) VALUES (?, ?)",
+                            (sf_id, mid),
+                        )
+                    inserted += 1
+                connection.execute("COMMIT")
+                return inserted
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def get_session_messages_for_facts(
+        self, user_id: str, session_id: str
+    ) -> List[Dict[str, object]]:
+        """Return ordered raw messages with memory_id attached for session-fact generation."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """SELECT id, role, content, event_ts as timestamp
+                   FROM raw_messages
+                   WHERE user_id = ? AND session_id = ?
+                   ORDER BY id""",
+                (user_id, session_id),
+            ).fetchall()
+            result = []
+            for row in rows:
+                result.append({
+                    "memory_id": "mem_{}".format(row["id"]),
+                    "role": str(row["role"]),
+                    "content": str(row["content"]),
+                    "timestamp": row["timestamp"],
+                })
+            return result
 
     def search(self, *, user_id: str, query: str, options: Optional[List[str]] = None,
                top_k: int) -> List[MemoryResult]:
