@@ -1,7 +1,10 @@
 import math
 import os
 
-from fastapi import FastAPI
+import secrets
+
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer
 
 from .schemas import AddRequest, AddResponse, SearchRequest, SearchResponse
 from .model import model_from_environment
@@ -313,6 +316,19 @@ def instruction_refine_top_n_from_environment() -> int:
         )
     return value
 
+_auth_scheme = HTTPBearer(auto_error=False)
+
+def _verify_auth(credentials = Depends(_auth_scheme)) -> str:
+    """Verify Bearer token authentication. Returns token on success."""
+    token = credentials.credentials if credentials else None
+    expected = os.getenv("MEMORY_SYSTEM_KEY")
+    if not expected:
+        # If no key is configured, allow all requests (dev mode)
+        return token or ""
+    if not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=401, detail="Invalid or missing authentication token")
+    return token
+
 
 def create_app(database_path: str = None) -> FastAPI:
     path = database_path or os.getenv("MEMORY_DB_PATH", "data/chrono_hybrid_mem.db")
@@ -448,14 +464,14 @@ def create_app(database_path: str = None) -> FastAPI:
         return {"status": "ok"}
 
     @app.post("/add", response_model=AddResponse)
-    def add(request: AddRequest) -> AddResponse:
+    def add(request: AddRequest, _auth: str = Depends(_verify_auth)) -> AddResponse:
         store.add(request)
         return AddResponse(
             request_id=request.request_id, user_id=request.user_id, session_id=request.session_id
         )
 
     @app.post("/search", response_model=SearchResponse)
-    def search(request: SearchRequest) -> SearchResponse:
+    def search(request: SearchRequest, _auth: str = Depends(_verify_auth)) -> SearchResponse:
         return SearchResponse(data=store.search(
             user_id=request.user_id, query=request.query, options=request.options, top_k=request.top_k
         ))
