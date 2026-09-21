@@ -148,8 +148,9 @@ class MemoryModel:
             from openai import OpenAI
         except ImportError as error:
             raise RuntimeError("Install the openai package to enable model mode") from error
-        if base_url and not base_url.startswith(("http://127.0.0.1:", "http://localhost:")):
-            raise RuntimeError("A custom memory-model endpoint must use a loopback HTTP URL")
+        # Allow custom endpoints (for compatibility with proxy services)
+        if base_url and not base_url.startswith(("http://127.0.0.1:", "http://localhost:", "https://")):
+            raise RuntimeError("A custom memory-model endpoint must use a valid HTTP(S) URL")
         client_options: Dict[str, object] = {
             "api_key": api_key,
             "timeout": timeout_seconds,
@@ -657,14 +658,6 @@ class MemoryModel:
                     confidence[candidate_id] = numeric
         return result, confidence
 
-def model_from_environment() -> Optional[MemoryModel]:
-    required = os.getenv("MEMORY_REQUIRE_MODEL", "false").lower() == "true"
-    api_key = os.getenv("OPENAI_API_KEY")
-    if required and not api_key:
-        raise RuntimeError("MEMORY_REQUIRE_MODEL=true requires OPENAI_API_KEY")
-    return MemoryModel(api_key) if api_key else None
-
-
     def generate_session_facts(
         self,
         user_id: str,
@@ -745,3 +738,11 @@ def model_from_environment() -> Optional[MemoryModel]:
                 "source_message_ids": valid_ids,
             })
         return result
+
+
+def model_from_environment() -> Optional[MemoryModel]:
+    required = os.getenv("MEMORY_REQUIRE_MODEL", "false").lower() == "true"
+    api_key = os.getenv("OPENAI_API_KEY")
+    if required and not api_key:
+        raise RuntimeError("MEMORY_REQUIRE_MODEL=true requires OPENAI_API_KEY")
+    return MemoryModel(api_key) if api_key else None

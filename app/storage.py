@@ -3547,7 +3547,12 @@ class MemoryStore:
                 "INSERT INTO session_porter_fts(session_id, user_id, content) VALUES (?, ?, ?)",
                 (request.session_id, request.user_id, session_content),
             )
+
             # Cycle 2: sync session-fact generation for online SFv2 compliance.
+            # We commit the current transaction first so the messages become
+            # visible to the subsequent read (SQLite read-your-writes requires
+            # a separate connection after a commit).
+            connection.execute("COMMIT")
             if self.session_fact_layer and self.model:
                 try:
                     session_msgs = self.get_session_messages_for_facts(
