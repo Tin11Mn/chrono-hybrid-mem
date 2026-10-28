@@ -299,6 +299,7 @@ curl -X POST http://localhost:8000/search \
 | `MEMORY_STRUCTURED_QUERY_PLAN` | API 服务中为 `true`；如需进行扁平规划器消融实验，请设为 `false` |
 | `MEMORY_NEED_SELECT_BY_BM25` | `true`；按 BM25 选择 evidence-need 保留候选 |
 | `OPENAI_API_KEY` | 启用远程模型路径；应以运行时密钥方式注入 |
+| `OPENAI_BASE_URL` | 可选的 OpenAI 兼容 API 地址；未设置时使用 OpenAI 默认地址，例如 ChatAnywhere `https://api.chatanywhere.tech/v1` |
 | `MEMORY_TEMPORAL_BONUS` | `0`；可选的有界词法时间加成 |
 
 有关本地研究开关和互斥模型选项，请参阅 [`.env.example`](.env.example)。
@@ -320,7 +321,7 @@ docker run --rm -p 8000:8000 \
   chrono-hybrid-mem:latest
 ```
 
-如需使用竞赛风格的远程模型路径，请在运行时添加 `-e MEMORY_REQUIRE_MODEL=true -e OPENAI_API_KEY=...`；绝不要将密钥烘焙进镜像。
+如需使用竞赛风格的远程模型路径，请在运行时设置 `MEMORY_REQUIRE_MODEL=true` 和 `OPENAI_API_KEY`；使用 OpenAI 兼容服务时另外设置 `OPENAI_BASE_URL`。密钥只通过运行时秘密配置注入，绝不要写入仓库或镜像。
 
 可选的本地研究镜像会安装 FastEmbed，并默认使用 BGE-large 和一个小型 ColBERT 重排序器：
 

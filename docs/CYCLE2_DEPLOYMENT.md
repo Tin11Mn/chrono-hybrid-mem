@@ -24,6 +24,11 @@ The model path must use `gpt-4o-mini` for both Add and Search for an
 Open-source Methods entry. `MEMORY_REQUIRE_MODEL=true` prevents an accidental
 fallback to the no-model lexical path.
 
+For ChatAnywhere's OpenAI-compatible endpoint, set
+`OPENAI_BASE_URL=https://api.chatanywhere.tech/v1`; keep its API key in
+`OPENAI_API_KEY`. This model-provider URL is separate from the public Add/Search
+URLs submitted to AML.
+
 ## HTTP contract
 
 - `GET /health` is unauthenticated and must return any 2xx response.
@@ -33,6 +38,11 @@ fallback to the no-model lexical path.
 - Search must return no more than the requested `top_k` (formal evaluation uses
   `top_k=100`).
 - The database volume must survive process/container restarts.
+- For a NAT VPS, map the provider-generated public external port to the
+  service's internal port (8000 for the app, or 443 when using a local HTTPS
+  reverse proxy). Do not depend on security-group rules when the provider
+  requires NAT forwarding. Record the generated external port and include it
+  in the submitted public URL when it is not the standard port.
 
 ## Freeze procedure
 

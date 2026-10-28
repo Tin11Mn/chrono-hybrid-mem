@@ -93,9 +93,9 @@ def test_competition_mode_requires_a_secret(monkeypatch):
         model_from_environment()
 
 
-def test_custom_memory_model_endpoint_must_be_loopback():
-    with pytest.raises(RuntimeError, match="loopback"):
-        MemoryModel("test", base_url="https://example.com/v1")
+def test_custom_memory_model_endpoint_must_use_http_or_https():
+    with pytest.raises(RuntimeError, match=r"valid HTTP\(S\) URL"):
+        MemoryModel("test", base_url="ftp://example.com/v1")
 
 
 def test_structured_query_plan_defaults_on_and_reads_false(monkeypatch):

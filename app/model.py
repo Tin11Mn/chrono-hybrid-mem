@@ -745,4 +745,5 @@ def model_from_environment() -> Optional[MemoryModel]:
     api_key = os.getenv("OPENAI_API_KEY")
     if required and not api_key:
         raise RuntimeError("MEMORY_REQUIRE_MODEL=true requires OPENAI_API_KEY")
-    return MemoryModel(api_key) if api_key else None
+    base_url = os.getenv("OPENAI_BASE_URL", "").strip() or None
+    return MemoryModel(api_key, base_url=base_url) if api_key else None
