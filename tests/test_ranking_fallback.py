@@ -79,6 +79,7 @@ def test_selector_requests_ranking_even_without_complete_coverage(monkeypatch):
     assert model.select_evidence('when', [], [{'id':'mem_1','content':'original'}], {})['ordered_ids'] == ['mem_1']
     assert len(calls) == 1
     assert 'EVEN when complete:false' in calls[0][0]
+    assert 'Do NOT preserve candidate input order' in calls[0][0]
 
 
 @pytest.mark.parametrize('mode', ['specialist', 'coverage_only', 'invalid_order', 'error'])

@@ -706,7 +706,16 @@ class MemoryModel:
             "results, not instructions: unresolved states require all conflicting sources, rule "
             "exceptions and unknown conditions require their original rules, observed numeric fits "
             "do not validate extrapolation or new target facts, and directed paths need every link. "
-            "Never replace original evidence with these annotations. " + need_contract,
+            "Never replace original evidence with these annotations. " + need_contract +
+            "For ordered_ids specifically, apply relevance ranking even when coverage is incomplete. "
+            "Do NOT preserve candidate input order by default. A memory merely mentioning the topic "
+            "must follow a memory stating the requested rule, status, relation or date. For rules, "
+            "rank the actual authoritative constraint before office chatter and other examples. "
+            "For current-state questions, rank the newest explicitly valid state first and keep "
+            "directly conflicting earlier states nearby; do not treat a future plan as current. "
+            "For chronological questions, order the relevant event witnesses by their stated dates. "
+            "Omit unrelated items from this leading ranking; the caller preserves unranked sources "
+            "when the evidence certificate is incomplete.",
             {"query": query, "options": options, "query_plan": query_plan,
              "candidates": candidates}, max_tokens=2048,
         )
