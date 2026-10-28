@@ -7,14 +7,15 @@ MAX_PAGES = 4
 RECORDS_PER_PAGE = 32
 
 
-def annotation_schema(content: str) -> Dict[str, Any]:
+def annotation_schema(content: str, whole_page: bool = False) -> Dict[str, Any]:
     ids = ['all'] + [unit['id'] for unit in source_units(content)]
     properties = {
         'kind': {'type':'string','enum':['fact','state','rule','observation','event','link','privacy']},
         'subject': {'type':'string','minLength':1},
         'attribute': {'type':'string','minLength':1},
         'value': {'type':'string','minLength':1},
-        'unit_ids': {'type':'array','items':{'type':'string','enum':ids},'minItems':1},
+        'unit_ids': {'type':'array','items':{'type':'string','enum':['all'] if whole_page else ids},'minItems':1,
+                     **({'maxItems':1} if whole_page else {})},
         'scope': {'type':'string'},
         'modality': {'type':'string','enum':['assert','update','correction','retraction','future','hypothetical','exception']},
         'effective_date': {'type':['string','null']},

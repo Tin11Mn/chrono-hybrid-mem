@@ -23,6 +23,8 @@ prevent malformed source references rather than make grounding permissive.
 - Bounded extraction pages for long sources and one repair attempt for incomplete or
   invalid annotation. No model I/O under SQLite writes. Complete means all pages were
   certified and all records validated; incomplete annotations remain visibly partial.
+  The repair requests full-page witnesses so a literal heading or project antecedent
+  is not omitted from later event witnesses. All names/values/scopes still validate.
 - Request strict JSON Schema for actual unit IDs and valid record enums/nonempty
   values. Compatible gateways rejecting the format with400/422 fall back once to
   JSON mode while retaining local grounding; auth/network failures are never hidden.

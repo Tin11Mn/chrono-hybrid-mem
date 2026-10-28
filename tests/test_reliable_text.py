@@ -134,6 +134,8 @@ def test_strict_schema_constrains_types_and_actual_source_ids():
     assert item['properties']['unit_ids']['items']['enum']==['all','u1','u2']
     assert 'update' not in item['properties']['kind']['enum']
     assert item['properties']['value']['minLength']==1
+    repair=annotation_schema('Heading. Event on date.',whole_page=True)
+    assert repair['properties']['records']['items']['properties']['unit_ids']['items']['enum']==['all']
 
 
 @pytest.mark.parametrize('status',[400,401])

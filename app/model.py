@@ -566,9 +566,10 @@ class MemoryModel:
                         'repair_requirement': (
                             "Previous annotation was partial or failed exact source validation. "
                             "Review every assertion; use only supplied IDs and verbatim values, "
-                            "@speaker for first person, and ['all'] for required heading context. "
+                            "@speaker for first person. In this repair use ['all'] for EVERY record "
+                            "so its literal subject/heading and all qualifications are witnessed. "
                             "Claim complete only if every assertion is represented." if attempt else '')},
-                        max_tokens=4096, json_schema=annotation_schema(page))
+                        max_tokens=4096, json_schema=annotation_schema(page, whole_page=bool(attempt)))
                     candidate = decode_annotations(parsed, page)
                     new_records, valid = grounded_records(candidate, page, speaker, timestamp)
                     old_records, _ = grounded_records(packet, page, speaker, timestamp)
