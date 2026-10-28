@@ -605,6 +605,12 @@ class StructuredMemoryIndex:
             summary_ids = list(dict.fromkeys(summary_ids))
             if summary_ids:
                 required_groups.append(summary_ids)
+            hints.append({'kind':'summary_coverage','result':{
+                'index_complete':catalog['complete'], 'indexed_source_count':catalog['sources'],
+                'topic_catalog_truncated':catalog['topic_catalog_truncated'],
+                'requested_topic_count':len(topics), 'required_source_count':len(summary_ids)}})
+            diagnostics['summary']={'kind':'summary','status':'complete_index' if catalog['complete'] else 'partial_index',
+                                    'source_count':len(summary_ids)}
         required_groups = [list(group) for group in dict.fromkeys(tuple(group) for group in required_groups)]
         required = list(dict.fromkeys(source for group in required_groups for source in group))
         privacy_only = connection.execute("""SELECT record.source_id,record.attribute

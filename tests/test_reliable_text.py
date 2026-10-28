@@ -223,6 +223,7 @@ def test_summary_history_bundles_expand_but_never_claim_truncated_coverage(tmp_p
                 'memory_requests':{'summary_topics':['aster'],'temporal_mode':'history'}}
         def select_evidence(self,query,options,candidates,plan):
             self.pool=candidates
+            self.plan=plan
             ids=list(dict.fromkeys(i for group in plan['required_source_groups'] for i in group))
             return {'complete':True,'selected_ids':ids,'covered_need_indices':[]}
     model=Model()
@@ -235,6 +236,8 @@ def test_summary_history_bundles_expand_but_never_claim_truncated_coverage(tmp_p
     trace=store.last_retrieval_trace
     assert len(model.pool)==min(count,96)
     assert trace['model_pool_limit']==min(count,96)
+    coverage=next(h['result'] for h in model.plan['specialist_hints'] if h['kind']=='summary_coverage')
+    assert coverage['index_complete'] and coverage['required_source_count']==count
     assert len(rows)==count
     assert trace['evidence_selection']['applied'] is (count<=96)
     assert trace['structured_memory']['pool_coverage_complete'] is (count<=96)
