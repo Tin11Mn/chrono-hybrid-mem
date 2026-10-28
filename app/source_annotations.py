@@ -7,6 +7,27 @@ MAX_PAGES = 4
 RECORDS_PER_PAGE = 32
 
 
+def annotation_schema(content: str) -> Dict[str, Any]:
+    ids = ['all'] + [unit['id'] for unit in source_units(content)]
+    properties = {
+        'kind': {'type':'string','enum':['fact','state','rule','observation','event','link','privacy']},
+        'subject': {'type':'string','minLength':1},
+        'attribute': {'type':'string','minLength':1},
+        'value': {'type':'string','minLength':1},
+        'unit_ids': {'type':'array','items':{'type':'string','enum':ids},'minItems':1},
+        'scope': {'type':'string'},
+        'modality': {'type':'string','enum':['assert','update','correction','retraction','future','hypothetical','exception']},
+        'effective_date': {'type':['string','null']},
+    }
+    return {'type':'object','additionalProperties':False,
+        'properties':{'facts':{'type':'array','items':{'type':'string'},'maxItems':32},
+            'complete':{'type':'boolean'},
+            'records':{'type':'array','maxItems':32,'items':{'type':'object',
+                'additionalProperties':False,'properties':properties,'required':list(properties)}},
+            'ignored_unit_ids':{'type':'array','items':{'type':'string','enum':ids[1:] or ['all']}}},
+        'required':['facts','complete','records','ignored_unit_ids']}
+
+
 def source_pages(content: str) -> Tuple[List[str], bool]:
     """Prefer sentence boundaries; every page remains a literal source slice."""
     pages = []
@@ -128,6 +149,15 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
                 or len(set(ignored)) != len(ignored)):
             complete = False
             ignored = []
+        safe_ignored = []
+        for ref in ignored:
+            text = units[by_id[ref]]['text'].strip()
+            if text.endswith(('?', '？')) or re.fullmatch(
+                    r'(?:hi|hello|hey|thanks|thank you|ok|okay|你好|谢谢|好的)[.!。！\s]*', text, re.I):
+                safe_ignored.append(ref)
+            else:
+                complete = False
+        ignored = safe_ignored
         uncovered = [i for i in by_id if i not in covered_units and i not in ignored]
         if uncovered:
             complete = False

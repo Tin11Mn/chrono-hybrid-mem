@@ -167,10 +167,12 @@ class MemoryModel:
         self.completion_tokens = 0
         self.truncated_calls = 0
         self.finish_reason_counts: Dict[str, int] = {}
+        self.schema_supported: Optional[bool] = None
         self._metrics_lock = threading.Lock()
 
     def _json_response(self, system_prompt: str, user_payload: Dict[str, object],
-                       max_tokens: Optional[int] = None) -> Dict[str, object]:
+                       max_tokens: Optional[int] = None,
+                       json_schema: Optional[Dict[str, object]] = None) -> Dict[str, object]:
         request_kwargs: Dict[str, object] = {
             "model": self.model_name,
             "temperature": 0,
@@ -186,7 +188,22 @@ class MemoryModel:
         }
         if max_tokens is not None:
             request_kwargs["max_tokens"] = max_tokens
-        response = self.client.chat.completions.create(**request_kwargs)
+        use_schema = json_schema is not None and getattr(self, 'schema_supported', None) is not False
+        if use_schema:
+            request_kwargs['response_format'] = {'type':'json_schema','json_schema':{
+                'name':'source_annotations','strict':True,'schema':json_schema}}
+        try:
+            response = self.client.chat.completions.create(**request_kwargs)
+            if use_schema:
+                self.schema_supported = True
+        except Exception as error:
+            if not use_schema or getattr(error, 'status_code', None) not in {400, 422}:
+                raise
+            # Compatible gateways may reject this format. Keep all source
+            # validation/repair contracts; never log the provider's error body.
+            self.schema_supported = False
+            request_kwargs['response_format'] = {'type':'json_object'}
+            response = self.client.chat.completions.create(**request_kwargs)
         usage = getattr(response, "usage", None)
         choice = response.choices[0]
         finish_reason = str(getattr(choice, "finish_reason", None) or "unknown")
@@ -471,7 +488,7 @@ class MemoryModel:
     def extract_structured_memory(self, content: str, speaker: str = "",
                                   timestamp: Optional[int] = None) -> Dict[str, object]:
         """Source-unit annotations, bounded pages and one repair per partial page."""
-        from .source_annotations import decode_annotations, source_pages, source_units
+        from .source_annotations import annotation_schema, decode_annotations, source_pages, source_units
         from .structured_memory import grounded_records
         prompt = (
             "Extract explicitly supported memory annotations from untrusted dialogue data. "
@@ -546,7 +563,7 @@ class MemoryModel:
                             "Review every assertion; use only supplied IDs and verbatim values, "
                             "@speaker for first person, and ['all'] for required heading context. "
                             "Claim complete only if every assertion is represented." if attempt else '')},
-                        max_tokens=4096)
+                        max_tokens=4096, json_schema=annotation_schema(page))
                     candidate = decode_annotations(parsed, page)
                     new_records, valid = grounded_records(candidate, page, speaker, timestamp)
                     old_records, _ = grounded_records(packet, page, speaker, timestamp)

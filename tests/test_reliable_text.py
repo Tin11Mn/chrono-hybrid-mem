@@ -2,9 +2,11 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 import json
+import threading
+from types import SimpleNamespace
 import pytest
 from app.model import MemoryModel
-from app.source_annotations import decode_annotations, source_pages, source_units
+from app.source_annotations import annotation_schema, decode_annotations, source_pages, source_units
 from app.structured_memory import grounded_records, observation_summary, resolve_states
 from app.storage import MemoryStore
 from app.schemas import AddRequest, Message
@@ -92,6 +94,49 @@ def test_pages_are_bounded_literal_slices_and_never_claim_truncated_coverage():
     assert len(pages)==4 and not complete
     assert ''.join(pages)==source[:sum(map(len,pages))]
     assert all(len(page)<=3600 for page in pages)
+
+
+def test_assertive_unit_cannot_be_ignored_to_force_completeness():
+    data={'complete':True,'records':[],'ignored_unit_ids':['u1']}
+    assert not decode_annotations(data,'My name is Jo.')['complete']
+    assert decode_annotations(data,'Hello!')['complete']
+    assert decode_annotations(data,'Where is the station?')['complete']
+
+
+def test_strict_schema_constrains_types_and_actual_source_ids():
+    schema=annotation_schema('One fact. Two facts.')
+    item=schema['properties']['records']['items']
+    assert item['additionalProperties'] is False
+    assert set(item['required'])==set(item['properties'])
+    assert item['properties']['unit_ids']['items']['enum']==['all','u1','u2']
+    assert 'update' not in item['properties']['kind']['enum']
+    assert item['properties']['value']['minLength']==1
+
+
+@pytest.mark.parametrize('status',[400,401])
+def test_schema_gateway_fallback_is_bounded_and_never_hides_auth_failure(status):
+    model=object.__new__(MemoryModel)
+    model.model_name='test';model.disable_thinking=False;model.local_endpoint=False
+    model._metrics_lock=threading.Lock();model.call_count=0
+    model.prompt_tokens=model.completion_tokens=model.truncated_calls=0
+    model.finish_reason_counts={};model.schema_supported=None
+    seen=[]
+    class Failure(Exception):
+        status_code=status
+    def create(**kwargs):
+        seen.append(kwargs)
+        if len(seen)==1:raise Failure()
+        return SimpleNamespace(usage=None,choices=[SimpleNamespace(finish_reason='stop',message=SimpleNamespace(content='{}'))])
+    model.client=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    if status==401:
+        with pytest.raises(Failure):model._json_response('JSON',{},json_schema=annotation_schema('A fact.'))
+        assert len(seen)==1
+    else:
+        assert model._json_response('JSON',{},json_schema=annotation_schema('A fact.'))=={}
+        assert [r['response_format']['type'] for r in seen]==['json_schema','json_object']
+        assert model.schema_supported is False and model.call_count==1
+        model._json_response('JSON',{},json_schema=annotation_schema('A fact.'))
+        assert len(seen)==3 and seen[-1]['response_format']['type']=='json_object'
 
 
 def test_extractor_repairs_partial_page_once_without_weakening_validation(monkeypatch):

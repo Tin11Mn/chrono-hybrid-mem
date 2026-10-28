@@ -23,6 +23,10 @@ prevent malformed source references rather than make grounding permissive.
 - Bounded extraction pages for long sources and one repair attempt for incomplete or
   invalid annotation. No model I/O under SQLite writes. Complete means all pages were
   certified and all records validated; incomplete annotations remain visibly partial.
+- Request strict JSON Schema for actual unit IDs and valid record enums/nonempty
+  values. Compatible gateways rejecting the format with400/422 fall back once to
+  JSON mode while retaining local grounding; auth/network failures are never hidden.
+  Factual source units cannot be marked ignored to manufacture completeness.
 - Preserve witnessed transition cues and explicit event/effective dates. No inferred
   relative dates, silent assertion supersession, or cross-scope merging.
 - Natural-language rules remain original-source evidence for downstream reasoning;
@@ -59,3 +63,6 @@ all failures and resource limits. Old README baseline failure remains separate.
 New Smoke must visibly show the new version/new writes; capture UI proof and initial
 servercounts. No Full, hidden answers, guessed gold, credentials in logs, or promise
 of an improved official score before the new evaluation completes.
+
+Protocol reference: [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs?api-mode=chat).
+The provider's actual support must be tested independently of the official API contract.
