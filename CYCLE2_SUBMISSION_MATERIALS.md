@@ -7,9 +7,9 @@
 | 字段 | 值 |
 |-----|---|
 | **系统名称** | ChronoHybridMem-Cycle2-P4A-GPT4oMini |
-| **版本号** | v0.4.0-cycle2-api |
-| **Git Commit** | FINAL_COMMIT_TO_BE_FILLED_AFTER_FREEZE |
-| **Git Tag** | FINAL_TAG_TO_BE_CREATED_AFTER_FREEZE |
+| **版本号** | v0.4.0-cycle2-chatanywhere-20261028 |
+| **Git Commit** | d92c63b |
+| **Git Tag** | cycle2-sfv2-gpt4omini-chatanywhere-20261028 |
 | **基础分支** | cycle2/sfv2-gpt4omini |
 | **分支** | cycle2/sfv2-gpt4omini |
 
@@ -41,10 +41,14 @@ bge_learned_reranker: OFF
 
 ```bash
 export OPENAI_API_KEY="<runtime-secret-from-secret-manager>"
-export OPENAI_BASE_URL="<optional-compatible-https-endpoint>"
+export OPENAI_BASE_URL="https://api.chatanywhere.tech/v1"
 export MEMORY_REQUIRE_MODEL="true"
 export MEMORY_SYSTEM_KEY="your-secret-token"
 ```
+
+`OPENAI_API_KEY` is the paid ChatAnywhere API key, injected only at runtime.
+The model identifier remains `gpt-4o-mini`. This upstream model endpoint is
+separate from the public Add/Search endpoints submitted to AML.
 
 #### 3.2 端点
 
@@ -133,7 +137,7 @@ curl -X POST http://localhost:8000/search \
 5. 通过 Smoke 后再提交 Full
 
 ---
-**报告生成时间**: 2026-09-21
+**报告生成时间**: 2026-10-28
 **分支**: cycle2/sfv2-gpt4omini
-**Commit**: FINAL_COMMIT_TO_BE_FILLED_AFTER_FREEZE
-**Tag**: FINAL_TAG_TO_BE_CREATED_AFTER_FREEZE
+**Runtime source commit**: d92c63b
+**Runtime source tag**: cycle2-sfv2-gpt4omini-chatanywhere-20261028
