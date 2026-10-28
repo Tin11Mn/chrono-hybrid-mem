@@ -31,6 +31,13 @@ def structured_query_plan_from_environment() -> bool:
     return os.getenv("MEMORY_STRUCTURED_QUERY_PLAN", "true").lower() == "true"
 
 
+def text_optimization_flag(name: str) -> bool:
+    value = os.getenv(name, "false").strip().lower()
+    if value not in {"true", "false"}:
+        raise RuntimeError("{} must be true or false".format(name))
+    return value == "true"
+
+
 def set_aware_rerank_from_environment() -> bool:
     return os.getenv("MEMORY_SET_AWARE_RERANK", "false").lower() == "true"
 
@@ -455,6 +462,9 @@ def create_app(database_path: str = None) -> FastAPI:
         instruction_rerank_top_n=instruction_rerank_top_n_from_environment(),
         instruction_refine_top_n=instruction_refine_top_n_from_environment(),
         structured_query_plan=structured_query_plan,
+        evidence_selection=text_optimization_flag("MEMORY_EVIDENCE_SELECTION"),
+        coverage_retrieval=text_optimization_flag("MEMORY_COVERAGE_RETRIEVAL"),
+        retrieval_trace_path=os.getenv("MEMORY_RETRIEVAL_TRACE_PATH", "").strip() or None,
         set_aware_rerank=set_aware_rerank,
         evidence_need_retrieval=evidence_need_retrieval,
         need_select_by_bm25=need_select_by_bm25,

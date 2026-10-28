@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .model import MemoryModel
+from .evidence_selection import append_redacted_trace, validate_selection
 from .graph_routing import preferred_graph_predicates
 from .local_instruction import mask_candidate_speakers
 from .schemas import AddRequest, MemoryResult
@@ -719,9 +720,26 @@ class MemoryStore:
                  session_fact_layer: bool = False,
                  session_fact_rrf_weight: float = SESSION_FACT_RRF_WEIGHT_DEFAULT,
                  session_fact_quota: int = SESSION_FACT_QUOTA_DEFAULT,
-                 session_fact_top_n: int = SESSION_FACT_TOP_N_DEFAULT) -> None:
+                 session_fact_top_n: int = SESSION_FACT_TOP_N_DEFAULT,
+                 evidence_selection: bool = False,
+                 coverage_retrieval: bool = False,
+                 retrieval_trace_path: Optional[str] = None) -> None:
         self.database_path = database_path
         self.model = model
+        if not isinstance(evidence_selection, bool) or not isinstance(coverage_retrieval, bool):
+            raise ValueError("evidence_selection and coverage_retrieval must be booleans")
+        if coverage_retrieval and not evidence_selection:
+            raise ValueError("coverage_retrieval requires evidence_selection")
+        if evidence_selection and (p5_gate or set_aware_rerank or dense_fusion_alpha is not None):
+            raise ValueError("evidence_selection cannot combine with P5, set-aware or dense fusion")
+        if evidence_selection and (semantic_retriever is not None or local_reranker is not None
+                                   or local_instruction_reranker is not None):
+            raise ValueError("evidence_selection requires the standard lexical/model path")
+        if evidence_selection and not structured_query_plan:
+            raise ValueError("evidence_selection requires structured_query_plan")
+        self.evidence_selection = evidence_selection
+        self.coverage_retrieval = coverage_retrieval
+        self.retrieval_trace_path = retrieval_trace_path
         self.temporal_bonus = temporal_bonus
         self.semantic_retriever = semantic_retriever
         self.dense_rrf_weight = dense_rrf_weight
@@ -1225,6 +1243,8 @@ class MemoryStore:
             self._last_graph_only_candidate_ids = list(graph_only_candidate_ids)
             self._last_graph_paths = copy.deepcopy(list(graph_paths))
             self._last_retrieval_trace = copy.deepcopy(retrieval_trace)
+            if self.retrieval_trace_path:
+                append_redacted_trace(self.retrieval_trace_path, retrieval_trace)
 
     def _normalized_evidence_need_tokens(
         self, query_plan: Dict[str, Any]
@@ -1610,6 +1630,23 @@ class MemoryStore:
                 );
                 """
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS text_index_migrations (version INTEGER PRIMARY KEY)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS raw_messages_user_session_order_idx "
+                "ON raw_messages(user_id, session_id, id)"
+            )
+            if not connection.execute(
+                "SELECT 1 FROM text_index_migrations WHERE version = 1"
+            ).fetchone():
+                # Atomic, source-only repair for databases populated by the old
+                # within-request neighbor index. No raw messages are changed.
+                for session in connection.execute(
+                    "SELECT DISTINCT user_id, session_id FROM raw_messages"
+                ).fetchall():
+                    self._refresh_session_context(connection, session["user_id"], session["session_id"])
+                connection.execute("INSERT INTO text_index_migrations(version) VALUES (1)")
             if not (self.evidence_graph or self.evidence_anchors):
                 return
             connection.executescript(
@@ -3425,6 +3462,27 @@ class MemoryStore:
                 ),
             )
 
+    def _refresh_session_context(self, connection: sqlite3.Connection, user_id: str,
+                                 session_id: str, changed_ids: Optional[set] = None) -> None:
+        rows = connection.execute(
+            """SELECT id, content, role, event_ts FROM raw_messages
+               WHERE user_id = ? AND session_id = ? ORDER BY id""", (user_id, session_id)
+        ).fetchall()
+        for index, row in enumerate(rows):
+            window = rows[max(0, index - 1):index + 2]
+            if changed_ids is not None and not any(item["id"] in changed_ids for item in window):
+                continue
+            context = "\n".join(
+                latent_message_text(item["content"], item["role"], item["event_ts"])
+                for item in window
+            )
+            for table in ("context_fts", "context_porter_fts"):
+                # Table names are fixed internal constants, never input.
+                connection.execute("DELETE FROM {} WHERE message_id = ? AND user_id = ?".format(table),
+                                   (row["id"], user_id))
+                connection.execute("INSERT INTO {}(message_id,user_id,content) VALUES (?,?,?)".format(table),
+                                   (row["id"], user_id, context))
+
     def add(self, request: AddRequest) -> None:
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         with self._connection() as connection:
@@ -3520,17 +3578,10 @@ class MemoryStore:
                             created_at=now,
                             payload=graph_payload,
                         )
-            for index, (message_id, _) in enumerate(inserted_messages):
-                window = inserted_messages[max(0, index - 1):index + 2]
-                context = "\n".join(content for _, content in window)
-                connection.execute(
-                    "INSERT INTO context_fts(message_id, user_id, content) VALUES (?, ?, ?)",
-                    (message_id, request.user_id, context),
-                )
-                connection.execute(
-                    "INSERT INTO context_porter_fts(message_id, user_id, content) VALUES (?, ?, ?)",
-                    (message_id, request.user_id, context),
-                )
+            self._refresh_session_context(
+                connection, request.user_id, request.session_id,
+                {message_id for message_id, _ in inserted_messages},
+            )
             # Rebuild this session document so repeated chunks with the same
             # session_id remain one lexical unit for hierarchical retrieval.
             session_rows = connection.execute(
@@ -3607,16 +3658,29 @@ class MemoryStore:
                     message_id = int(source_message_id)
                 except (TypeError, ValueError):
                     continue
+                if not connection.execute(
+                    "SELECT 1 FROM raw_messages WHERE id=? AND user_id=? AND session_id=?",
+                    (message_id, user_id, session_id),
+                ).fetchone():
+                    continue
                 try:
                     connection.execute(
                         """INSERT INTO session_facts(
-                               user_id, session_id, source_message_id,
-                               fact_text, created_at)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        (user_id, session_id, message_id, fact_text, now),
+                               user_id, session_id, fact_text, created_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (user_id, session_id, fact_text, now),
                     )
                 except sqlite3.IntegrityError:
-                    continue
+                    pass
+                fact_row = connection.execute(
+                    "SELECT id FROM session_facts WHERE user_id=? AND session_id=? AND fact_text=?",
+                    (user_id, session_id, fact_text),
+                ).fetchone()
+                if fact_row:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO session_fact_sources(session_fact_id,source_message_id) VALUES (?,?)",
+                        (fact_row["id"], message_id),
+                    )
 
     def replace_session_facts(
         self,
@@ -3637,7 +3701,13 @@ class MemoryStore:
         with self._connection() as connection:
             try:
                 connection.execute("BEGIN")
-                # Delete old facts (CASCADE will remove sources too)
+                # Default connections do not enable graph FK enforcement, so
+                # explicitly remove provenance before replacing its parent rows.
+                connection.execute(
+                    """DELETE FROM session_fact_sources WHERE session_fact_id IN (
+                       SELECT id FROM session_facts WHERE user_id=? AND session_id=?)""",
+                    (user_id, session_id),
+                )
                 connection.execute(
                     "DELETE FROM session_facts WHERE user_id = ? AND session_id = ?",
                     (user_id, session_id),
@@ -3660,8 +3730,8 @@ class MemoryStore:
                         except (TypeError, ValueError):
                             continue
                         row = connection.execute(
-                            "SELECT 1 FROM raw_messages WHERE id = ? AND user_id = ?",
-                            (mid, user_id),
+                            "SELECT 1 FROM raw_messages WHERE id = ? AND user_id = ? AND session_id = ?",
+                            (mid, user_id, session_id),
                         ).fetchone()
                         if row:
                             valid_src_ids.append(mid)
@@ -3674,7 +3744,7 @@ class MemoryStore:
                         (user_id, session_id, fact_text, now),
                     )
                     sf_id = cursor.lastrowid
-                    for mid in valid_src_ids:
+                    for mid in dict.fromkeys(valid_src_ids):
                         connection.execute(
                             "INSERT INTO session_fact_sources(session_fact_id, source_message_id) VALUES (?, ?)",
                             (sf_id, mid),
@@ -3708,10 +3778,72 @@ class MemoryStore:
                 })
             return result
 
+    def _coverage_candidates(self, user_id: str, match_query: str,
+                             query_plan: Dict[str, Any]) -> List[sqlite3.Row]:
+        """Bounded source representatives; semantic sufficiency is checked separately.
+
+        The channel is intentionally limited to eight pool slots. It does not
+        claim exhaustive summary coverage and never returns synthesized text.
+        """
+        intent = query_plan.get("intent")
+        if not self.coverage_retrieval or intent not in {"governance", "rule", "learning", "summary"}:
+            return []
+        with self._connection() as connection:
+            hits = connection.execute(
+                """SELECT raw.* FROM messages_porter_fts
+                   JOIN raw_messages AS raw ON raw.id = messages_porter_fts.message_id
+                   WHERE messages_porter_fts MATCH ? AND raw.user_id = ?
+                   ORDER BY bm25(messages_porter_fts), raw.id DESC LIMIT 120""",
+                (match_query, user_id),
+            ).fetchall()
+            sessions = list(dict.fromkeys(row["session_id"] for row in hits))[:40]
+            if not sessions and intent == "summary" and not query_plan.get("entities"):
+                sessions = [row["session_id"] for row in connection.execute(
+                    """SELECT session_id FROM raw_messages WHERE user_id = ?
+                       GROUP BY session_id ORDER BY MIN(id) LIMIT 40""", (user_id,)
+                ).fetchall()]
+            if not sessions:
+                return []
+            marks = ",".join("?" for _ in sessions)
+            representatives = connection.execute(
+                """WITH ordered AS (
+                    SELECT *, ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY id) AS pos,
+                    COUNT(*) OVER (PARTITION BY session_id) AS total
+                    FROM raw_messages WHERE user_id = ? AND session_id IN ({})
+                ) SELECT * FROM ordered WHERE pos IN (1, total, (total+1)/2)
+                  ORDER BY session_id, pos""".format(marks), [user_id] + sessions
+            ).fetchall()
+        by_session: Dict[str, List[sqlite3.Row]] = {session: [] for session in sessions}
+        for session in sessions:
+            matches = [row for row in hits if row["session_id"] == session]
+            anchors = [row for row in representatives if row["session_id"] == session]
+            if intent == "governance":
+                # Review both newer and earlier matching assertions; do not
+                # infer validity from ingest order or destroy historical states.
+                ordered = sorted(matches, key=lambda row: row["id"], reverse=True)
+                candidates = ordered[:2] + matches[:1] + ordered[-1:] + anchors
+            elif intent == "summary":
+                candidates = matches[:1] + anchors + matches[1:3]
+            else:
+                # For rules/learning, mix topical exemplars and different stages.
+                candidates = matches[:2] + anchors + matches[2:4]
+            seen = set()
+            by_session[session] = [row for row in candidates
+                                   if not (row["id"] in seen or seen.add(row["id"]))]
+        result = []
+        for offset in range(8):
+            for session in sessions:
+                if offset < len(by_session[session]):
+                    result.append(by_session[session][offset])
+                    if len(result) == 24:
+                        return result
+        return result
+
     def search(self, *, user_id: str, query: str, options: Optional[List[str]] = None,
                top_k: int) -> List[MemoryResult]:
         speaker_conflict = False
         retrieval_trace = self._empty_retrieval_trace()
+        selection_decision: Dict[str, Any] = {"applied": False, "reason": "disabled"}
         message_ids: Dict[str, int] = {}
         ranking_metadata: Dict[Any, Dict[str, Any]] = {}
         retrieval_trace["edge_diagnostics"][
@@ -3743,7 +3875,10 @@ class MemoryStore:
         query_plan: Dict[str, Any] = {}
         if self.model:
             if self.structured_query_plan:
-                plan = self.model.plan_query_structured(query, options or [])
+                planner = self.model.plan_query_structured
+                if self.evidence_selection and callable(getattr(self.model, "plan_evidence_query", None)):
+                    planner = self.model.plan_evidence_query
+                plan = planner(query, options or [])
                 if isinstance(plan, dict):
                     query_plan = plan
                     retrieval_trace["plan"] = copy.deepcopy(plan)
@@ -4549,28 +4684,30 @@ class MemoryStore:
                 sf_rows = sf_connection.execute(
                     """SELECT raw.id AS id,
                               fact.id AS fact_id,
-                              fact.source_message_id,
+                              source.source_message_id,
                               fact.session_id,
                               fact.fact_text,
                               raw.content,
                               raw.created_at,
                               raw.event_ts
                        FROM session_facts AS fact
+                       JOIN session_fact_sources AS source ON source.session_fact_id = fact.id
                        JOIN raw_messages AS raw
-                         ON raw.id = fact.source_message_id
+                         ON raw.id = source.source_message_id
                         AND raw.user_id = fact.user_id
+                        AND raw.session_id = fact.session_id
                        WHERE fact.user_id = ?
                        ORDER BY fact.id""",
                     (user_id,),
                 ).fetchall()
-            session_fact_diagnostics["facts"] = len(sf_rows)
+                session_fact_diagnostics["facts"] = len({row["fact_id"] for row in sf_rows})
             if sf_rows:
                 fact_candidates = [
                     {
                         "id": "sfact_{}".format(int(row["fact_id"])),
                         "content": str(row["fact_text"]),
                     }
-                    for row in sf_rows
+                    for row in {row["fact_id"]: row for row in sf_rows}.values()
                 ]
                 sf_scores = self.semantic_retriever.score(
                     query, options or [], fact_candidates
@@ -4581,23 +4718,18 @@ class MemoryStore:
                 # Map each top fact back to its source message; keep message
                 # order by score and deduplicate identical source messages so
                 # one message never enters the channel twice.
-                fact_by_id = {
-                    "sfact_{}".format(int(row["fact_id"])): row
-                    for row in sf_rows
-                }
+                fact_by_id: Dict[str, List[sqlite3.Row]] = {}
+                for row in sf_rows:
+                    fact_by_id.setdefault("sfact_{}".format(int(row["fact_id"])), []).append(row)
                 seen_sf_messages = set()
                 for candidate_id in sf_ranked:
-                    row = fact_by_id.get(candidate_id)
-                    if row is None:
-                        continue
-                    message_id = int(row["source_message_id"])
-                    if message_id in seen_sf_messages:
-                        continue
-                    seen_sf_messages.add(message_id)
-                    session_fact_diagnostics["top_matches"].append(
-                        candidate_id
-                    )
-                    session_fact_rows.append(row)
+                    for row in fact_by_id.get(candidate_id, []):
+                        message_id = int(row["source_message_id"])
+                        if message_id in seen_sf_messages:
+                            continue
+                        seen_sf_messages.add(message_id)
+                        session_fact_diagnostics["top_matches"].append(candidate_id)
+                        session_fact_rows.append(row)
                 session_fact_diagnostics["triggered"] = bool(
                     session_fact_rows
                 )
@@ -5069,6 +5201,21 @@ class MemoryStore:
             + session_fact_channel
         )
         deduplicated = deduplicate_ranked(ranked, prefer_provenance=True)
+        legacy_results = list(deduplicated)
+        coverage_rows = (
+            self._coverage_candidates(user_id, match_query, query_plan)
+            if self.evidence_selection and self.model else []
+        )
+        retrieval_trace["coverage_candidate_ids"] = ["mem_{}".format(row["id"]) for row in coverage_rows]
+        # These candidates are only returned after a complete validated selection;
+        # fallback retains the lexical results that existed before this channel.
+        known_ids = {result.id for result in deduplicated}
+        for row in coverage_rows:
+            candidate_id = "mem_{}".format(row["id"])
+            if candidate_id not in known_ids:
+                deduplicated.append(MemoryResult(id=candidate_id, content=row["content"],
+                                                 score=0.0, created_at=row["created_at"]))
+                known_ids.add(candidate_id)
         retrieval_trace["graph_channel_only_ids"] = list(
             graph_only_candidate_ids
         )
@@ -5197,6 +5344,8 @@ class MemoryStore:
                 candidate["result"].id: candidate["message_id"]
                 for candidate in ranked
             }
+            for row in coverage_rows:
+                message_ids["mem_{}".format(row["id"])] = int(row["id"])
             result_by_id = {result.id: result for result in deduplicated}
             if bridge_union_ids:
                 for rows in bridge_channel_rows.values():
@@ -5351,6 +5500,27 @@ class MemoryStore:
                     pool_ids.add(result.id)
             if len(rerank_pool) > self.MODEL_RERANK_LIMIT:
                 raise RuntimeError("model rerank pool exceeded its hard limit")
+            # Reserve up to eight coverage slots without displacing the evidence-
+            # need/graph reservations or reducing the normal pool below 18.
+            protected_ids = set(reserved_graph_ids + reserved_anchor_ids + reserved_adjacent_ids
+                                + reserved_need_ids + reserved_bridge_ids + reserved_relax_ids
+                                + reserved_session_fact_ids)
+            coverage_added = []
+            for row in coverage_rows:
+                candidate_id = "mem_{}".format(row["id"])
+                if candidate_id in {item.id for item in rerank_pool}:
+                    continue
+                if len(coverage_added) >= 8:
+                    break
+                if len(rerank_pool) >= self.MODEL_RERANK_LIMIT:
+                    removable = [item for item in reversed(rerank_pool)
+                                 if item.id not in protected_ids and item.id not in coverage_added]
+                    if len(rerank_pool) - len(coverage_added) <= 18 or not removable:
+                        break
+                    rerank_pool.remove(removable[0])
+                rerank_pool.append(result_by_id[candidate_id])
+                coverage_added.append(candidate_id)
+            retrieval_trace["reserved_coverage_ids"] = coverage_added
             rerank_pool_ids = [result.id for result in rerank_pool]
             retrieval_trace["reserved_graph_ids"] = list(reserved_graph_ids)
             retrieval_trace["reserved_anchor_ids"] = list(reserved_anchor_ids)
@@ -5458,8 +5628,32 @@ class MemoryStore:
                         paths_by_source.get(result.id, []),
                     ),
                 })
+                if self.evidence_selection:
+                    # Preserve sub-day ordering for repeated streaming updates.
+                    # Source order is a retrieval tie-break, not a validity claim.
+                    candidates[-1]["event_timestamp"] = metadata.get("event_ts")
+                    candidates[-1]["source_order"] = message_ids[result.id]
             retrieval_trace["llm_rank_candidate_count"] = len(candidates)
-            ordered_ids = self.model.rank_candidates(query, options or [], candidates)
+            if self.evidence_selection and callable(getattr(self.model, "select_evidence", None)):
+                try:
+                    payload = self.model.select_evidence(query, options or [], candidates, query_plan)
+                    selection_decision = validate_selection(
+                        payload, [item["id"] for item in candidates], query_plan.get("evidence_needs", [])
+                    )
+                except Exception:
+                    # No second model call, no exception text in traces, no
+                    # speculative filtering when selection is unavailable.
+                    selection_decision = {"applied": False, "reason": "selector_error", "selected_ids": []}
+                ordered_ids = selection_decision.get("selected_ids", [])
+                if selection_decision["applied"]:
+                    deduplicated = [result_by_id[item] for item in ordered_ids]
+                else:
+                    deduplicated = legacy_results
+            else:
+                ordered_ids = self.model.rank_candidates(query, options or [], candidates)
+                if self.evidence_selection:
+                    deduplicated = legacy_results
+                    selection_decision = {"applied": False, "reason": "selector_unavailable", "selected_ids": []}
             rank_confidence: Dict[str, float] = {}
             if self.p5_gate and hasattr(self.model, "rank_candidates_with_confidence"):
                 ordered_ids, rank_confidence = (
@@ -5490,6 +5684,10 @@ class MemoryStore:
             message_ids=message_ids if self.model else None,
         )
         final_results = deduplicated[:top_k]
+        selection_decision["coverage_truncated"] = (
+            selection_decision.get("applied", False) and len(deduplicated) > top_k
+        )
+        retrieval_trace["evidence_selection"] = selection_decision
         retrieval_trace["final_ids"] = [
             result.id for result in final_results
         ]

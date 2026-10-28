@@ -738,11 +738,16 @@ def _add_adjacent_test_turn(store, *, request_id, session_id, content, user_id="
         session_id=session_id,
         messages=[{"role": "user", "content": content}],
     ))
+    # Isolate the traversal operator from the independent lexical-context
+    # channel. Cross-request context indexing is now correctly repaired on Add;
+    # separate Adds alone no longer keep these neighbors out of the P1 pool.
+    with store._connection() as connection:
+        connection.execute("DELETE FROM context_fts WHERE user_id = ?", (user_id,))
+        connection.execute("DELETE FROM context_porter_fts WHERE user_id = ?", (user_id,))
 
 
 def _seed_adjacent_turn_fixture(store):
-    # Separate Add calls deliberately avoid the existing ingestion-time context
-    # window; P1.1 must discover the same-session adjacency from raw turns.
+    # The fixture removes context indexes to test discovery through traversal.
     _add_adjacent_test_turn(
         store,
         request_id="adjacent-previous",
