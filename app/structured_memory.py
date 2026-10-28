@@ -327,6 +327,54 @@ def directed_path(records: Sequence[Dict[str, Any]], start: str, end: str,
     return {"status": "not_found", "required": []}
 
 
+def route_memory_requests(catalog: Dict[str, Any], request: Any, query: str) -> Dict[str, Any]:
+    """Resolve catalog references by their actual kind, plus explicit literal slots.
+
+    Labels are resolved only against this user's catalog and literal subject,
+    attribute and scope in the query. Unknown/ambiguous aliases invent no slot.
+    """
+    result = dict(request) if isinstance(request, dict) else {}
+    groups = catalog["groups"]
+    by_id = {row["group_id"]: row for row in groups}
+    kinds = {"state": "state_slots", "rule": "rule_groups", "observation": "observation_groups"}
+    routed = {key: [] for key in kinds.values()}
+    query_text = normalize(query)
+    def mentioned(text):
+        return (bool(re.search(r"(?<!\w)" + re.escape(text) + r"(?!\w)", query_text))
+                if re.fullmatch(r"[a-z0-9_ .-]+", text) else text in query_text)
+    for key in routed:
+        values = result.get(key, [])
+        for value in values if isinstance(values, list) else []:
+            if not isinstance(value, str):
+                continue
+            row = by_id.get(value)
+            if row is None:
+                matches = [r for r in groups if r["attribute"] == normalize(value)
+                           and mentioned(r["subject"]) and mentioned(r["attribute"])
+                           and (not r["scope"] or mentioned(r["scope"]))]
+                row = matches[0] if len(matches) == 1 else None
+            if row is not None:
+                routed[kinds[row["kind"]]].append(row["group_id"])
+    # Exact known slot terms can recover a planner's omitted group without
+    # guessing a paraphrase, authority, person or unmentioned scope.
+    for row in groups:
+        if (row["kind"] == "state" and mentioned(row["subject"]) and mentioned(row["attribute"])
+                and (not row["scope"] or mentioned(row["scope"]))):
+            routed["state_slots"].append(row["group_id"])
+    for key, values in routed.items():
+        result[key] = list(dict.fromkeys(values))
+    explicit_asof = re.search(r"(?:as\s+of|截至|截止)\s*(\d{4}-\d{2}-\d{2})", query_text)
+    if explicit_asof:
+        result.update(temporal_mode="as_of", as_of=explicit_asof[1])
+    elif re.search(r"\b(history|changes|changed|previous|earlier|formerly)\b|历史|变化|变更|之前", query_text):
+        result["temporal_mode"] = "history"
+    elif re.search(r"\b(order|sequence|earliest|latest)\b|顺序|排序", query_text):
+        result["temporal_mode"] = "order"
+    elif re.search(r"\b(current|currently|now)\b|当前|现在|目前", query_text):
+        result["temporal_mode"] = "current"
+    return result
+
+
 class StructuredMemoryIndex:
     """Small SQLite index; every row and rollup retains raw-source provenance."""
 
@@ -434,8 +482,7 @@ class StructuredMemoryIndex:
                  query: str, plan: Dict[str, Any]) -> Dict[str, Any]:
         catalog = StructuredMemoryIndex.catalog(connection, user_id, query)
         by_id = {row["group_id"]: row for row in catalog["groups"]}
-        request = plan.get("memory_requests", {})
-        request = request if isinstance(request, dict) else {}
+        request = route_memory_requests(catalog, plan.get("memory_requests", {}), query)
         required_groups, blocked, diagnostics, hints = [], [], {}, []
         coverage_limited = False
         mode = request.get("temporal_mode", "current")

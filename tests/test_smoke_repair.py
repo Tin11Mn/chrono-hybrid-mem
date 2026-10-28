@@ -13,6 +13,7 @@ from app.model import MemoryModel
 from app.schemas import AddRequest
 from app.storage import MemoryStore
 from app.structured_memory import grounded_records, resolve_states
+from app.structured_memory import route_memory_requests
 from app.evidence_selection import validate_selection
 
 
@@ -185,3 +186,20 @@ def test_selector_contract_uses_actual_need_count_instead_of_copied_index(monkey
     model.plan_indexed_query("q", [], {"groups": []})
     assert "memory_requests is an object" in prompts[2]
     assert "Every value except intent must be an array" not in prompts[2]
+
+
+def test_captured_wrong_kind_and_attribute_label_route_only_to_known_literal_slots():
+    catalog = {"groups": [{"kind": "state", "group_id": "known-state", "subject": "candidatesample",
+                            "attribute": "status", "scope": "", "authority": "user"}]}
+    wrong = {"state_slots": ["status"], "observation_groups": ["known-state"], "temporal_mode": "current"}
+    routed = route_memory_requests(catalog, wrong, "CandidateSample current status")
+    assert routed["state_slots"] == ["known-state"] and routed["observation_groups"] == []
+    assert route_memory_requests(catalog, {}, "List status changes of CandidateSample")["temporal_mode"] == "history"
+    assert route_memory_requests(catalog, {"state_slots": ["status", "foreign-slot"]}, "Unrelated question")["state_slots"] == []
+
+
+def test_literal_slot_routing_does_not_guess_unmentioned_scope():
+    catalog = {"groups": [{"kind": "state", "group_id": str(i), "subject": "alice", "attribute": "status",
+                            "scope": "project" + str(i), "authority": "user"} for i in [1, 2]]}
+    assert route_memory_requests(catalog, {"state_slots": ["status"]}, "Alice status")["state_slots"] == []
+    assert route_memory_requests(catalog, {}, "Alice project2 status")["state_slots"] == ["2"]
