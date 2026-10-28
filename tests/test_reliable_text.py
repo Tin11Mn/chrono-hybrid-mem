@@ -33,7 +33,7 @@ def test_first_person_witness_and_independent_modalities_in_one_page():
     source='My name is Mara. I prefer quiet rooms and decaf tea. I might move next year.'
     p=packet('@speaker','quiet rooms',units=['u2'])
     records,complete=grounded_records(decode_annotations(p,source),source,'user',100)
-    assert complete and records[0]['subject']=='user' and records[0]['modality']=='assert'
+    assert not complete and records[0]['subject']=='user' and records[0]['modality']=='assert'
     # Full-page context must not turn an unrelated literal preference into a plan.
     p['records'][0]['unit_ids']=['all']
     records,complete=grounded_records(decode_annotations(p,source),source,'user',100)
@@ -76,6 +76,16 @@ def test_measurement_rows_under_shared_heading_keep_counterexample():
     assert summary['exact_affine_fit'] is None
 
 
+def test_literal_observation_table_recovers_split_input_output_without_a_law():
+    text='MeterB observations: u=1, v=8; u=2, v=12; u=3, v=17.'
+    p=packet('MeterB','1',kind='observation')
+    rows,complete=grounded_records(decode_annotations(p,text),text,'user',100)
+    assert complete and len(rows)==3
+    for row in rows:row['source_id']=1
+    summary=observation_summary(rows)
+    assert summary['statistics']['u']['count']==3 and summary['exact_affine_fit'] is None
+
+
 def test_pages_are_bounded_literal_slices_and_never_claim_truncated_coverage():
     source=('Aster notes are literal. '*1000)
     pages,complete=source_pages(source)
@@ -106,6 +116,20 @@ def test_no_relative_or_deadline_date_is_invented():
     p=packet('AsterCase','approved',units=['u2'])
     row=decode_annotations(p,source)['records'][0]
     assert row['modality']=='update' and 'effective_date' not in row
+
+
+@pytest.mark.parametrize('kind',['event','observation'])
+def test_misclassified_status_weakens_to_fact_and_witnessed_transition(kind):
+    old='AsterCase status is pending.'
+    new='AsterCase status is now approved.'
+    first=decode_annotations(packet('AsterCase','pending',kind=kind),old)
+    second=decode_annotations(packet('AsterCase','approved',kind=kind),new)
+    rows1,valid1=grounded_records(first,old,'user',100)
+    rows2,valid2=grounded_records(second,new,'user',200)
+    assert valid1 and valid2 and rows1[0]['kind']=='fact' and rows2[0]['kind']=='state'
+    assert rows1[0]['group_id']==rows2[0]['group_id']
+    rows1[0]['source_id']=1;rows2[0]['source_id']=2
+    assert resolve_states(rows1+rows2)['required']==[2]
 
 
 def test_whole_quoted_witness_is_not_an_effective_update():

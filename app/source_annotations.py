@@ -45,6 +45,8 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
         return {**result, 'records': [], 'complete': False}
     complete = payload.get('complete') is True and len(records) <= RECORDS_PER_PAGE
     decoded = []
+    uses_units = 'ignored_unit_ids' in payload or any(isinstance(r, dict) and 'unit_ids' in r for r in records)
+    covered_units = set()
     for item in records[:RECORDS_PER_PAGE]:
         if not isinstance(item, dict):
             complete = False
@@ -54,6 +56,7 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
         if refs is not None:
             if refs == ['all']:
                 span = content
+                covered_units.update(by_id)
             elif (isinstance(refs, list) and refs and all(isinstance(ref, str) and ref in by_id for ref in refs)
                   and len(set(refs)) == len(refs)):
                 indices = [by_id[ref] for ref in refs]
@@ -61,6 +64,7 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
                     complete = False
                     continue
                 span = content[units[indices[0]]['start']:units[indices[-1]]['end']]
+                covered_units.update(refs)
             else:
                 complete = False
                 continue
@@ -78,6 +82,21 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
             item.setdefault('modality', item['kind'])
             item['kind'] = 'state'
         value = item.get('value')
+        # Captured provider grammar variant: "Device status" / "is now".
+        # Canonicalize only an explicit literal attribute, never a guessed alias.
+        status_subject = re.fullmatch(r'(.+?)\s+(status|state)', str(item.get('subject', '')), re.I)
+        if status_subject and re.fullmatch(r'(?:is|was|is now|was previously)', str(item.get('attribute', '')), re.I):
+            item['subject'], item['attribute'] = status_subject[1], status_subject[2].casefold()
+        if (isinstance(span, str) and isinstance(item.get('subject'), str)
+                and item['subject'] not in span and re.match(r'^\s*I\s+\w', span)):
+            item['subject'] = '@speaker'
+        # A categorical label cannot turn a nonnumeric attribute into a numeric
+        # observation. Downgrade to a generic assertion; do not invent measures.
+        if item.get('kind') == 'observation' and isinstance(value, str) and not re.search(r'\d', value):
+            item['kind'] = 'fact'
+        if item.get('kind') == 'event' and str(item.get('attribute', '')).casefold() in {
+                'status', 'state', 'preference', 'location', 'affiliation'}:
+            item['kind'] = 'fact'
         if isinstance(span, str) and isinstance(value, str) and value and span.count(value) == 1:
             point = span.index(value)
             left = 0
@@ -99,6 +118,37 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
                 if item.get('kind') == 'event' or re.search(
                         r'\beffective\b|\bwas\b.*\bon\b|生效|曾于', clause, re.I):
                     item['effective_date'] = dates[0]
+        if item.get('kind') in {'fact', 'event', 'observation'} and item.get('modality') in {
+                'update', 'correction', 'retraction'}:
+            item['kind'] = 'state'
         decoded.append(item)
+    ignored = payload.get('ignored_unit_ids', [])
+    if uses_units:
+        if (not isinstance(ignored, list) or any(not isinstance(i, str) or i not in by_id for i in ignored)
+                or len(set(ignored)) != len(ignored)):
+            complete = False
+            ignored = []
+        uncovered = [i for i in by_id if i not in covered_units and i not in ignored]
+        if uncovered:
+            complete = False
+        result['uncovered_unit_ids'] = uncovered
+    # Literal measurement tables often arrive as separate x/y annotations.
+    # Reconstruct only explicitly labelled observed rows, never an induced law.
+    if any(r.get('kind') == 'observation' for r in decoded):
+        header = re.match(r'^\s*([\w .-]{1,100}?)\s+(?:observations|measurements|readings|data)\s*:\s*', content, re.I)
+        if header and len(re.findall(r'\b(?:observations|measurements|readings|data)\s*:', content, re.I)) == 1:
+            from .structured_memory import CONDITION
+            measured = []
+            for chunk in re.split(r';\s*|(?<=[.!?。！？])\s+|\n+', content[header.end():]):
+                matches = [m for m in CONDITION.finditer(chunk) if m[2] in {'=', '=='} and re.fullmatch(r'-?\d+(?:\.\d+)?', m[3])]
+                if len(matches) < 2 or len({m[1] for m in matches}) != len(matches):
+                    continue
+                if re.search(r'\b(if|unless|suppose|might|could)\b|假设|如果', chunk, re.I):
+                    continue
+                literal = chunk[matches[0].start():matches[-1].end()]
+                measured.append({'kind':'observation','subject':header[1], 'attribute':'measurements',
+                    'value':literal,'span':content,'scope':'','modality':'assert','conditions':[]})
+            if measured:
+                decoded = [r for r in decoded if r.get('kind') != 'observation'] + measured
     result.update(records=decoded, complete=complete)
     return result
