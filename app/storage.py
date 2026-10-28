@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .model import MemoryModel
-from .evidence_selection import append_redacted_trace, validate_selection
+from .evidence_selection import append_redacted_trace, validate_selection, validated_ranking
 from .structured_memory import StructuredMemoryIndex, enforce_obligations
 from .graph_routing import preferred_graph_predicates
 from .local_instruction import mask_candidate_speakers
@@ -5751,8 +5751,10 @@ class MemoryStore:
                     candidates[-1]["source_order"] = message_ids[result.id]
             retrieval_trace["llm_rank_candidate_count"] = len(candidates)
             if self.evidence_selection and callable(getattr(self.model, "select_evidence", None)):
+                fallback_order = []
                 try:
                     payload = self.model.select_evidence(query, options or [], candidates, query_plan)
+                    fallback_order = validated_ranking(payload, [item["id"] for item in candidates])
                     selection_decision = validate_selection(
                         payload, [item["id"] for item in candidates], query_plan.get("evidence_needs", [])
                     )
@@ -5769,6 +5771,14 @@ class MemoryStore:
                     deduplicated = [result_by_id[item] for item in ordered_ids]
                 else:
                     deduplicated = legacy_results
+                    # Incomplete coverage rejects filtering, not the model's
+                    # independently validated ranking of existing raw sources.
+                    # Keep the legacy membership and stable tail. Coverage-only
+                    # candidates and excluded IDs gain no publication authority.
+                    legacy_ids = {result.id for result in legacy_results}
+                    ordered_ids = [item for item in fallback_order if item in legacy_ids]
+                    selection_decision["fallback_order_applied"] = bool(ordered_ids)
+                    selection_decision["fallback_ordered_ids"] = list(ordered_ids)
             else:
                 ordered_ids = self.model.rank_candidates(query, options or [], candidates)
                 if self.evidence_selection:

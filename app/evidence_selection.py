@@ -7,6 +7,24 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 
+def validated_ranking(payload: Any, allowed_ids: Sequence[str]) -> List[str]:
+    """Validate ordering independently of the stronger coverage certificate.
+
+    These IDs never authorize filtering, adding sources, or resolving conflicts.
+    Legacy selectors may express their useful leading order in selected_ids.
+    An explicitly malformed ordered_ids field must not silently use that fallback.
+    """
+    if not isinstance(payload, dict):
+        return []
+    ordered = payload.get('ordered_ids', payload.get('selected_ids', []))
+    allowed = set(allowed_ids)
+    if (not isinstance(ordered, list)
+            or any(not isinstance(item, str) or item not in allowed for item in ordered)
+            or len(set(ordered)) != len(ordered)):
+        return []
+    return list(ordered)
+
+
 def validate_selection(payload: Any, allowed_ids: Sequence[str],
                        evidence_needs: Sequence[str]) -> Dict[str, Any]:
     """Accept a complete coverage certificate, or preserve the legacy retrieval path.
