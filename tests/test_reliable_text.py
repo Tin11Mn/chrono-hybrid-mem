@@ -101,6 +101,10 @@ def test_assertive_unit_cannot_be_ignored_to_force_completeness():
     assert not decode_annotations(data,'My name is Jo.')['complete']
     assert decode_annotations(data,'Hello!')['complete']
     assert decode_annotations(data,'Where is the station?')['complete']
+    witnessed=packet('AsterCase','pending',units=['u1'])
+    witnessed['ignored_unit_ids']=['u1']
+    result=decode_annotations(witnessed,'AsterCase status pending.')
+    assert grounded_records(result,'AsterCase status pending.','user',100)[1]
 
 
 def test_strict_schema_constrains_types_and_actual_source_ids():

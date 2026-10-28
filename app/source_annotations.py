@@ -151,6 +151,10 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
             ignored = []
         safe_ignored = []
         for ref in ignored:
+            # A redundant "ignored" label cannot erase a supplied witness.
+            # The record still has to pass subject/value/span grounding below.
+            if ref in covered_units:
+                continue
             text = units[by_id[ref]]['text'].strip()
             if text.endswith(('?', '？')) or re.fullmatch(
                     r'(?:hi|hello|hey|thanks|thank you|ok|okay|你好|谢谢|好的)[.!。！\s]*', text, re.I):
