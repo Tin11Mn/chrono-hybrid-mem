@@ -44,7 +44,9 @@ def source_pages(content: str) -> Tuple[List[str], bool]:
 
 
 def source_units(content: str) -> List[Dict[str, Any]]:
-    boundaries = [0] + [match.end() for match in re.finditer(r'(?<=[.!?。！？;])\s+|\n+', content)] + [len(content)]
+    # Keep semicolon-attached qualifications with their assertion, e.g.
+    # "might happen; this is only a plan". Numeric rows are parsed separately.
+    boundaries = [0] + [match.end() for match in re.finditer(r'(?<=[.!?。！？])\s+|\n+', content)] + [len(content)]
     units = []
     for start, end in zip(boundaries, boundaries[1:]):
         text = content[start:end].strip()
@@ -99,6 +101,21 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
                                   if item.get('kind') == 'rule' else [])
         # Compatibility with older providers is still subject to normal grounding.
         span = item.get('span', '')
+        if item.get('effective_date') == '':
+            item['effective_date'] = None  # Empty optional field asserts no date.
+        date_scope = re.fullmatch(r'(?:on|as of|effective(?: on)?)\s+(\d{4}-\d{2}-\d{2})', str(item.get('scope', '')), re.I)
+        if date_scope and isinstance(span, str) and date_scope[1] in span:
+            item['scope'] = ''
+            item.setdefault('effective_date', date_scope[1])
+            if item['effective_date'] is None:
+                item['effective_date'] = date_scope[1]
+        if item.get('kind') == 'rule' and isinstance(span, str) and str(item.get('subject', '')) not in span:
+            header = re.match(r'^\s*For\s+([^,:\n]{1,100})[,,:]', span, re.I)
+            subject = str(item.get('subject', ''))
+            if header and subject.casefold().startswith(header[1].casefold() + ' '):
+                suffix = subject[len(header[1]):].strip()
+                if re.fullmatch(r'(?:(?:pricing|shipping|handling)\s+)?(?:policy|rules|procedure)', suffix, re.I):
+                    item['subject'] = header[1]
         if item.get('kind') in {'update', 'correction', 'retraction'}:
             item.setdefault('modality', item['kind'])
             item['kind'] = 'state'

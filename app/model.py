@@ -546,6 +546,11 @@ class MemoryModel:
             'unit_ids:["all"],modality:"assert". This represents all policy clauses without inventing '
             "a symbolic formula. A correctly represented ordinary page is complete:true, including "
             "first-person, negative and hypothetical statements when their modality is retained."
+            " An empty optional date must be null, never an empty string. Dates belong to "
+            "effective_date, not scope. Do not append inferred labels like 'pricing policy' to "
+            "a subject name: use the exact name in the source. A semicolon-attached caveat such "
+            "as 'that is only a plan' belongs to the same referenced statement, not a missing fact. "
+            "If all source assertions and their caveats are represented, set complete:true."
         )
         pages, covered = source_pages(content)
         all_records, all_facts = [], []

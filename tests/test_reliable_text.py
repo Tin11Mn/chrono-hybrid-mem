@@ -56,6 +56,25 @@ def test_explicit_transition_and_dates_survive_shared_source():
     assert resolve_states(records)['status']=='resolved'
 
 
+def test_temporal_scope_and_empty_date_do_not_fragment_status_slots():
+    source='AsterCase was pending on 2024-04-01. AsterCase might be archived next year; that is only a plan.'
+    assert len(source_units(source))==2
+    p=packet('AsterCase','pending',scope='on 2024-04-01',effective_date='')
+    row=decode_annotations(p,source)['records'][0]
+    assert row['scope']=='' and row['effective_date']=='2024-04-01'
+    p['records'][0].update(value='archived',scope='',effective_date='',modality='hypothetical')
+    assert decode_annotations(p,source)['records'][0]['effective_date'] is None
+
+
+def test_rule_header_descriptor_is_removed_only_for_same_literal_name():
+    source='For HubK, packages under 8 kg cost 2 credits. Emergency items are free.'
+    p=packet('HubK pricing policy',source,kind='rule')
+    rows,complete=grounded_records(decode_annotations(p,source),source,'user',100)
+    assert complete and rows[0]['subject']=='hubk'
+    p['records'][0]['subject']='OtherHub pricing policy'
+    assert not grounded_records(decode_annotations(p,source),source,'user',100)[1]
+
+
 def test_natural_language_rules_are_evidence_without_invented_executable_form():
     source='ParcelDock packages at most 12 kg cost 8 credits. Fragile packages add 3 credits, except emergency medical packages.'
     p=packet('ParcelDock',source,kind='rule',conditions=['weight<=12'])
