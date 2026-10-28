@@ -57,9 +57,9 @@ def grounded_records(payload: Any, content: str, speaker: str,
     if not isinstance(payload, dict) or not isinstance(payload.get("records"), list):
         return [], False
     items = payload["records"]
-    complete = payload.get("complete") is True and len(items) <= 16
+    complete = payload.get("complete") is True and len(items) <= 128
     result = []
-    for item in items[:16]:
+    for item in items[:128]:
         if not isinstance(item, dict):
             complete = False
             continue
@@ -67,9 +67,9 @@ def grounded_records(payload: Any, content: str, speaker: str,
         span, subject, attribute, value = [item.get(key) for key in ("span", "subject", "attribute", "value")]
         scope = item.get("scope", "")
         if (not isinstance(kind, str) or not isinstance(mode, str) or kind not in KINDS or mode not in MODES or not all(isinstance(x, str) for x in
-                (span, subject, attribute, value, scope)) or not span or len(span) > 1024
+                (span, subject, attribute, value, scope)) or not span or len(span) > 4096
                 or not subject or not attribute or not value or len(attribute) > 80
-                or len(subject) > 128 or len(value) > 512 or len(scope) > 128
+                or len(subject) > 128 or len(value) > 4096 or len(scope) > 128
                 or span not in content or value not in span or (scope and scope not in span)):
             complete = False
             continue
@@ -84,26 +84,41 @@ def grounded_records(payload: Any, content: str, speaker: str,
         start = content.index(span)
         prefix = re.split(r"[.!?。\n]", content[:start])[-1][-120:]
         context = prefix + span
-        subject_at = start + max(0, span.find(item["subject"]))
+        # A full-page witness may contain several independent assertions. Guard
+        # the clause containing this value, rather than borrowing modality from
+        # an unrelated plan/quote elsewhere in the same immutable source.
+        value_at = span.find(value)
+        if span.count(value) == 1:
+            left, right = 0, len(content)
+            absolute_value = start + value_at
+            for boundary in re.finditer(r'(?<=[.!?。！？;])\s+|\n+', content):
+                if boundary.end() <= absolute_value:
+                    left = max(left, boundary.end())
+                elif boundary.start() >= absolute_value:
+                    right = min(right, boundary.start())
+                    break
+            context = content[left:right]
+        subject_at = start + max(0, value_at)
         before_subject = content[:subject_at]
         quoted = False
         for opening, closing in [('"', '"'), ('“', '”'), ('‘', '’')]:
             unmatched = (before_subject.count(opening) % 2 == 1 if opening == closing else
                          before_subject.rfind(opening) > before_subject.rfind(closing))
-            if unmatched and content.find(closing, subject_at) >= start + len(span):
+            if unmatched and content.find(closing, subject_at) >= subject_at + len(value):
                 quoted = True
         if quoted or re.search(r"\b(might|maybe|hypothetical|suppose|could|said|says|quoted|hearsay)\b|假设|可能|也许|据说|引用", context, re.I):
             mode = "hypothetical"
         elif re.search(r"\b(next year|next month|will\s+(?:be|have|start|move|join|do)|plan to)\b|明年|下个月|计划|将会", context, re.I):
             mode = "future"
         elif kind in {"fact", "state", "link"} and mode != "retraction" and re.search(
-                r"\b(not|never|false|didn't|doesn't)\b|不是|并非|不再", context, re.I):
+                r"\b(not|never|false|didn't|doesn't)\b|不是|并非|不再", context, re.I) and not re.search(
+                r"\b(not|never|didn't|doesn't)\b|不是|并非|不再", value, re.I):
             mode = "hypothetical"
         if mode in {"update", "correction", "retraction", "exception"}:
             cues = {"update": r"\b(now|changed|updated|effective)\b|现在|更新|改为|生效",
                     "correction": r"\b(correction|corrected|actually|instead)\b|更正|纠正|改为",
                     "retraction": r"\b(retract(?:s|ed)?|withdraw(?:s|n)?|no longer)\b|撤回|撤销|不再",
-                    "exception": r"\b(except|unless|exception)\b|除非|例外|除外"}
+                    "exception": r"\b(except|unless|exception|exempt)\b|除非|例外|除外|豁免"}
             if not re.search(cues[mode], span, re.I):
                 if kind in {"fact", "state"} and mode in {"update", "correction"}:
                     # Weaken an unsupported transition to a witnessed assertion.
@@ -257,7 +272,13 @@ def observation_summary(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
             continue
         eligible.append(record)
         values = {}
-        for field, value in assignments(record["span"]).items():
+        # A full source may contain many distinct rows under one shared header.
+        # Each value is an exact witnessed row; parsing the full span would turn
+        # repeated input fields into ambiguous assignments and discard the data.
+        literal_values = assignments(record["value"])
+        if len(literal_values) < 2:
+            literal_values = assignments(record["span"])
+        for field, value in literal_values.items():
             try:
                 number = Decimal(value)
                 if number.is_finite():
@@ -532,6 +553,9 @@ class StructuredMemoryIndex:
                         detail["required"] = list(dict.fromkeys(r["source_id"] for r in records))
                 elif kind == "rule":
                     detail = evaluate_rules(records, query)
+                    if records and all(not r['conditions'] for r in records):
+                        detail['status'] = 'source_rules'
+                        detail['required'] = list(dict.fromkeys(r['source_id'] for r in records))
                 else:
                     detail = observation_summary(records)
                 if detail["required"]:

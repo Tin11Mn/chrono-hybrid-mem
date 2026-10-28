@@ -207,8 +207,9 @@ def test_rollup_pages_cover_every_original_record_and_keep_counterexamples(tmp_p
         assert connection.execute("SELECT COUNT(*) FROM structured_records").fetchone()[0] == 35
         assert "x=17" in "\n".join(row["extractive_text"] for row in rows)
     store.search(user_id="u1", query="Summarize Sensor measurements", top_k=100)
-    assert not store.last_retrieval_trace["structured_memory"]["pool_coverage_complete"]
-    assert store.last_retrieval_trace["evidence_selection"]["reason"] in {"invalid_decision", "specialist_pool_incomplete"}
+    assert store.last_retrieval_trace["structured_memory"]["pool_coverage_complete"]
+    assert store.last_retrieval_trace["evidence_selection"]["reason"] == "complete"
+    assert len(model.pool) == 35
 
 
 def test_summary_subject_scope_does_not_force_other_topics_or_privacy_sources(tmp_path):

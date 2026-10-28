@@ -558,6 +558,7 @@ class MemoryStore:
     _ingestion_registry: Dict[tuple, list] = {}
     RRF_CONSTANT = 60
     MODEL_RERANK_LIMIT = 30
+    SPECIALIST_RERANK_LIMIT = 96
     # Direction-3 candidate compression: when llm_rerank_top_n > 0, only the
     # first N rerank-pool candidates (fusion order) are sent to the Search
     # model for ranking. Long candidate lists dilute the local model's
@@ -5275,9 +5276,9 @@ class MemoryStore:
             with self._connection() as index_connection:
                 specialist = StructuredMemoryIndex.retrieve(index_connection, user_id, match_query, query, query_plan)
             query_plan["specialist_hints"] = specialist["hints"]
-            query_plan["required_source_groups"] = [group[:30] for group in specialist["required_groups"]]
+            query_plan["required_source_groups"] = [group[:self.SPECIALIST_RERANK_LIMIT] for group in specialist["required_groups"]]
             query_plan["specialist_coverage_limited"] = specialist["coverage_limited"] or any(
-                len(group) > 30 for group in specialist["required_groups"])
+                len(group) > self.SPECIALIST_RERANK_LIMIT for group in specialist["required_groups"])
             retrieval_trace["structured_memory"] = {
                 "index_complete": specialist["index_complete"],
                 "required_groups": [group[:100] for group in specialist["required_groups"]],
@@ -5440,6 +5441,9 @@ class MemoryStore:
                 message_ids["mem_{}".format(row["id"])] = int(row["id"])
             result_by_id = {result.id: result for result in deduplicated}
             required_sources = list(dict.fromkeys(source for group in specialist["required_groups"] for source in group))
+            rerank_limit = (min(self.SPECIALIST_RERANK_LIMIT, max(self.MODEL_RERANK_LIMIT, len(required_sources)))
+                            if self.structured_memory else self.MODEL_RERANK_LIMIT)
+            retrieval_trace['model_pool_limit'] = rerank_limit
             if self.structured_memory:
                 # Deterministic fallback uses witnessed operator evidence, not
                 # invented answers. Known obsolete states are never re-appended.
@@ -5483,13 +5487,13 @@ class MemoryStore:
                 # by at most sidecar_shared_quota slots regardless of how many
                 # sidecar components are active.
                 base_budget = (
-                    self.MODEL_RERANK_LIMIT
+                    rerank_limit
                     - special_quota
                     - self.sidecar_shared_quota
                 )
             else:
                 base_budget = (
-                    self.MODEL_RERANK_LIMIT
+                    rerank_limit
                     - special_quota
                     - need_quota
                     - bridge_quota
@@ -5598,12 +5602,12 @@ class MemoryStore:
                 )
             )
             for result in deduplicated:
-                if len(rerank_pool) >= self.MODEL_RERANK_LIMIT:
+                if len(rerank_pool) >= rerank_limit:
                     break
                 if result.id not in pool_ids:
                     rerank_pool.append(result)
                     pool_ids.add(result.id)
-            if len(rerank_pool) > self.MODEL_RERANK_LIMIT:
+            if len(rerank_pool) > rerank_limit:
                 raise RuntimeError("model rerank pool exceeded its hard limit")
             # Reserve up to eight coverage slots without displacing the evidence-
             # need/graph reservations or reducing the normal pool below 18.
@@ -5617,7 +5621,7 @@ class MemoryStore:
                     continue
                 if len(coverage_added) >= 8:
                     break
-                if len(rerank_pool) >= self.MODEL_RERANK_LIMIT:
+                if len(rerank_pool) >= rerank_limit:
                     removable = [item for item in reversed(rerank_pool)
                                  if item.id not in protected_ids and item.id not in coverage_added]
                     if len(rerank_pool) - len(coverage_added) <= 18 or not removable:
@@ -5631,11 +5635,11 @@ class MemoryStore:
                 required_set = set(required_in_pool)
                 # A validated specialist bundle may use the full 30 slots;
                 # unrelated lexical candidates cannot displace a required link.
-                bundle = required_in_pool[:self.MODEL_RERANK_LIMIT]
+                bundle = required_in_pool[:rerank_limit]
                 retained = [result for result in rerank_pool if result.id not in required_set]
-                rerank_pool = retained[:self.MODEL_RERANK_LIMIT - len(bundle)] + [result_by_id[source] for source in bundle]
+                rerank_pool = retained[:rerank_limit - len(bundle)] + [result_by_id[source] for source in bundle]
                 retrieval_trace["structured_memory"]["pool_coverage_complete"] = (
-                    len(required_in_pool) == len(required_sources) and len(required_sources) <= self.MODEL_RERANK_LIMIT
+                    len(required_in_pool) == len(required_sources) and len(required_sources) <= rerank_limit
                 )
             rerank_pool_ids = [result.id for result in rerank_pool]
             retrieval_trace["reserved_graph_ids"] = list(reserved_graph_ids)
