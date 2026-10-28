@@ -103,8 +103,13 @@ def grounded_records(payload: Any, content: str, speaker: str,
                     "retraction": r"\b(retract(?:s|ed)?|withdraw(?:s|n)?|no longer)\b|撤回|撤销|不再",
                     "exception": r"\b(except|unless|exception)\b|除非|例外|除外"}
             if not re.search(cues[mode], span, re.I):
-                complete = False
-                continue
+                if kind == "state" and mode in {"update", "correction"}:
+                    # Weaken an unsupported transition to a witnessed assertion.
+                    # This NEVER authorizes superseding an earlier value.
+                    mode = "assert"
+                else:
+                    complete = False
+                    continue
         effective = epoch_seconds(timestamp)
         if item.get("effective_date") is not None:
             date = item["effective_date"]
@@ -351,7 +356,8 @@ class StructuredMemoryIndex:
 
     @staticmethod
     def store(connection: sqlite3.Connection, *, user_id: str, session_id: str,
-              source_id: int, content: str, speaker: str, timestamp: Optional[int], payload: Any) -> None:
+              source_id: int, content: str, speaker: str, timestamp: Optional[int], payload: Any,
+              refresh_rollups: bool = True) -> set:
         records, complete = grounded_records(payload, content, speaker, timestamp)
         connection.execute("INSERT OR REPLACE INTO structured_sources(source_id,user_id,complete) VALUES (?,?,?)",
                            (source_id, user_id, int(complete)))
@@ -367,9 +373,11 @@ class StructuredMemoryIndex:
                 connection.execute("INSERT INTO structured_records_fts(record_id,user_id,content) VALUES (?,?,?)",
                                    (cursor.lastrowid, user_id, " ".join([record["subject"], record["attribute"], record["span"]])))
         topics = {record["subject"] for record in records}
-        StructuredMemoryIndex._rollup(connection, user_id, "session", session_id)
-        for topic in topics:
-            StructuredMemoryIndex._rollup(connection, user_id, "topic", topic)
+        if refresh_rollups:
+            StructuredMemoryIndex._rollup(connection, user_id, "session", session_id)
+            for topic in topics:
+                StructuredMemoryIndex._rollup(connection, user_id, "topic", topic)
+        return topics
 
     @staticmethod
     def _rollup(connection: sqlite3.Connection, user_id: str, level: str, key: str) -> None:

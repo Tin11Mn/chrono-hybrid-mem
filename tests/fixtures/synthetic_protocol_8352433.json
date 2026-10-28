@@ -1,0 +1,19 @@
+{
+  "pending": {
+    "facts": ["ProtocolSample status is pending."],
+    "complete": true,
+    "records": [{"kind":"state","subject":"ProtocolSample","attribute":"status","scope":"","value":"pending","span":"ProtocolSample status is pending.","modality":"update","conditions":[]}]
+  },
+  "approved": {
+    "facts": ["short retrieval annotation"],
+    "complete": true,
+    "records": [{"kind":"state","subject":"ProtocolSample","attribute":"status","scope":"","value":"approved","span":"ProtocolSample status is now approved.","modality":"update","conditions":[]}]
+  },
+  "zero_need_selection": {
+    "complete": true,
+    "selected_ids": ["mem_2"],
+    "excluded_ids": ["mem_1"],
+    "evidence_groups": [{"need_index":0,"ids":["mem_2"]}],
+    "state_updates": []
+  }
+}

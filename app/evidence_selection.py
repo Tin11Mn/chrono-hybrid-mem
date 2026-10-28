@@ -45,6 +45,11 @@ def validate_selection(payload: Any, allowed_ids: Sequence[str],
             return invalid
         ids = id_list(group.get("ids"), nonempty=True)
         need_index = group.get("need_index")
+        if not evidence_needs and type(need_index) is int and need_index == 0:
+            # Captured provider variant: copied first-index scaffolding when no
+            # need exists. A general group makes no claim of covering any need;
+            # all source/ID/selection/specialist obligations remain enforced.
+            need_index = None
         if ids is None or not set(ids).issubset(selected):
             return {**invalid, "reason": "missing_coverage"}
         if need_index is not None:

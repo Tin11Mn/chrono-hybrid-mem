@@ -554,6 +554,8 @@ def extract_bridge_terms(
 
 
 class MemoryStore:
+    _ingestion_registry_lock = threading.Lock()
+    _ingestion_registry: Dict[tuple, list] = {}
     RRF_CONSTANT = 60
     MODEL_RERANK_LIMIT = 30
     # Direction-3 candidate compression: when llm_rerank_top_n > 0, only the
@@ -1555,10 +1557,11 @@ class MemoryStore:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS ingestions (
-                    request_id TEXT PRIMARY KEY,
+                    request_id TEXT NOT NULL,
                     user_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
-                    completed_at TEXT NOT NULL
+                    completed_at TEXT NOT NULL,
+                    PRIMARY KEY(user_id, request_id)
                 );
                 CREATE TABLE IF NOT EXISTS raw_messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1640,6 +1643,18 @@ class MemoryStore:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS text_index_migrations (version INTEGER PRIMARY KEY)"
             )
+            ingestion_pk = [row["name"] for row in sorted(
+                connection.execute("PRAGMA table_info(ingestions)").fetchall(), key=lambda row: row["pk"])
+                if row["pk"]]
+            if ingestion_pk == ["request_id"]:
+                connection.execute("SAVEPOINT tenant_ingestion_migration")
+                connection.execute("""CREATE TABLE ingestions_tenant_v2 (
+                    request_id TEXT NOT NULL,user_id TEXT NOT NULL,session_id TEXT NOT NULL,
+                    completed_at TEXT NOT NULL,PRIMARY KEY(user_id,request_id))""")
+                connection.execute("INSERT INTO ingestions_tenant_v2 SELECT request_id,user_id,session_id,completed_at FROM ingestions")
+                connection.execute("DROP TABLE ingestions")
+                connection.execute("ALTER TABLE ingestions_tenant_v2 RENAME TO ingestions")
+                connection.execute("RELEASE tenant_ingestion_migration")
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS raw_messages_user_session_order_idx "
                 "ON raw_messages(user_id, session_id, id)"
@@ -3492,7 +3507,72 @@ class MemoryStore:
                 connection.execute("INSERT INTO {}(message_id,user_id,content) VALUES (?,?,?)".format(table),
                                    (row["id"], user_id, context))
 
+    @classmethod
+    @contextmanager
+    def _ingestion_gate(cls, key: tuple) -> Iterator[None]:
+        """Process-local request coalescing/write serialization, no SQLite lock held."""
+        with cls._ingestion_registry_lock:
+            entry = cls._ingestion_registry.setdefault(key, [threading.Lock(), 0])
+            entry[1] += 1
+        try:
+            with entry[0]:
+                yield
+        finally:
+            with cls._ingestion_registry_lock:
+                entry[1] -= 1
+                if entry[1] == 0:
+                    del cls._ingestion_registry[key]
+
+    def _prepare_message_annotations(self, message) -> Dict[str, Any]:
+        """All model I/O happens before opening the publishing transaction."""
+        result: Dict[str, Any] = {"facts": [], "structured": None, "graph": None}
+        if not self.model:
+            return result
+        if self.structured_memory:
+            extractor = getattr(self.model, "extract_structured_memory", None)
+            if callable(extractor):
+                try:
+                    payload = extractor(message.content, speaker=message.role, timestamp=message.timestamp)
+                except (RuntimeError, ValueError, TypeError):
+                    import logging
+                    logging.getLogger("chrono_hybrid_mem").warning("structured_extraction_invalid")
+                    payload = {"records": [], "facts": [], "complete": False}
+                result["facts"] = payload.get("facts", []) if isinstance(payload, dict) else []
+                result["structured"] = payload
+            else:
+                result["facts"] = self.model.extract_facts(message.content, speaker=message.role, timestamp=message.timestamp)
+                result["structured"] = {"records": [], "complete": False}
+        elif (self.evidence_graph or self.evidence_anchors) and callable(getattr(self.model, "extract_memory", None)):
+            payload = self.model.extract_memory(message.content, speaker=message.role, timestamp=message.timestamp)
+            result["facts"] = payload.get("facts", []) if isinstance(payload, dict) else []
+            result["graph"] = payload if isinstance(payload, dict) else {}
+        else:
+            result["facts"] = self.model.extract_facts(message.content, speaker=message.role, timestamp=message.timestamp)
+        result["facts"] = result["facts"] if isinstance(result["facts"], list) else []
+        return result
+
     def add(self, request: AddRequest) -> None:
+        database_key = str(Path(self.database_path).resolve())
+        request_key = (database_key, "request", request.user_id, request.request_id)
+        with self._ingestion_gate(request_key):
+            with self._connection() as connection:
+                if connection.execute("SELECT 1 FROM ingestions WHERE user_id=? AND request_id=?",
+                                      (request.user_id, request.request_id)).fetchone():
+                    return
+            prepared = [self._prepare_message_annotations(message) for message in request.messages]
+            with self._ingestion_gate((database_key, "writer")):
+                published = self._commit_add(request, prepared)
+            if published and self.session_fact_layer and self.model:
+                try:
+                    messages = self.get_session_messages_for_facts(request.user_id, request.session_id)
+                    facts = self.model.generate_session_facts(user_id=request.user_id,
+                                                             session_id=request.session_id, messages=messages)
+                    self.replace_session_facts(user_id=request.user_id, session_id=request.session_id, new_facts=facts)
+                except Exception as exc:
+                    import logging
+                    logging.getLogger("chrono_hybrid_mem").warning("session_fact_generation_failed: %s", exc)
+
+    def _commit_add(self, request: AddRequest, prepared: List[Dict[str, Any]]) -> bool:
         now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         with self._connection() as connection:
             try:
@@ -3502,8 +3582,9 @@ class MemoryStore:
                 )
             except sqlite3.IntegrityError:
                 # The unique constraint makes a retried request safe even if two Adds race.
-                return
+                return False
             inserted_messages = []
+            structured_topics = set()
             for sequence, message in enumerate(request.messages):
                 indexed_content = latent_message_text(
                     message.content, message.role, message.timestamp
@@ -3526,42 +3607,16 @@ class MemoryStore:
                 inserted_messages.append((message_id, indexed_content))
                 if self.model:
                     graph_payload = None
+                    annotation = prepared[sequence]
+                    facts = annotation["facts"]
                     if self.structured_memory:
-                        extractor = getattr(self.model, "extract_structured_memory", None)
-                        if callable(extractor):
-                            try:
-                                extraction = extractor(message.content, speaker=message.role, timestamp=message.timestamp)
-                            except (RuntimeError, ValueError, TypeError):
-                                # Malformed/truncated annotations must not lose
-                                # raw ingestion or incur an additional model call.
-                                # Provider/authentication exceptions still surface.
-                                import logging
-                                logging.getLogger("chrono_hybrid_mem").warning("structured_extraction_invalid")
-                                extraction = {"records": [], "facts": [], "complete": False}
-                            facts = extraction.get("facts", []) if isinstance(extraction, dict) else []
-                        else:
-                            # Older model doubles/backends cannot claim complete
-                            # typed indexing, but ordinary retrieval still works.
-                            facts = self.model.extract_facts(message.content, speaker=message.role,
-                                                            timestamp=message.timestamp)
-                            extraction = {"records": [], "complete": False}
-                        facts = facts if isinstance(facts, list) else []
-                        StructuredMemoryIndex.store(
+                        structured_topics.update(StructuredMemoryIndex.store(
                             connection, user_id=request.user_id, session_id=request.session_id,
                             source_id=int(message_id), content=message.content, speaker=message.role,
-                            timestamp=message.timestamp, payload=extraction,
-                        )
-                    elif (self.evidence_graph or self.evidence_anchors) and callable(
-                        getattr(self.model, "extract_memory", None)
-                    ):
-                        extraction = self.model.extract_memory(
-                            message.content,
-                            speaker=message.role,
-                            timestamp=message.timestamp,
-                        )
-                        facts = extraction.get("facts", []) if isinstance(
-                            extraction, dict
-                        ) else []
+                            timestamp=message.timestamp, payload=annotation["structured"], refresh_rollups=False,
+                        ))
+                    elif annotation["graph"] is not None:
+                        extraction = annotation["graph"]
                         from .evidence_graph import parse_graph_payload
                         try:
                             graph_payload = parse_graph_payload(
@@ -3577,12 +3632,6 @@ class MemoryStore:
                             # A malformed provenance identifier or timestamp must
                             # drop the graph annotation, not the original memory.
                             graph_payload = None
-                    else:
-                        facts = self.model.extract_facts(
-                            message.content,
-                            speaker=message.role,
-                            timestamp=message.timestamp,
-                        )
                     for fact in facts:
                         if not isinstance(fact, str) or not fact.strip():
                             continue
@@ -3612,6 +3661,10 @@ class MemoryStore:
                             created_at=now,
                             payload=graph_payload,
                         )
+            if self.structured_memory:
+                StructuredMemoryIndex._rollup(connection, request.user_id, "session", request.session_id)
+                for topic in structured_topics:
+                    StructuredMemoryIndex._rollup(connection, request.user_id, "topic", topic)
             self._refresh_session_context(
                 connection, request.user_id, request.session_id,
                 {message_id for message_id, _ in inserted_messages},
@@ -3633,33 +3686,7 @@ class MemoryStore:
                 (request.session_id, request.user_id, session_content),
             )
 
-            # Cycle 2: sync session-fact generation for online SFv2 compliance.
-            # We commit the current transaction first so the messages become
-            # visible to the subsequent read (SQLite read-your-writes requires
-            # a separate connection after a commit).
-            connection.execute("COMMIT")
-            if self.session_fact_layer and self.model:
-                try:
-                    session_msgs = self.get_session_messages_for_facts(
-                        request.user_id, request.session_id
-                    )
-                    generated_facts = self.model.generate_session_facts(
-                        user_id=request.user_id,
-                        session_id=request.session_id,
-                        messages=session_msgs,
-                    )
-                    self.replace_session_facts(
-                        user_id=request.user_id,
-                        session_id=request.session_id,
-                        new_facts=generated_facts,
-                    )
-                except Exception as exc:
-                    # A session-fact generation failure must not abort the Add.
-                    # Log and proceed; raw messages are already persisted.
-                    import logging
-                    logging.getLogger("chrono_hybrid_mem").warning(
-                        "session_fact_generation_failed: %s", exc
-                    )
+            return True
 
     def add_session_facts(
         self,

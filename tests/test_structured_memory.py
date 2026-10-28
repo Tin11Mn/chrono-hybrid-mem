@@ -127,7 +127,7 @@ def test_retraction_is_evidence_without_resurrecting_removed_value():
 @pytest.mark.parametrize("mutation", [
     {"span": "invented span"}, {"value": "invented value"}, {"subject": "Bob"},
     {"scope": "invented scope"}, {"effective_date": "2026-10-28"}, {"kind": []},
-    {"modality": "update"}, {"conditions": ["score>=99"]},
+    {"modality": "exception"}, {"conditions": ["score>=99"]},
 ])
 def test_unwitnessed_records_are_rejected_and_index_cannot_claim_complete(mutation):
     text = "Alice status approved."
