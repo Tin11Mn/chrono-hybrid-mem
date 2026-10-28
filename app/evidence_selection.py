@@ -35,6 +35,16 @@ def validate_selection(payload: Any, allowed_ids: Sequence[str],
     if selected is None or excluded is None or set(selected) & set(excluded):
         return invalid
     groups = payload.get("evidence_groups")
+    covered = payload.get("covered_need_indices")
+    if groups is None and isinstance(covered, list):
+        # Compact protocol explicitly certifies which needs the whole chosen
+        # evidence set supports; never invent missing coverage or source IDs.
+        if any(type(index) is not int or not 0 <= index < len(evidence_needs) for index in covered):
+            return invalid
+        if len(set(covered)) != len(covered):
+            return invalid
+        groups = ([{"need_index": index, "ids": selected} for index in covered]
+                  if covered else [{"need_index": None, "ids": selected}])
     if not isinstance(groups, list) or not groups:
         return {**invalid, "reason": "missing_coverage"}
     covered_needs = set()
@@ -61,6 +71,10 @@ def validate_selection(payload: Any, allowed_ids: Sequence[str],
         normalized_groups.append({"need_index": need_index, "ids": ids})
     if covered_needs != set(range(len(evidence_needs))) or covered_ids != set(selected):
         return {**invalid, "reason": "missing_coverage"}
+    if covered is not None and (not isinstance(covered, list)
+            or any(type(index) is not int for index in covered)
+            or len(set(covered)) != len(covered) or set(covered) != covered_needs):
+        return invalid
     states = payload.get("state_updates", [])
     if not isinstance(states, list):
         return invalid

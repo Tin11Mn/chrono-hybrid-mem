@@ -181,7 +181,7 @@ def test_selector_contract_uses_actual_need_count_instead_of_copied_index(monkey
     monkeypatch.setattr(model, "_json_response", response)
     model.select_evidence("q", [], [], {"evidence_needs": []})
     model.select_evidence("q", [], [], {"evidence_needs": ["a", "b"]})
-    assert "ZERO evidence_needs" in prompts[0] and "MUST be null" in prompts[0]
+    assert "ZERO evidence_needs" in prompts[0] and "MUST be []" in prompts[0]
     assert "[0, 1]" in prompts[1]
     model.plan_indexed_query("q", [], {"groups": []})
     assert "memory_requests is an object" in prompts[2]
@@ -203,3 +203,49 @@ def test_literal_slot_routing_does_not_guess_unmentioned_scope():
                             "scope": "project" + str(i), "authority": "user"} for i in [1, 2]]}
     assert route_memory_requests(catalog, {"state_slots": ["status"]}, "Alice status")["state_slots"] == []
     assert route_memory_requests(catalog, {}, "Alice project2 status")["state_slots"] == ["2"]
+
+
+def test_fact_and_state_records_share_versions_without_changing_assertion_authority():
+    from app.structured_memory import group_id
+    data = captured()
+    data["pending"]["records"][0]["kind"] = "fact"
+    old, complete = grounded_records(data["pending"], "ProtocolSample status is pending.", "user", 100)
+    new, valid = grounded_records(data["approved"], "ProtocolSample status is now approved.", "user", 200)
+    assert complete and valid and old[0]["modality"] == "assert"
+    assert old[0]["group_id"] == new[0]["group_id"]
+    old[0]["source_id"], new[0]["source_id"] = 1, 2
+    assert resolve_states(old + new)["required"] == [2]
+    assert resolve_states(old + new, "history")["required"] == [1, 2]
+
+
+def test_compact_explicit_coverage_cannot_claim_missing_needs_or_unknown_sources():
+    data = {"complete": True, "selected_ids": ["a", "b"], "excluded_ids": [], "covered_need_indices": [0, 1]}
+    assert validate_selection(data, ["a", "b"], ["first", "second"])["applied"]
+    assert not validate_selection(dict(data, covered_need_indices=[0]), ["a", "b"], ["first", "second"])["applied"]
+    assert not validate_selection(dict(data, covered_need_indices=[0, 0]), ["a", "b"], ["first"])["applied"]
+    assert not validate_selection(dict(data, selected_ids=["foreign"]), ["a", "b"], ["first", "second"])["applied"]
+    assert validate_selection(dict(data, covered_need_indices=[]), ["a", "b"], [])["applied"]
+
+
+def test_legacy_fact_slot_migration_merges_state_versions_without_touching_sources(tmp_path):
+    data = captured()
+    data["pending"]["records"][0]["kind"] = "fact"
+    class ReplayModel:
+        def extract_structured_memory(self, content, **kwargs):
+            return data["approved"] if "now" in content else data["pending"]
+    store = MemoryStore(str(tmp_path / "slot-migration.db"), model=ReplayModel(), structured_query_plan=True,
+                        evidence_selection=True, structured_memory=True)
+    store.initialize()
+    for i,text in enumerate(["ProtocolSample status is pending.", "ProtocolSample status is now approved."]):
+        store.add(request(i, messages=[{"role":"user","content":text,"timestamp":100+i*100}]))
+    with store._connection() as connection:
+        row=connection.execute("SELECT id,record_json FROM structured_records WHERE kind='fact'").fetchone()
+        old=json.loads(row["record_json"]);old["group_id"]="legacy-fact-group"
+        connection.execute("UPDATE structured_records SET group_id=?,record_json=? WHERE id=?",
+                           ("legacy-fact-group",json.dumps(old),row["id"]))
+        connection.execute("DELETE FROM structured_index_migrations")
+    store.initialize()
+    store.initialize()
+    with store._connection() as connection:
+        assert connection.execute("SELECT COUNT(DISTINCT group_id) FROM structured_records").fetchone()[0] == 1
+        assert connection.execute("SELECT COUNT(*) FROM raw_messages").fetchone()[0] == 2

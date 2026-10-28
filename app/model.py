@@ -660,12 +660,12 @@ class MemoryModel:
         needs = query_plan.get("evidence_needs", [])
         need_count = len(needs) if isinstance(needs, list) else 0
         need_contract = (
-            "This request has ZERO evidence_needs. Every evidence_group.need_index MUST be null; "
-            "index0 is not a valid need. Group all selected IDs under need_index:null. "
+            "This request has ZERO evidence_needs. covered_need_indices MUST be []; "
+            "no need_index is valid (legacy groups MUST be null). Do not invent need0. "
             if need_count == 0 else
-            "This request has {} evidence_needs. Valid need_index values are exactly {}. "
-            "Provide at least one evidence_group for EACH index; null only covers additional "
-            "evidence, not any planned need. ".format(need_count, list(range(need_count)))
+            "This request has {} evidence_needs. Valid indices are exactly {}. "
+            "covered_need_indices must list EACH supported index; complete:true requires all. "
+            "The selected evidence set as a whole must support every covered need. ".format(need_count, list(range(need_count)))
         )
         return self._json_response(
             "Select sufficient original memory evidence for a separate answer model. "
@@ -687,12 +687,11 @@ class MemoryModel:
             "preserve all relevant historical states in requested order instead of excluding them. "
             "Unresolved conflicts must retain both original sources; do not declare supersession. "
             "Return one JSON object with complete(boolean), selected_ids(array of supplied ID strings), "
-            "excluded_ids(array of supplied ID strings), evidence_groups(array of objects with "
-            "need_index and ids), and state_updates(array of current_id/superseded_ids objects). "
+            "excluded_ids(array of supplied ID strings), covered_need_indices(array of zero-based "
+            "integers for needs supported by the whole selected set), and state_updates(array "
+            "of current_id/superseded_ids objects). "
             "IDs must come from candidates; selected/excluded are disjoint. "
-            "Each evidence_group contains ALL selected sources needed for that need; cover EVERY "
-            "zero-based evidence_needs index from query_plan. Use need_index:null for extra required "
-            "evidence or when no needs were planned. Every selected ID must belong to a group. "
+            "Cover EVERY evidence_needs index from query_plan; use [] when none were planned. "
             "Every superseded ID must be excluded and every current_id selected. Set complete:false "
             "when evidence is missing or the pool cannot support a sufficient decision. "
             "Never assert completeness merely to satisfy the JSON schema. When query_plan includes "

@@ -33,6 +33,8 @@ def epoch_seconds(value: Any) -> Optional[int]:
 
 def group_id(record: Dict[str, Any]) -> str:
     values = [record[key] for key in ("kind", "subject", "attribute", "scope", "authority")]
+    if values[0] == "fact":
+        values[0] = "state"  # Plain assertions are prior versions of the same slot.
     return hashlib.sha256(json.dumps(values, ensure_ascii=False).encode("utf-8")).hexdigest()[:24]
 
 
@@ -94,7 +96,7 @@ def grounded_records(payload: Any, content: str, speaker: str,
             mode = "hypothetical"
         elif re.search(r"\b(next year|next month|will\s+(?:be|have|start|move|join|do)|plan to)\b|明年|下个月|计划|将会", context, re.I):
             mode = "future"
-        elif kind in {"state", "link"} and mode != "retraction" and re.search(
+        elif kind in {"fact", "state", "link"} and mode != "retraction" and re.search(
                 r"\b(not|never|false|didn't|doesn't)\b|不是|并非|不再", context, re.I):
             mode = "hypothetical"
         if mode in {"update", "correction", "retraction", "exception"}:
@@ -103,7 +105,7 @@ def grounded_records(payload: Any, content: str, speaker: str,
                     "retraction": r"\b(retract(?:s|ed)?|withdraw(?:s|n)?|no longer)\b|撤回|撤销|不再",
                     "exception": r"\b(except|unless|exception)\b|除非|例外|除外"}
             if not re.search(cues[mode], span, re.I):
-                if kind == "state" and mode in {"update", "correction"}:
+                if kind in {"fact", "state"} and mode in {"update", "correction"}:
                     # Weaken an unsupported transition to a witnessed assertion.
                     # This NEVER authorizes superseding an earlier value.
                     mode = "assert"
@@ -401,6 +403,18 @@ class StructuredMemoryIndex:
                 page INTEGER NOT NULL, record_ids TEXT NOT NULL, source_ids TEXT NOT NULL,
                 extractive_text TEXT NOT NULL, PRIMARY KEY(user_id,level,group_key,page));
         """)
+        connection.execute("CREATE TABLE IF NOT EXISTS structured_index_migrations(version INTEGER PRIMARY KEY)")
+        if not connection.execute("SELECT 1 FROM structured_index_migrations WHERE version=1").fetchone():
+            for row in connection.execute("SELECT id,user_id,record_json FROM structured_records WHERE kind='fact'").fetchall():
+                record = json.loads(row["record_json"])
+                canonical = group_id(record)
+                if record["group_id"] != canonical:
+                    record["group_id"] = canonical
+                    encoded = json.dumps(record, ensure_ascii=False, sort_keys=True)
+                    fingerprint = hashlib.sha256((row["user_id"] + "\0" + encoded).encode("utf-8")).hexdigest()
+                    connection.execute("UPDATE structured_records SET group_id=?,record_json=?,fingerprint=? WHERE id=?",
+                                       (canonical, encoded, fingerprint, row["id"]))
+            connection.execute("INSERT INTO structured_index_migrations(version) VALUES (1)")
 
     @staticmethod
     def store(connection: sqlite3.Connection, *, user_id: str, session_id: str,
@@ -447,19 +461,20 @@ class StructuredMemoryIndex:
             SUM(CASE WHEN indexed.complete=1 THEN 1 ELSE 0 END) AS ready
             FROM raw_messages AS raw LEFT JOIN structured_sources AS indexed
             ON indexed.source_id=raw.id AND indexed.user_id=raw.user_id WHERE raw.user_id=?""", (user_id,)).fetchone()
-        groups = connection.execute("""SELECT DISTINCT kind,group_id,subject,attribute,scope,authority
-            FROM structured_records WHERE user_id=? AND kind IN ('state','rule','observation')
+        groups = connection.execute("""SELECT DISTINCT CASE WHEN kind='fact' THEN 'state' ELSE kind END AS kind,
+            group_id,subject,attribute,scope,authority
+            FROM structured_records WHERE user_id=? AND kind IN ('fact','state','rule','observation')
             ORDER BY kind,group_id LIMIT 128""", (user_id,)).fetchall()
         if query:
             terms = list(dict.fromkeys(re.findall(r"\w+", query)))[:32]
             terms = [term for term in terms if normalize(term) not in {"what", "is", "the", "a", "of", "my", "current", "status", "summarize"}]
             if terms:
                 match = " OR ".join('"{}"'.format(term) for term in terms)
-                relevant = connection.execute("""SELECT record.kind,record.group_id,record.subject,
+                relevant = connection.execute("""SELECT CASE WHEN record.kind='fact' THEN 'state' ELSE record.kind END AS kind,record.group_id,record.subject,
                     record.attribute,record.scope,record.authority FROM structured_records_fts
                     JOIN structured_records AS record ON record.id=structured_records_fts.record_id
                     WHERE structured_records_fts MATCH ? AND record.user_id=?
-                    AND record.kind IN ('state','rule','observation')
+                    AND record.kind IN ('fact','state','rule','observation')
                     ORDER BY bm25(structured_records_fts),record.id DESC LIMIT 256""", (match, user_id)).fetchall()
                 unique = {}
                 for row in relevant + groups:
@@ -566,6 +581,7 @@ class StructuredMemoryIndex:
             summary_ids = list(dict.fromkeys(summary_ids))
             if summary_ids:
                 required_groups.append(summary_ids)
+        required_groups = [list(group) for group in dict.fromkeys(tuple(group) for group in required_groups)]
         required = list(dict.fromkeys(source for group in required_groups for source in group))
         privacy_only = connection.execute("""SELECT record.source_id,record.attribute
             FROM structured_records AS record JOIN structured_sources AS source ON source.source_id=record.source_id
