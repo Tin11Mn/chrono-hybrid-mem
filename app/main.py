@@ -464,6 +464,7 @@ def create_app(database_path: str = None) -> FastAPI:
         structured_query_plan=structured_query_plan,
         evidence_selection=text_optimization_flag("MEMORY_EVIDENCE_SELECTION"),
         coverage_retrieval=text_optimization_flag("MEMORY_COVERAGE_RETRIEVAL"),
+        structured_memory=text_optimization_flag("MEMORY_STRUCTURED_MEMORY"),
         retrieval_trace_path=os.getenv("MEMORY_RETRIEVAL_TRACE_PATH", "").strip() or None,
         set_aware_rerank=set_aware_rerank,
         evidence_need_retrieval=evidence_need_retrieval,

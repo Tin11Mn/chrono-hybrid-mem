@@ -13,6 +13,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 from .model import MemoryModel
 from .evidence_selection import append_redacted_trace, validate_selection
+from .structured_memory import StructuredMemoryIndex, enforce_obligations
 from .graph_routing import preferred_graph_predicates
 from .local_instruction import mask_candidate_speakers
 from .schemas import AddRequest, MemoryResult
@@ -723,7 +724,8 @@ class MemoryStore:
                  session_fact_top_n: int = SESSION_FACT_TOP_N_DEFAULT,
                  evidence_selection: bool = False,
                  coverage_retrieval: bool = False,
-                 retrieval_trace_path: Optional[str] = None) -> None:
+                 retrieval_trace_path: Optional[str] = None,
+                 structured_memory: bool = False) -> None:
         self.database_path = database_path
         self.model = model
         if not isinstance(evidence_selection, bool) or not isinstance(coverage_retrieval, bool):
@@ -740,6 +742,11 @@ class MemoryStore:
         self.evidence_selection = evidence_selection
         self.coverage_retrieval = coverage_retrieval
         self.retrieval_trace_path = retrieval_trace_path
+        if not isinstance(structured_memory, bool):
+            raise ValueError("structured_memory must be a boolean")
+        if structured_memory and (not evidence_selection or evidence_graph or evidence_anchors or session_fact_layer):
+            raise ValueError("structured_memory requires evidence_selection and cannot combine with graph/anchors/SF")
+        self.structured_memory = structured_memory
         self.temporal_bonus = temporal_bonus
         self.semantic_retriever = semantic_retriever
         self.dense_rrf_weight = dense_rrf_weight
@@ -1647,6 +1654,8 @@ class MemoryStore:
                 ).fetchall():
                     self._refresh_session_context(connection, session["user_id"], session["session_id"])
                 connection.execute("INSERT INTO text_index_migrations(version) VALUES (1)")
+            if self.structured_memory:
+                StructuredMemoryIndex.initialize(connection)
             if not (self.evidence_graph or self.evidence_anchors):
                 return
             connection.executescript(
@@ -3517,7 +3526,32 @@ class MemoryStore:
                 inserted_messages.append((message_id, indexed_content))
                 if self.model:
                     graph_payload = None
-                    if (self.evidence_graph or self.evidence_anchors) and callable(
+                    if self.structured_memory:
+                        extractor = getattr(self.model, "extract_structured_memory", None)
+                        if callable(extractor):
+                            try:
+                                extraction = extractor(message.content, speaker=message.role, timestamp=message.timestamp)
+                            except (RuntimeError, ValueError, TypeError):
+                                # Malformed/truncated annotations must not lose
+                                # raw ingestion or incur an additional model call.
+                                # Provider/authentication exceptions still surface.
+                                import logging
+                                logging.getLogger("chrono_hybrid_mem").warning("structured_extraction_invalid")
+                                extraction = {"records": [], "facts": [], "complete": False}
+                            facts = extraction.get("facts", []) if isinstance(extraction, dict) else []
+                        else:
+                            # Older model doubles/backends cannot claim complete
+                            # typed indexing, but ordinary retrieval still works.
+                            facts = self.model.extract_facts(message.content, speaker=message.role,
+                                                            timestamp=message.timestamp)
+                            extraction = {"records": [], "complete": False}
+                        facts = facts if isinstance(facts, list) else []
+                        StructuredMemoryIndex.store(
+                            connection, user_id=request.user_id, session_id=request.session_id,
+                            source_id=int(message_id), content=message.content, speaker=message.role,
+                            timestamp=message.timestamp, payload=extraction,
+                        )
+                    elif (self.evidence_graph or self.evidence_anchors) and callable(
                         getattr(self.model, "extract_memory", None)
                     ):
                         extraction = self.model.extract_memory(
@@ -3844,6 +3878,7 @@ class MemoryStore:
         speaker_conflict = False
         retrieval_trace = self._empty_retrieval_trace()
         selection_decision: Dict[str, Any] = {"applied": False, "reason": "disabled"}
+        specialist: Dict[str, Any] = {"required_groups": [], "blocked_ids": [], "rows": []}
         message_ids: Dict[str, int] = {}
         ranking_metadata: Dict[Any, Dict[str, Any]] = {}
         retrieval_trace["edge_diagnostics"][
@@ -3876,9 +3911,16 @@ class MemoryStore:
         if self.model:
             if self.structured_query_plan:
                 planner = self.model.plan_query_structured
-                if self.evidence_selection and callable(getattr(self.model, "plan_evidence_query", None)):
+                indexed_planner = getattr(self.model, "plan_indexed_query", None)
+                if self.structured_memory and callable(indexed_planner):
+                    with self._connection() as index_connection:
+                        catalog = StructuredMemoryIndex.catalog(index_connection, user_id, query)
+                    plan = indexed_planner(query, options or [], catalog)
+                elif self.evidence_selection and callable(getattr(self.model, "plan_evidence_query", None)):
                     planner = self.model.plan_evidence_query
-                plan = planner(query, options or [])
+                    plan = planner(query, options or [])
+                else:
+                    plan = planner(query, options or [])
                 if isinstance(plan, dict):
                     query_plan = plan
                     retrieval_trace["plan"] = copy.deepcopy(plan)
@@ -5202,10 +5244,33 @@ class MemoryStore:
         )
         deduplicated = deduplicate_ranked(ranked, prefer_provenance=True)
         legacy_results = list(deduplicated)
+        if self.structured_memory:
+            with self._connection() as index_connection:
+                specialist = StructuredMemoryIndex.retrieve(index_connection, user_id, match_query, query, query_plan)
+            query_plan["specialist_hints"] = specialist["hints"]
+            query_plan["required_source_groups"] = [group[:30] for group in specialist["required_groups"]]
+            query_plan["specialist_coverage_limited"] = specialist["coverage_limited"] or any(
+                len(group) > 30 for group in specialist["required_groups"])
+            retrieval_trace["structured_memory"] = {
+                "index_complete": specialist["index_complete"],
+                "required_groups": [group[:100] for group in specialist["required_groups"]],
+                "required_source_count": len({source for group in specialist["required_groups"] for source in group}),
+                "coverage_limited": query_plan["specialist_coverage_limited"],
+                "blocked_ids": specialist["blocked_ids"],
+                "operators": specialist["diagnostics"],
+            }
         coverage_rows = (
             self._coverage_candidates(user_id, match_query, query_plan)
             if self.evidence_selection and self.model else []
         )
+        if self.structured_memory:
+            seen_coverage = set()
+            combined = []
+            for row in specialist["rows"] + coverage_rows:
+                if row["id"] not in seen_coverage:
+                    combined.append(row)
+                    seen_coverage.add(row["id"])
+            coverage_rows = combined
         retrieval_trace["coverage_candidate_ids"] = ["mem_{}".format(row["id"]) for row in coverage_rows]
         # These candidates are only returned after a complete validated selection;
         # fallback retains the lexical results that existed before this channel.
@@ -5347,6 +5412,19 @@ class MemoryStore:
             for row in coverage_rows:
                 message_ids["mem_{}".format(row["id"])] = int(row["id"])
             result_by_id = {result.id: result for result in deduplicated}
+            required_sources = list(dict.fromkeys(source for group in specialist["required_groups"] for source in group))
+            if self.structured_memory:
+                # Deterministic fallback uses witnessed operator evidence, not
+                # invented answers. Known obsolete states are never re-appended.
+                blocked = set(specialist["blocked_ids"])
+                fallback_ids = set()
+                fallback = []
+                for result in ([result_by_id[source] for source in required_sources if source in result_by_id]
+                               + legacy_results):
+                    if result.id not in blocked and result.id not in fallback_ids:
+                        fallback.append(result)
+                        fallback_ids.add(result.id)
+                legacy_results = fallback
             if bridge_union_ids:
                 for rows in bridge_channel_rows.values():
                     for row in rows:
@@ -5521,6 +5599,17 @@ class MemoryStore:
                 rerank_pool.append(result_by_id[candidate_id])
                 coverage_added.append(candidate_id)
             retrieval_trace["reserved_coverage_ids"] = coverage_added
+            if self.structured_memory and required_sources:
+                required_in_pool = [source for source in required_sources if source in result_by_id]
+                required_set = set(required_in_pool)
+                # A validated specialist bundle may use the full 30 slots;
+                # unrelated lexical candidates cannot displace a required link.
+                bundle = required_in_pool[:self.MODEL_RERANK_LIMIT]
+                retained = [result for result in rerank_pool if result.id not in required_set]
+                rerank_pool = retained[:self.MODEL_RERANK_LIMIT - len(bundle)] + [result_by_id[source] for source in bundle]
+                retrieval_trace["structured_memory"]["pool_coverage_complete"] = (
+                    len(required_in_pool) == len(required_sources) and len(required_sources) <= self.MODEL_RERANK_LIMIT
+                )
             rerank_pool_ids = [result.id for result in rerank_pool]
             retrieval_trace["reserved_graph_ids"] = list(reserved_graph_ids)
             retrieval_trace["reserved_anchor_ids"] = list(reserved_anchor_ids)
@@ -5640,6 +5729,10 @@ class MemoryStore:
                     selection_decision = validate_selection(
                         payload, [item["id"] for item in candidates], query_plan.get("evidence_needs", [])
                     )
+                    if self.structured_memory:
+                        selection_decision = enforce_obligations(
+                            selection_decision, specialist, [item["id"] for item in candidates]
+                        )
                 except Exception:
                     # No second model call, no exception text in traces, no
                     # speculative filtering when selection is unavailable.

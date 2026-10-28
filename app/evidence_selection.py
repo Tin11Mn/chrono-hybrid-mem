@@ -85,6 +85,8 @@ def append_redacted_trace(path: str, trace: Dict[str, Any]) -> None:
               "rerank_pool_ids": trace.get("rerank_pool_ids", []),
               "coverage_candidate_ids": trace.get("coverage_candidate_ids", []),
               "selection": trace.get("evidence_selection", {})}
+    if "structured_memory" in trace:
+        record["structured_memory"] = trace["structured_memory"]
     try:
         target = Path(path)
         target.parent.mkdir(parents=True, exist_ok=True)

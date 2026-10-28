@@ -36,6 +36,7 @@ MEMORY_EVIDENCE_NEED_RETRIEVAL=true
 MEMORY_NEED_SELECT_BY_BM25=true
 MEMORY_EVIDENCE_SELECTION=true
 MEMORY_COVERAGE_RETRIEVAL=true
+MEMORY_STRUCTURED_MEMORY=true
 ```
 
 模型密钥、服务密钥、OPENAI_BASE_URL 和数据库路径沿用服务端的实际配置。
@@ -51,7 +52,7 @@ MEMORY_COVERAGE_RETRIEVAL=true
 
 上线前先备份数据库；离线验证通过不等于正式成绩提升。使用候选源码更新服务后，
 重跑相同 smoke，再进行 full，分别核对 A/C/E 的保持情况与 D/G/I/H 的变化。
-回退选择策略时将 `MEMORY_EVIDENCE_SELECTION` 和 `MEMORY_COVERAGE_RETRIEVAL`
+回退选择策略时将 `MEMORY_EVIDENCE_SELECTION`、`MEMORY_COVERAGE_RETRIEVAL` 和 `MEMORY_STRUCTURED_MEMORY`
 同时设为 false 并重启，规划器也会恢复旧协议。上下文索引修复仍保留；如需完整重现
 旧版索引，使用备份数据库和原版源码。
 
