@@ -209,18 +209,19 @@ def test_whole_quoted_witness_is_not_an_effective_update():
 
 
 @pytest.mark.parametrize('count',[40,100])
-def test_summary_history_bundles_expand_but_never_claim_truncated_coverage(tmp_path,count):
+@pytest.mark.parametrize('narrow_plan',[False,True])
+def test_summary_history_bundles_expand_but_never_claim_truncated_coverage(tmp_path,count,narrow_plan):
     class Model:
         def plan_query_structured(self,*args):
             raise AssertionError('indexed planner must be used')
         def extract_structured_memory(self,content,**kwargs):
             return {'complete':True,'facts':[], 'records':[{
-                'kind':'fact','subject':'Aster','attribute':'milestone','value':content,
+                'kind':'fact','subject':content.split(':')[0] if narrow_plan else 'Aster','attribute':'milestone','value':content,
                 'span':content,'scope':'','modality':'assert','conditions':[]}]}
         def plan_indexed_query(self,query,options,catalog):
             return {'intent':'summary','core_terms':['Aster'],'entities':['Aster'],
                 'expansion_terms':[],'evidence_needs':[], 'temporal_cues':[],
-                'memory_requests':{'summary_topics':['aster'],'temporal_mode':'history'}}
+                'memory_requests':{'summary_topics':['aster stage 0'] if narrow_plan else ['aster'],'temporal_mode':'history'}}
         def select_evidence(self,query,options,candidates,plan):
             self.pool=candidates
             self.plan=plan
@@ -231,8 +232,8 @@ def test_summary_history_bundles_expand_but_never_claim_truncated_coverage(tmp_p
                       evidence_selection=True,coverage_retrieval=True,structured_memory=True)
     store.initialize()
     store.add(AddRequest(request_id='batch',user_id='u',session_id='s',messages=[
-        Message(role='user',content=f'Aster milestone step {i}.',timestamp=1700000000+i) for i in range(count)]))
-    rows=store.search(user_id='u',query='Summarize Aster milestones',top_k=100)
+        Message(role='user',content=f'Aster stage {i//12}: milestone step {i}.',timestamp=1700000000+i) for i in range(count)]))
+    rows=store.search(user_id='u',query='Summarize all Aster milestones',top_k=100)
     trace=store.last_retrieval_trace
     assert len(model.pool)==min(count,96)
     assert trace['model_pool_limit']==min(count,96)

@@ -603,6 +603,29 @@ class StructuredMemoryIndex:
                 summary_ids.extend(row[0] for row in connection.execute(
                     "SELECT DISTINCT source_id FROM structured_records WHERE user_id=? AND kind<>'privacy' AND id IN ({}) ORDER BY source_id".format(",".join("?" for _ in chunk)), [user_id] + chunk))
             summary_ids = list(dict.fromkeys(summary_ids))
+            # A planner may name only a few stage-specific topics even when the
+            # user explicitly asks for ALL milestones of a literal named project.
+            # Recover original named-source coverage, never guessed entity aliases.
+            if re.search(r'\b(all|entire|across)\b|全部|所有|全程|历程', query, re.I):
+                names = list(plan.get('entities', [])) if isinstance(plan.get('entities'), list) else []
+                names += re.findall(r'\b[A-Z][A-Za-z0-9_-]{2,}\b', query)
+                ignored_names = {'summarize','summarise','summary','list','give','show','across','all','the','user','please'}
+                names = list(dict.fromkeys(normalize(name) for name in names if isinstance(name,str)
+                    and len(name)>=3 and normalize(name) not in ignored_names and normalize(name) in normalize(query)))[:8]
+                if names:
+                    clauses=' OR '.join('lower(raw.content) LIKE ?' for _ in names)
+                    named = connection.execute('''SELECT DISTINCT raw.id,raw.content FROM raw_messages AS raw
+                        JOIN structured_records AS record ON record.source_id=raw.id AND record.user_id=raw.user_id
+                        WHERE raw.user_id=? AND record.kind<>'privacy' AND ('''+clauses+''')
+                        ORDER BY raw.id LIMIT 1001''', [user_id]+['%'+name+'%' for name in names]).fetchall()
+                    if len(named)>1000:
+                        coverage_limited=True
+                    for row in named[:1000]:
+                        text=normalize(row['content'])
+                        if any((bool(re.search(r'(?<!\w)'+re.escape(name)+r'(?!\w)',text))
+                                if re.fullmatch(r'[a-z0-9_ .-]+',name) else name in text) for name in names):
+                            summary_ids.append(row['id'])
+                    summary_ids=list(dict.fromkeys(summary_ids))
             if summary_ids:
                 required_groups.append(summary_ids)
             hints.append({'kind':'summary_coverage','result':{

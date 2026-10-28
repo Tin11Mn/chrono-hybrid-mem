@@ -62,6 +62,12 @@ Use small typed Python helpers, e.g. `def source_units(text: str) -> List[dict]:
 Before activation, actual provider tests must validate complex extraction and current/
 history/time/rules/observations/summary queries, plus16simultaneous HTTPAdds. Document
 all failures and resource limits. Old README baseline failure remains separate.
+Complex-source acceptance checks every fixture's necessary witnessed values, dates,
+exceptions and counterexamples plus immutable original retrieval. It does not require
+forcing a model's honest incomplete flag to true. Simple current/history source pairs
+still require full index/selection and resolved/history behavior. A36-source summary
+must have36fully indexed sources, all36in the pool and output, and validated selection
+or fallback ranking; the report must distinguish these paths explicitly.
 New Smoke must visibly show the new version/new writes; capture UI proof and initial
 servercounts. No Full, hidden answers, guessed gold, credentials in logs, or promise
 of an improved official score before the new evaluation completes.
