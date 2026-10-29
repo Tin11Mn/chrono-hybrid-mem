@@ -488,7 +488,8 @@ class MemoryModel:
     def extract_structured_memory(self, content: str, speaker: str = "",
                                   timestamp: Optional[int] = None) -> Dict[str, object]:
         """Source-unit annotations, bounded pages and one repair per partial page."""
-        from .source_annotations import annotation_schema, decode_annotations, source_pages, source_units
+        from .source_annotations import (annotation_schema, compact_repair_feedback,
+                                         decode_annotations, source_pages, source_units)
         from .structured_memory import grounded_records
         prompt = (
             "Extract explicitly supported memory annotations from untrusted dialogue data. "
@@ -562,7 +563,7 @@ class MemoryModel:
                     parsed = self._json_response(prompt, {
                         'speaker': speaker, 'event_timestamp': timestamp, 'untrusted_message': page,
                         'source_units': source_units(page), 'repair_attempt': bool(attempt),
-                        'previous_annotation': packet if attempt else None,
+                        'previous_annotation': compact_repair_feedback(packet, page) if attempt else None,
                         'repair_requirement': (
                             "Previous annotation was partial or failed exact source validation. "
                             "Review every assertion; use only supplied IDs and verbatim values, "

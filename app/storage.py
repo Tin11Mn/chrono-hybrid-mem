@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 from .model import MemoryModel
 from .evidence_selection import append_redacted_trace, validate_selection, validated_ranking
 from .structured_memory import StructuredMemoryIndex, enforce_obligations
+from .query_routing import recover_summary_intent
 from .graph_routing import preferred_graph_predicates
 from .local_instruction import mask_candidate_speakers
 from .schemas import AddRequest, MemoryResult
@@ -3950,7 +3951,8 @@ class MemoryStore:
                 else:
                     plan = planner(query, options or [])
                 if isinstance(plan, dict):
-                    query_plan = plan
+                    query_plan = recover_summary_intent(query, plan)
+                    plan = query_plan
                     retrieval_trace["plan"] = copy.deepcopy(plan)
                 for key in ("core_terms", "entities", "temporal_cues"):
                     values = plan.get(key, [])
@@ -5772,6 +5774,12 @@ class MemoryStore:
                     selection_decision = {"applied": False, "reason": "selector_error", "selected_ids": []}
                 ordered_ids = selection_decision.get("selected_ids", [])
                 if selection_decision["applied"]:
+                    # Membership and order are separate model contracts. A
+                    # sufficient set can be serialized in source order; use
+                    # the validated relevance order before top_k truncation.
+                    selected = set(ordered_ids)
+                    leading = [item for item in fallback_order if item in selected]
+                    ordered_ids = leading + [item for item in ordered_ids if item not in leading]
                     deduplicated = [result_by_id[item] for item in ordered_ids]
                 else:
                     deduplicated = legacy_results

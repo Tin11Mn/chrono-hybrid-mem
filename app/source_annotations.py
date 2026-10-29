@@ -1,10 +1,71 @@
 """Bounded model references to immutable, contiguous source witnesses."""
+import json
 import re
 from typing import Any, Dict, List, Tuple
 
 PAGE_CHARS = 3600
 MAX_PAGES = 4
 RECORDS_PER_PAGE = 32
+
+# CJK punctuation ends a sentence without requiring following whitespace.
+CLAUSE_BOUNDARY = r'(?<=[.!?;])\s+|(?<=[。！？；])|\n+'
+
+
+def first_person_value_witness(span: str, value: str) -> bool:
+    """Require a direct self statement in this value's own clause."""
+    if not value or value not in span:
+        return False
+    boundaries = list(re.finditer(CLAUSE_BOUNDARY, span))
+    for occurrence in re.finditer(re.escape(value), span):
+        left, right = 0, len(span)
+        for boundary in boundaries:
+            if boundary.end() <= occurrence.start():
+                left = boundary.end()
+            elif boundary.start() >= occurrence.end():
+                right = boundary.start()
+                break
+        clause = span[left:right].strip()
+        if re.match(r'^I\b', clause, re.I):
+            if re.match(r'^I\s+(?:know|think|believe|heard|hear|read|was told|wonder|hope|suspect|said|reported|learned|understand)\b', clause, re.I):
+                return False
+            if re.search(r'\b(?:that|who|whose|whom)\b', clause[:clause.find(value)], re.I):
+                return False
+        elif re.match(r'^my\b', clause, re.I):
+            if re.match(r'^my\s+(?:(?:best|close|former|current|old)\s+)?(?:colleague|co-worker|coworker|friend|boss|manager|parent|mother|father|brother|sister|partner|spouse|child|son|daughter|teacher|doctor|team|company|employer|organization)\b', clause, re.I):
+                return False
+        elif re.match(r'^我(?:的)?', clause):
+            if re.match(r'^我(?:们|国|方|知道|听说|认为|觉得|得知|相信|听到|了解到|记得|想知道|希望)', clause):
+                return False
+            if re.match(r'^我(?:的)?(?:同事|朋友|老板|经理|父亲|母亲|爸爸|妈妈|哥哥|弟弟|姐姐|妹妹|丈夫|妻子|孩子|儿子|女儿|老师|医生|团队|公司|单位)', clause):
+                return False
+        else:
+            return False
+    return True
+
+
+def compact_repair_feedback(packet: Dict[str, Any], page: str) -> Dict[str, Any]:
+    """Bound advisory feedback; immutable page text is supplied separately."""
+    feedback = {'complete': packet.get('complete') is True, 'records': [], 'omitted_records': 0}
+    records = packet.get('records', [])
+    if not isinstance(records, list):
+        return feedback
+    budget = min(8192, max(2048, len(page) * 2))
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        compact = {key: record[key] for key in
+                   ('kind', 'subject', 'attribute', 'scope', 'modality', 'effective_date') if key in record}
+        value = record.get('value', '')
+        compact['value'] = value[:512] if isinstance(value, str) else ''
+        if isinstance(value, str) and len(value) > 512:
+            compact['value_truncated'] = True
+        compact['unit_ids'] = ['all']
+        proposed = {**feedback, 'records': feedback['records'] + [compact]}
+        if len(json.dumps(proposed, ensure_ascii=False)) > budget - 64:
+            feedback['omitted_records'] = len(records) - index
+            break
+        feedback['records'].append(compact)
+    return feedback
 
 
 def annotation_schema(content: str, whole_page: bool = False) -> Dict[str, Any]:
@@ -47,7 +108,7 @@ def source_pages(content: str) -> Tuple[List[str], bool]:
 def source_units(content: str) -> List[Dict[str, Any]]:
     # Keep semicolon-attached qualifications with their assertion, e.g.
     # "might happen; this is only a plan". Numeric rows are parsed separately.
-    boundaries = [0] + [match.end() for match in re.finditer(r'(?<=[.!?。！？])\s+|\n+', content)] + [len(content)]
+    boundaries = [0] + [match.end() for match in re.finditer(r'(?<=[.!?])\s+|(?<=[。！？])|\n+', content)] + [len(content)]
     units = []
     for start, end in zip(boundaries, boundaries[1:]):
         text = content[start:end].strip()
@@ -126,9 +187,6 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
         status_subject = re.fullmatch(r'(.+?)\s+(status|state)', str(item.get('subject', '')), re.I)
         if status_subject and re.fullmatch(r'(?:is|was|is now|was previously)', str(item.get('attribute', '')), re.I):
             item['subject'], item['attribute'] = status_subject[1], status_subject[2].casefold()
-        if (isinstance(span, str) and isinstance(item.get('subject'), str)
-                and item['subject'] not in span and re.match(r'^\s*I\s+\w', span)):
-            item['subject'] = '@speaker'
         # A categorical label cannot turn a nonnumeric attribute into a numeric
         # observation. Downgrade to a generic assertion; do not invent measures.
         if item.get('kind') == 'observation' and isinstance(value, str) and not re.search(r'\d', value):
@@ -140,7 +198,7 @@ def decode_annotations(payload: Any, content: str) -> Dict[str, Any]:
             point = span.index(value)
             left = 0
             right = len(span)
-            for boundary in re.finditer(r'(?<=[.!?。！？;])\s+|\n+', span):
+            for boundary in re.finditer(CLAUSE_BOUNDARY, span):
                 if boundary.end() <= point:
                     left = boundary.end()
                 elif boundary.start() >= point:

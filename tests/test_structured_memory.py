@@ -347,7 +347,11 @@ def test_clipped_quote_and_hypothesis_context_cannot_create_an_effective_state()
         rows, complete = grounded_records(packet(inner, "approved", mode="update"), text, "user", 100)
         assert complete and rows[0]["modality"] == "hypothetical"
         rows[0].update(source_id=1)
-        assert resolve_states(rows)["required"] == []
+        result = resolve_states(rows)
+        # A quotation does not establish a current value, but the original
+        # qualification is still needed as evidence of that uncertainty.
+        assert result["status"] == "unresolved"
+        assert result["required"] == [1] and result["blocked"] == []
 
 
 def test_before_cycle_is_reported_as_conflict_instead_of_asserted_order():

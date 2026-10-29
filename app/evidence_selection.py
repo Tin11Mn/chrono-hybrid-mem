@@ -122,6 +122,12 @@ def append_redacted_trace(path: str, trace: Dict[str, Any]) -> None:
               "rerank_pool_ids": trace.get("rerank_pool_ids", []),
               "coverage_candidate_ids": trace.get("coverage_candidate_ids", []),
               "selection": trace.get("evidence_selection", {})}
+    plan = trace.get("plan")
+    intent = plan.get("intent") if isinstance(plan, dict) else None
+    if isinstance(intent, str) and intent in {"fact", "multi_hop", "temporal", "governance", "personalization",
+                  "rule", "safety", "other", "summary", "learning"}:
+        record["query_intent"] = intent
+    record["empty_after_candidates"] = bool(record["rerank_pool_ids"] and not record["final_ids"])
     if "structured_memory" in trace:
         record["structured_memory"] = trace["structured_memory"]
     try:

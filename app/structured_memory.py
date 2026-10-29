@@ -14,6 +14,7 @@ import re
 import sqlite3
 import unicodedata
 from typing import Any, Dict, List, Optional, Sequence
+from .source_annotations import CLAUSE_BOUNDARY, first_person_value_witness, source_units
 
 
 KINDS = {"fact", "state", "rule", "observation", "event", "link", "privacy"}
@@ -74,7 +75,7 @@ def grounded_records(payload: Any, content: str, speaker: str,
             complete = False
             continue
         if subject == "@speaker":
-            if not re.search(r"\b(I|my|mine|me)\b|我", span, re.I):
+            if not first_person_value_witness(span, value):
                 complete = False
                 continue
             subject = speaker
@@ -91,7 +92,7 @@ def grounded_records(payload: Any, content: str, speaker: str,
         if span.count(value) == 1:
             left, right = 0, len(content)
             absolute_value = start + value_at
-            for boundary in re.finditer(r'(?<=[.!?。！？;])\s+|\n+', content):
+            for boundary in re.finditer(CLAUSE_BOUNDARY, content):
                 if boundary.end() <= absolute_value:
                     left = max(left, boundary.end())
                 elif boundary.start() >= absolute_value:
@@ -119,7 +120,7 @@ def grounded_records(payload: Any, content: str, speaker: str,
                     "correction": r"\b(correction|corrected|actually|instead)\b|更正|纠正|改为",
                     "retraction": r"\b(retract(?:s|ed)?|withdraw(?:s|n)?|no longer)\b|撤回|撤销|不再",
                     "exception": r"\b(except|unless|exception|exempt)\b|除非|例外|除外|豁免"}
-            if not re.search(cues[mode], span, re.I):
+            if not re.search(cues[mode], context, re.I):
                 if kind in {"fact", "state"} and mode in {"update", "correction"}:
                     # Weaken an unsupported transition to a witnessed assertion.
                     # This NEVER authorizes superseding an earlier value.
@@ -197,6 +198,10 @@ def resolve_states(records: Sequence[Dict[str, Any]], mode: str = "current",
             blocked.append(record["source_id"])
         else:
             eligible.append(record)
+    if not eligible:
+        # A reported/possible state is still evidence of uncertainty. It must
+        # not masquerade as an active value or make the raw source disappear.
+        return {"status": "unresolved", "required": list(dict.fromkeys(r["source_id"] for r in ordered)), "blocked": []}
     active = []
     for record in eligible:
         ts, modality = record["effective_ts"], record["modality"]
@@ -391,9 +396,10 @@ def route_memory_requests(catalog: Dict[str, Any], request: Any, query: str) -> 
         result.update(temporal_mode="as_of", as_of=explicit_asof[1])
     elif re.search(r"\b(history|changes|changed|previous|earlier|formerly)\b|历史|变化|变更|之前", query_text):
         result["temporal_mode"] = "history"
-    elif re.search(r"\b(order|sequence|earliest|latest)\b|顺序|排序", query_text):
+    elif re.search(r"\b(order|sequence|earliest)\b|顺序|排序", query_text):
         result["temporal_mode"] = "order"
-    elif re.search(r"\b(current|currently|now)\b|当前|现在|目前", query_text):
+    elif re.search(r"\b(current|currently|now)\b|当前|现在|目前", query_text) or re.search(
+            r'\b(latest|most recent)\s+(?:\w+\s+){0,2}(status|state)\b|最新.{0,4}状态', query_text):
         result["temporal_mode"] = "current"
     return result
 
@@ -514,12 +520,49 @@ class StructuredMemoryIndex:
             "SELECT record_json FROM structured_records WHERE user_id=? AND group_id=? ORDER BY id", (user_id, group))]
 
     @staticmethod
+    def slot_complete(connection: sqlite3.Connection, user_id: str, subject: str) -> bool:
+        """Ignore only simple, explicitly different subjects in partial sources.
+
+        Unknown sources, omitted assertions, pronouns and complex clauses keep
+        the slot conservative. This is not a general coreference resolver.
+        """
+        rows = connection.execute('''SELECT raw.id,raw.content,indexed.complete,record.record_json
+            FROM raw_messages AS raw LEFT JOIN structured_sources AS indexed
+              ON indexed.source_id=raw.id AND indexed.user_id=raw.user_id
+            LEFT JOIN structured_records AS record
+              ON record.source_id=raw.id AND record.user_id=raw.user_id
+            WHERE raw.user_id=? AND (indexed.complete IS NULL OR indexed.complete<>1)''', (user_id,)).fetchall()
+        sources = {}
+        for row in rows:
+            source = sources.setdefault(row['id'], {'content': row['content'], 'complete': row['complete'], 'records': []})
+            if row['record_json'] is not None:
+                source['records'].append(json.loads(row['record_json']))
+        for source in sources.values():
+            records = source['records']
+            text = normalize(source['content'])
+            mentioned = (bool(re.search(r'(?<!\w)' + re.escape(subject) + r'(?!\w)', text))
+                         if re.fullmatch(r'[a-z0-9_ .-]+', subject) else subject in text)
+            if source['complete'] is None or len(records) != 1 or mentioned:
+                return False
+            record = records[0]
+            if (record['subject'] == subject or not text.startswith(record['subject'] + ' ')
+                    or normalize(record['span']) != text or len(text) > 512
+                    or len(source_units(source['content'])) != 1):
+                return False
+            if re.search(r'\b(i|my|mine|me|we|our|he|she|his|her|they|their|it|its|this|that|'
+                         r'if|when|unless|after|before|because|although|however|and|but|or|said|says|reports|reported)\b'
+                         r'|我|他|她|它|该|这|那|如果|因为|[;:，,]', text, re.I):
+                return False
+        return True
+
+    @staticmethod
     def retrieve(connection: sqlite3.Connection, user_id: str, match_query: str,
                  query: str, plan: Dict[str, Any]) -> Dict[str, Any]:
         catalog = StructuredMemoryIndex.catalog(connection, user_id, query)
         by_id = {row["group_id"]: row for row in catalog["groups"]}
         request = route_memory_requests(catalog, plan.get("memory_requests", {}), query)
         required_groups, blocked, diagnostics, hints = [], [], {}, []
+        slot_coverage = {}
         coverage_limited = False
         mode = request.get("temporal_mode", "current")
         if mode not in {"current", "history", "as_of", "order"}:
@@ -546,8 +589,28 @@ class StructuredMemoryIndex:
                 records = StructuredMemoryIndex.records(connection, user_id, group)
                 if kind == "state":
                     detail = resolve_states(records, mode, cutoff)
-                    if catalog["complete"]:
-                        blocked.extend(detail["blocked"])
+                    subject = by_id[group]['subject']
+                    if subject not in slot_coverage:
+                        slot_coverage[subject] = catalog['complete'] or StructuredMemoryIndex.slot_complete(connection, user_id, subject)
+                    if slot_coverage[subject]:
+                        # A slot decision cannot delete another relation from
+                        # the same immutable original message.
+                        safe = []
+                        for source in detail['blocked']:
+                            other = connection.execute('''SELECT 1 FROM structured_records
+                                WHERE user_id=? AND source_id=? AND group_id<>? LIMIT 1''',
+                                (user_id, source, group)).fetchone()
+                            source_records = connection.execute('''SELECT record_json FROM structured_records
+                                WHERE user_id=? AND source_id=?''', (user_id, source)).fetchall()
+                            uncertain = any(json.loads(row[0])['modality'] in {'future', 'hypothetical'}
+                                            for row in source_records)
+                            # A plan/quotation may itself be what the question
+                            # asks about. It is not an active current value,
+                            # but only source selection may judge its relevance.
+                            if other is None and not uncertain:
+                                safe.append(source)
+                        detail['blocked'] = safe
+                        blocked.extend(safe)
                     else:
                         detail["status"] = "partial_index"
                         detail["required"] = list(dict.fromkeys(r["source_id"] for r in records))
@@ -614,9 +677,14 @@ class StructuredMemoryIndex:
                     and len(name)>=3 and normalize(name) not in ignored_names and normalize(name) in normalize(query)))[:8]
                 if names:
                     clauses=' OR '.join('lower(raw.content) LIKE ?' for _ in names)
-                    named = connection.execute('''SELECT DISTINCT raw.id,raw.content FROM raw_messages AS raw
-                        JOIN structured_records AS record ON record.source_id=raw.id AND record.user_id=raw.user_id
-                        WHERE raw.user_id=? AND record.kind<>'privacy' AND ('''+clauses+''')
+                    named = connection.execute('''SELECT raw.id,raw.content FROM raw_messages AS raw
+                        WHERE raw.user_id=? AND ('''+clauses+''')
+                        AND NOT EXISTS (SELECT 1 FROM structured_sources AS indexed
+                            WHERE indexed.source_id=raw.id AND indexed.user_id=raw.user_id AND indexed.complete=1
+                            AND EXISTS (SELECT 1 FROM structured_records AS private
+                                WHERE private.source_id=raw.id AND private.user_id=raw.user_id AND private.kind='privacy')
+                            AND NOT EXISTS (SELECT 1 FROM structured_records AS other
+                                WHERE other.source_id=raw.id AND other.user_id=raw.user_id AND other.kind<>'privacy'))
                         ORDER BY raw.id LIMIT 1001''', [user_id]+['%'+name+'%' for name in names]).fetchall()
                     if len(named)>1000:
                         coverage_limited=True
