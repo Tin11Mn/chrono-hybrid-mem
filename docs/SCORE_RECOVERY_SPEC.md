@@ -10,7 +10,7 @@ Required behavior:
 - Respect independent validated ordered_ids on complete and incomplete selection before top_k. It cannot add or remove selected members.
 - Ground first-person facts in the value's own direct self clause, not another sentence's I. Uncertain attribution remains partial with raw evidence preserved.
 - Split CJK sentence punctuation without a whitespace requirement. State cues and modality must come from the value clause, not another subject's correction/future plan.
-- Named whole-history recovery must include literal raw sources even if extraction produced no records. Do not force complete privacy-only sources into a summary.
+- Named whole-history recovery must include literal raw sources even if extraction produced no records. Do not force known privacy-only sources into a summary, including partial annotations. This does not certify unknown unextracted text as non-sensitive.
 - Repair feedback must stay within8192characters, omit copied span/derived conditions, explicitly label truncated advisory values; supply the original page separately.
 - Record allowlisted intent and nonempty-pool-to-empty diagnostics without queries, answers, or source text.
 

@@ -85,11 +85,12 @@ def test_an_active_value_does_not_make_future_plan_ineligible_as_source_evidence
     assert 'mem_2' not in result['blocked_ids']
 
 
-def test_summary_keeps_literal_named_raw_when_extraction_has_no_records():
+@pytest.mark.parametrize('privacy_complete', [True, False])
+def test_summary_keeps_literal_named_raw_when_extraction_has_no_records(privacy_complete):
     db=database()
     add(db,1,'Atlas design milestone.',packet('Atlas design milestone.','Atlas','design',kind='fact',attribute='milestone'))
     add(db,2,'Atlas trial milestone.',{'complete':False,'records':[]})
-    add(db,3,'Atlas password is secret.',packet('Atlas password is secret.','Atlas','secret',kind='privacy',attribute='password'))
+    add(db,3,'Atlas password is secret.',packet('Atlas password is secret.','Atlas','secret',kind='privacy',attribute='password',complete=privacy_complete))
     result=StructuredMemoryIndex.retrieve(db,'u','"Atlas"','Summarize all Atlas milestones',{'intent':'summary','entities':['Atlas']})
     required={sid for group in result['required_groups'] for sid in group}
     assert required=={'mem_1','mem_2'}

@@ -680,7 +680,7 @@ class StructuredMemoryIndex:
                     named = connection.execute('''SELECT raw.id,raw.content FROM raw_messages AS raw
                         WHERE raw.user_id=? AND ('''+clauses+''')
                         AND NOT EXISTS (SELECT 1 FROM structured_sources AS indexed
-                            WHERE indexed.source_id=raw.id AND indexed.user_id=raw.user_id AND indexed.complete=1
+                            WHERE indexed.source_id=raw.id AND indexed.user_id=raw.user_id
                             AND EXISTS (SELECT 1 FROM structured_records AS private
                                 WHERE private.source_id=raw.id AND private.user_id=raw.user_id AND private.kind='privacy')
                             AND NOT EXISTS (SELECT 1 FROM structured_records AS other
