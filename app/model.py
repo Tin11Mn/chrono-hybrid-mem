@@ -662,6 +662,10 @@ class MemoryModel:
             "For multi-step, rule, learning, governance, or summary questions, list at most four "
             "independently retrievable evidence needs. Include rule conditions/definitions/exceptions, "
             "all necessary causal links, conflicting states, or distinct observations as applicable. "
+            "Use the MINIMUM necessary premises; do not pad the list to four. EVERY need must be "
+            "necessary to answer the actual question. Do not add unasked causes, triggering user "
+            "actions, motivations, or background context as prerequisites. Chronology needs the "
+            "requested versions/events and ordering witnesses, not an explanation of their causes. "
             "Evidence needs describe retrievable PREMISES, never the final computed answer. A rule "
             "application needs policy/conditions/exceptions, not a past record of the requested new result; "
             if enhanced else

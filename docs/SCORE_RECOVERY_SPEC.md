@@ -13,6 +13,7 @@ Required behavior:
 - Named whole-history recovery must include literal raw sources even if extraction produced no records. Do not force known privacy-only sources into a summary, including partial annotations. This does not certify unknown unextracted text as non-sensitive.
 - Repair feedback must stay within8192characters, omit copied span/derived conditions, explicitly label truncated advisory values; supply the original page separately.
 - Record allowlisted intent and nonempty-pool-to-empty diagnostics without queries, answers, or source text.
+- Plan only premises needed for the actual question. Do not pad four needs or require unasked triggering actions for a chronological listing. Missing evidence must still fail certification; never drop a genuine prerequisite to force success.
 
 Verification is predeclared: semantic regressions must fail before fixes; independent12question/17message end-to-end contract is frozen at b21ed972ed67715fef74c05aac7b258f6056c2e2fb8c75e956b79763c10f2032. Compare original/current/candidate actual Add/Search and a separate identical answer call. Do not change expected answers or drop failed cases. Report exact-string false negatives and stochastic model mistakes as limitations. Preserve all runs, including baseline lock failures. Synthetic scores do not estimate leaderboard accuracy. Only deploy after functional gates and document actual quality outcome.
 
