@@ -47,6 +47,11 @@ def test_possession_or_reporting_does_not_make_another_person_the_speaker(text, 
     ('I work in Bergen.', 'Bergen'),
     ('I prefer quiet rooms and decaf tea.', 'quiet rooms'),
     ('我的办公室在青岛。', '青岛'),
+    ('Today, I work in Bergen.', 'Bergen'),
+    ('On 2024-04-01, my office moved to Bergen.', 'Bergen'),
+    ('Correction: my office is now in Bergen.', 'Bergen'),
+    ('Actually, I now prefer decaf.', 'decaf'),
+    ('更正：我的办公室现在在青岛。', '青岛'),
 ])
 def test_direct_first_person_claim_remains_indexable(text, value):
     rows, complete = grounded_records(

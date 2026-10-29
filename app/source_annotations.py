@@ -25,6 +25,18 @@ def first_person_value_witness(span: str, value: str) -> bool:
                 right = boundary.start()
                 break
         clause = span[left:right].strip()
+        # Recognize literal introductory cues without borrowing a pronoun
+        # from another sentence or accepting arbitrary reported speech.
+        for _ in range(2):
+            introductory = re.match(
+                r'^(?:(?:correction)\s*:\s*|actually\s*,\s*|'
+                r'(?:today|yesterday|currently|now|previously|recently)\s*,?\s+|'
+                r'on\s+\d{4}-\d{2}-\d{2}\s*,?\s+|'
+                r'(?:更正|纠正)[：:]\s*|(?:目前|今天|昨天|现在|此前|最近)[，,]?\s*(?=我))',
+                clause, re.I)
+            if not introductory:
+                break
+            clause = clause[introductory.end():].lstrip()
         if re.match(r'^I\b', clause, re.I):
             if re.match(r'^I\s+(?:know|think|believe|heard|hear|read|was told|wonder|hope|suspect|said|reported|learned|understand)\b', clause, re.I):
                 return False
