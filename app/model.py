@@ -656,6 +656,8 @@ class MemoryModel:
         intent_instruction = (
             "safety, summary, learning, or other. Use summary for whole-history synthesis and "
             "learning for applying patterns across observations or worked examples. "
+            "For learned procedures retrieve both successful demonstrations and explicit feedback "
+            "or counterexamples; for preference changes retrieve the revocation and replacement. "
             if enhanced else "safety, or other. "
         )
         needs_instruction = (
@@ -781,6 +783,11 @@ class MemoryModel:
             "with current_id and superseded_ids. For history/as-of/change/comparison queries, "
             "preserve all relevant historical states in requested order instead of excluding them. "
             "Unresolved conflicts must retain both original sources; do not declare supersession. "
+            "A partial index requires retaining older evidence, not treating older preferences as "
+            "current: rank explicit scoped revocations and effective replacements first. For rules, "
+            "include the complete conditions and exceptions, and distinguish an authoritative "
+            "policy from a failed demonstration. For learning, retain corrections to earlier "
+            "examples and contrasting observations, not just the most similar example. "
             "Always provide ordered_ids, a useful leading ranking of supplied original sources, "
             "EVEN when complete:false because some evidence needs cannot be satisfied. Rank the "
             "sources that directly support the requested relation, speaker and temporal constraints "

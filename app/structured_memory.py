@@ -132,7 +132,7 @@ def grounded_records(payload: Any, content: str, speaker: str,
         if item.get("effective_date") is not None:
             date = item["effective_date"]
             try:
-                if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or date not in span:
+                if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date) or date not in context:
                     raise ValueError("unwitnessed date")
                 effective = int(datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
             except ValueError:
@@ -396,7 +396,7 @@ def route_memory_requests(catalog: Dict[str, Any], request: Any, query: str) -> 
         result.update(temporal_mode="as_of", as_of=explicit_asof[1])
     elif re.search(r"\b(history|changes|changed|previous|earlier|formerly)\b|历史|变化|变更|之前", query_text):
         result["temporal_mode"] = "history"
-    elif re.search(r"\b(order|sequence|earliest)\b|顺序|排序", query_text):
+    elif re.search(r"\b(order|sequence|earliest|chronological|before|after)\b|顺序|排序|最先|先于|早于|晚于|之后", query_text):
         result["temporal_mode"] = "order"
     elif re.search(r"\b(current|currently|now)\b|当前|现在|目前", query_text) or re.search(
             r'\b(latest|most recent)\s+(?:\w+\s+){0,2}(status|state)\b|最新.{0,4}状态', query_text):
@@ -565,6 +565,11 @@ class StructuredMemoryIndex:
         slot_coverage = {}
         coverage_limited = False
         mode = request.get("temporal_mode", "current")
+        # Synthesis needs prior stages unless the question explicitly restricts
+        # its scope. A planner's default current mode is not such a restriction.
+        if plan.get("intent") == "summary" and mode == "current" and not re.search(
+                r'\b(current|currently|now|latest|today)\b|当前|目前|现在|最新|今天', query, re.I):
+            mode = "history"
         if mode not in {"current", "history", "as_of", "order"}:
             mode = "history"  # Unknown temporal intent cannot justify dropping old states.
         cutoff = None
@@ -613,7 +618,11 @@ class StructuredMemoryIndex:
                         blocked.extend(safe)
                     else:
                         detail["status"] = "partial_index"
-                        detail["required"] = list(dict.fromkeys(r["source_id"] for r in records))
+                        # Incomplete coverage forbids deleting older evidence,
+                        # but must not undo the useful ranking of known versions.
+                        # Preserve the current candidate first, then all originals.
+                        detail["required"] = list(dict.fromkeys(
+                            detail["required"] + [r["source_id"] for r in records]))
                 elif kind == "rule":
                     detail = evaluate_rules(records, query)
                     if records and all(not r['conditions'] for r in records):
